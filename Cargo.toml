@@ -1,0 +1,63 @@
+[package]
+name = "clean-server"
+version = "1.0.0"
+edition = "2021"
+authors = ["Ivan Pasco <ivan@cleanframework.com>"]
+license = "MIT OR Apache-2.0"
+description = "HTTP Server Runtime for Clean Language - executes compiled WASM applications"
+repository = "https://github.com/Ivan-Pasco/clean-server"
+keywords = ["clean-language", "webassembly", "wasm", "server", "runtime"]
+categories = ["web-programming::http-server", "wasm"]
+
+[[bin]]
+name = "clean-server"
+path = "src/main.rs"
+
+[lib]
+name = "clean_server"
+path = "src/lib.rs"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# WebAssembly runtime
+wasmtime = "26.0"
+
+# HTTP server
+axum = { version = "0.7", features = ["json", "multipart"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-full"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1.5"
+http = "1.0"
+http-body-util = "0.1"
+matchit = "0.8"
+parking_lot = "0.12"
+dashmap = "6.0"
+url = "2.5"
+
+# Local dependencies
+host-bridge = { path = "./host-bridge" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
