@@ -207,22 +207,20 @@ impl WasmInstance {
         // Try direct function table call
         // WASM function tables allow calling functions by index
         if let Some(table) = self.instance.get_table(&mut *store, "__indirect_function_table") {
-            if let Some(func_ref) = table.get(&mut *store, handler_index) {
-                if let Some(func) = func_ref.funcref() {
-                    if let Some(typed_func) = func {
-                        // Try to call as a function returning i32
-                        let result_ptr = typed_func
-                            .typed::<(), i32>(&*store)
-                            .map_err(|e| RuntimeError::wasm(format!("Invalid handler signature: {}", e)))?
-                            .call(&mut *store, ())
-                            .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
+            if let Some(func_ref) = table.get(&mut *store, handler_index as u64) {
+                if let Some(func) = func_ref.unwrap_func() {
+                    // Try to call as a function returning i32
+                    let result_ptr = func
+                        .typed::<(), i32>(&*store)
+                        .map_err(|e| RuntimeError::wasm(format!("Invalid handler signature: {}", e)))?
+                        .call(&mut *store, ())
+                        .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
 
-                        let result =
-                            crate::memory::read_string_from_memory(&*store, &memory, result_ptr as u32)?;
+                    let result =
+                        crate::memory::read_string_from_memory(&*store, &memory, result_ptr as u32)?;
 
-                        store.data_mut().clear_request();
-                        return Ok(result);
-                    }
+                    store.data_mut().clear_request();
+                    return Ok(result);
                 }
             }
         }

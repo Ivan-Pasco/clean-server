@@ -65,9 +65,6 @@ impl HttpBridge {
 			.pool_max_idle_per_host(10)
 			.pool_idle_timeout(Duration::from_secs(90))
 			.tcp_keepalive(Duration::from_secs(60))
-			.use_rustls_tls()
-			.gzip(true)
-			.brotli(true)
 			.redirect(Policy::none()) // We handle redirects manually
 			.build()
 			.expect("Failed to build HTTP client");
