@@ -30,7 +30,7 @@ jobs:
             asset_name: clean-server-linux-arm64
 
           # macOS x64 (Intel)
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             artifact_name: clean-server
             asset_name: clean-server-darwin-x64
