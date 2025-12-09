@@ -227,6 +227,52 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define string_concat: {}", e)))?;
 
+    // string.concat - Alias for string_concat (matches v0.16.1 compiler naming)
+    linker
+        .func_wrap(
+            "env",
+            "string.concat",
+            |mut caller: Caller<'_, WasmState>,
+             str1_ptr: i32,
+             str1_len: i32,
+             str2_ptr: i32,
+             str2_len: i32|
+             -> i32 {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return 0,
+                };
+
+                let data = memory.data(&caller);
+
+                // Read first string
+                let s1_start = str1_ptr as usize;
+                let s1_end = s1_start + str1_len as usize;
+                let s1 = if s1_end <= data.len() {
+                    data[s1_start..s1_end].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                // Read second string
+                let s2_start = str2_ptr as usize;
+                let s2_end = s2_start + str2_len as usize;
+                let s2 = if s2_end <= data.len() {
+                    data[s2_start..s2_end].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                // Concatenate
+                let mut result = s1;
+                result.extend(s2);
+
+                // Write result
+                write_bytes_to_caller(&mut caller, &result)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define string.concat: {}", e)))?;
+
     // string.split
     linker
         .func_wrap(
