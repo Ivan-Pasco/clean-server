@@ -1,14 +1,23 @@
 //! Host Bridge WASM Imports
 //!
-//! Provides all the host functions that WASM modules expect, including:
-//! - I/O functions (print, input)
+//! Provides host functions that WASM modules expect:
+//!
+//! ## Bridge Functions (platform services)
+//! - I/O functions (print, input) - bridge:io
 //! - Memory management (mem_alloc, mem_retain, mem_release)
-//! - Type conversions (int_to_string, float_to_string, etc.)
-//! - HTTP server functions (_http_listen, _http_route)
-//! - HTTP client functions (http_get, http_post, etc.)
-//! - File I/O (file_read, file_write, etc.)
-//! - Database functions (_db_query, _db_execute)
-//! - Authentication functions (_auth_verify, _auth_create_session)
+//! - HTTP server functions (_http_listen, _http_route) - bridge:server
+//! - HTTP client functions (http_get, http_post, etc.) - bridge:http
+//! - File I/O (file_read, file_write, etc.) - bridge:fs
+//! - Database functions (_db_query, _db_execute) - bridge:db
+//! - Authentication functions (_auth_verify, _auth_create_session) - bridge:auth
+//! - Math functions (sin, cos, tan, pow, ln, exp, etc.) - transcendental operations
+//!
+//! ## Stdlib Functions (still imported, may become native)
+//! - float_to_string, string_to_float - float conversions
+//! - string.concat, string.split - string operations
+//!
+//! ## Now Native WASM (v0.17.1+)
+//! - int_to_string, bool_to_string, string_to_int
 
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::memory::{read_string_from_caller, STRING_LENGTH_PREFIX_SIZE};
@@ -112,22 +121,11 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
         .map_err(|e| RuntimeError::wasm(format!("Failed to define input_range: {}", e)))?;
 
     // =========================================
-    // Type Conversion Functions
+    // STDLIB: Type Conversion Functions (still imported by compiler)
+    // Note: int_to_string, bool_to_string, string_to_int are now native WASM (v0.17.1+)
     // =========================================
 
-    // int_to_string
-    linker
-        .func_wrap(
-            "env",
-            "int_to_string",
-            |mut caller: Caller<'_, WasmState>, value: i32| -> i32 {
-                let s = value.to_string();
-                write_string_to_caller(&mut caller, &s)
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define int_to_string: {}", e)))?;
-
-    // float_to_string
+    // float_to_string - still imported by compiler
     linker
         .func_wrap(
             "env",
@@ -139,34 +137,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define float_to_string: {}", e)))?;
 
-    // bool_to_string
-    linker
-        .func_wrap(
-            "env",
-            "bool_to_string",
-            |mut caller: Caller<'_, WasmState>, value: i32| -> i32 {
-                let s = if value != 0 { "true" } else { "false" };
-                write_string_to_caller(&mut caller, s)
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define bool_to_string: {}", e)))?;
-
-    // string_to_int
-    linker
-        .func_wrap(
-            "env",
-            "string_to_int",
-            |mut caller: Caller<'_, WasmState>, str_ptr: i32| -> i32 {
-                if let Ok(s) = read_string_from_caller(&mut caller, str_ptr as u32) {
-                    s.parse::<i32>().unwrap_or(0)
-                } else {
-                    0
-                }
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define string_to_int: {}", e)))?;
-
-    // string_to_float
+    // string_to_float - still imported by compiler
     linker
         .func_wrap(
             "env",
@@ -180,6 +151,10 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define string_to_float: {}", e)))?;
+
+    // =========================================
+    // STDLIB: String Operations (temporary - until compiler enables native stdlib)
+    // =========================================
 
     // string_concat - Concatenate two strings
     linker
@@ -227,7 +202,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define string_concat: {}", e)))?;
 
-    // string.concat - Alias for string_concat (matches v0.16.1 compiler naming)
+    // string.concat - Alias for string_concat (matches compiler import naming)
     linker
         .func_wrap(
             "env",
@@ -289,6 +264,118 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define string.split: {}", e)))?;
+
+    // =========================================
+    // MATH FUNCTIONS (imported by compiler for transcendental operations)
+    // =========================================
+
+    // math_pow - power function (x^y)
+    linker
+        .func_wrap("env", "math_pow", |_: Caller<'_, WasmState>, base: f64, exp: f64| -> f64 {
+            base.powf(exp)
+        })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_pow: {}", e)))?;
+
+    // Trigonometric functions
+    linker
+        .func_wrap("env", "math_sin", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.sin() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_sin: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_cos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cos() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_cos: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.cos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cos() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.cos: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_tan", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.tan() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_tan: {}", e)))?;
+
+    // Inverse trigonometric functions
+    linker
+        .func_wrap("env", "math_asin", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.asin() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_asin: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_acos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.acos() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_acos: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.acos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.acos() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.acos: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_atan", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.atan() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_atan: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_atan2", |_: Caller<'_, WasmState>, y: f64, x: f64| -> f64 { y.atan2(x) })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_atan2: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.atan2", |_: Caller<'_, WasmState>, y: f64, x: f64| -> f64 { y.atan2(x) })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.atan2: {}", e)))?;
+
+    // Hyperbolic functions
+    linker
+        .func_wrap("env", "math_sinh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.sinh() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_sinh: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.sinh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.sinh() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.sinh: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_cosh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cosh() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_cosh: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.cosh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cosh() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.cosh: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_tanh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.tanh() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_tanh: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.tanh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.tanh() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.tanh: {}", e)))?;
+
+    // Logarithmic functions
+    linker
+        .func_wrap("env", "math_ln", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.ln() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_ln: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.ln", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.ln() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.ln: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_log10", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.log10() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_log10: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_log2", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.log2() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_log2: {}", e)))?;
+
+    // Exponential functions
+    linker
+        .func_wrap("env", "math_exp", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_exp: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.exp", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.exp: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math_exp2", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp2() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_exp2: {}", e)))?;
+
+    linker
+        .func_wrap("env", "math.exp2", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp2() })
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.exp2: {}", e)))?;
 
     // =========================================
     // MEMORY_RUNTIME NAMESPACE
