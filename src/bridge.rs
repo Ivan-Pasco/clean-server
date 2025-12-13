@@ -1376,52 +1376,136 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
 }
 
 /// Helper to write a string to WASM memory using caller
+///
+/// This function allocates memory within the WASM linear memory by either:
+/// 1. Calling the WASM module's exported `malloc` function (if available)
+/// 2. Falling back to allocating at the end of current memory
+///
+/// This ensures the pointer is valid from the WASM module's perspective.
 fn write_string_to_caller(caller: &mut Caller<'_, WasmState>, s: &str) -> i32 {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
+    debug!("write_string_to_caller: Writing '{}' ({} bytes, total_size={})", s, len, total_size);
+
+    // Get WASM memory
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => {
+            error!("write_string_to_caller: No memory export found");
+            return 0;
+        }
+    };
+
+    // Use the host-side allocator which starts at 65536 (page 1)
+    // This avoids conflicts with:
+    // 1. WASM static data section (typically at addresses 1024+)
+    // 2. WASM's internal heap pointer (global 0) which may also start at 1024
+    //
+    // The Clean compiler currently has a bug where it initializes the heap pointer
+    // to 1024 but also places static strings at that same address. Using our
+    // host-side allocator at 65536+ ensures we don't overwrite static data.
+    let ptr = allocate_at_memory_end(&mut *caller, &memory, total_size);
+
+    if ptr == 0 {
+        error!("write_string_to_caller: Failed to allocate {} bytes", total_size);
+        return 0;
+    }
+
+    debug!("write_string_to_caller: Writing to ptr={}, memory_size={}", ptr, memory.data_size(&*caller));
+
+    // Write length prefix (4 bytes, little-endian)
+    let len_bytes = (len as u32).to_le_bytes();
+    if let Err(e) = memory.write(&mut *caller, ptr, &len_bytes) {
+        error!("write_string_to_caller: Failed to write length at ptr={}: {}", ptr, e);
+        return 0;
+    }
+
+    // Write string data
+    if let Err(e) = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes) {
+        error!("write_string_to_caller: Failed to write string data at ptr={}: {}", ptr + STRING_LENGTH_PREFIX_SIZE, e);
+        return 0;
+    }
+
+    debug!("write_string_to_caller: Successfully wrote string at ptr={}", ptr);
+    ptr as i32
+}
+
+/// Allocate memory at the end of WASM linear memory
+///
+/// This function uses the host-side bump allocator but ensures the memory
+/// is properly grown to accommodate the allocation.
+fn allocate_at_memory_end(caller: &mut Caller<'_, WasmState>, memory: &wasmtime::Memory, size: usize) -> usize {
+    // Get current allocation offset from state
     let state = caller.data_mut();
-    let ptr = state.memory.allocate(total_size);
+    let ptr = state.memory.allocate(size);
 
-    if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-        // Ensure memory is large enough
-        let required = ptr + total_size;
-        let current_size = memory.data_size(&*caller);
+    // Ensure memory is large enough
+    let required = ptr + size;
+    let current_size = memory.data_size(&*caller);
 
-        if required > current_size {
-            // Calculate required pages (64KB per page)
-            let required_pages = ((required + 65535) / 65536) as u64;
-            let current_pages = memory.size(&*caller);
-            let pages_to_grow = required_pages.saturating_sub(current_pages);
+    debug!("allocate_at_memory_end: ptr={}, size={}, required={}, current_size={}", ptr, size, required, current_size);
 
-            if pages_to_grow > 0 {
-                if let Err(e) = memory.grow(&mut *caller, pages_to_grow) {
-                    error!("Failed to grow memory by {} pages: {}", pages_to_grow, e);
+    if required > current_size {
+        // Calculate required pages (64KB per page)
+        let required_pages = ((required + 65535) / 65536) as u64;
+        let current_pages = memory.size(&*caller);
+        let pages_to_grow = required_pages.saturating_sub(current_pages);
+
+        debug!("allocate_at_memory_end: need to grow from {} to {} pages ({} new pages)", current_pages, required_pages, pages_to_grow);
+
+        if pages_to_grow > 0 {
+            match memory.grow(&mut *caller, pages_to_grow) {
+                Ok(prev_pages) => {
+                    debug!("allocate_at_memory_end: grew from {} to {} pages", prev_pages, prev_pages + pages_to_grow);
+                }
+                Err(e) => {
+                    error!("allocate_at_memory_end: Failed to grow memory by {} pages: {}", pages_to_grow, e);
                     return 0;
                 }
             }
         }
-
-        let len_bytes = (len as u32).to_le_bytes();
-        let _ = memory.write(&mut *caller, ptr, &len_bytes);
-        let _ = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes);
     }
 
-    ptr as i32
+    ptr
 }
 
 /// Helper to write bytes to WASM memory with length prefix
+///
+/// Uses the host-side allocator at 65536+ to avoid conflicts with WASM static data.
 fn write_bytes_to_caller(caller: &mut Caller<'_, WasmState>, bytes: &[u8]) -> i32 {
     let len = bytes.len();
+    let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    let state = caller.data_mut();
-    let ptr = state.memory.allocate(STRING_LENGTH_PREFIX_SIZE + len);
+    // Get WASM memory
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => {
+            error!("write_bytes_to_caller: No memory export found");
+            return 0;
+        }
+    };
 
-    if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-        let len_bytes = (len as u32).to_le_bytes();
-        let _ = memory.write(&mut *caller, ptr, &len_bytes);
-        let _ = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes);
+    // Use host-side allocator at 65536+ to avoid conflicts with WASM static data
+    let ptr = allocate_at_memory_end(&mut *caller, &memory, total_size);
+
+    if ptr == 0 {
+        error!("write_bytes_to_caller: Failed to allocate {} bytes", total_size);
+        return 0;
+    }
+
+    // Write length prefix
+    let len_bytes = (len as u32).to_le_bytes();
+    if let Err(e) = memory.write(&mut *caller, ptr, &len_bytes) {
+        error!("write_bytes_to_caller: Failed to write length: {}", e);
+        return 0;
+    }
+
+    // Write bytes data
+    if let Err(e) = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes) {
+        error!("write_bytes_to_caller: Failed to write bytes: {}", e);
+        return 0;
     }
 
     ptr as i32

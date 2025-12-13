@@ -55,6 +55,8 @@ host-bridge = { path = "./host-bridge" }
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
+reqwest = { version = "0.12", features = ["json"] }
+portpicker = "0.1"
 
 [profile.release]
 opt-level = 3
