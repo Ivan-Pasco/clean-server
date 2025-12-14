@@ -202,17 +202,13 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define string_concat: {}", e)))?;
 
-    // string.concat - Alias for string_concat (matches compiler import naming)
+    // string.concat - v0.17.2 signature: (str1_ptr, str2_ptr) -> i32
+    // Both strings are length-prefixed: [4-byte little-endian length][UTF-8 bytes]
     linker
         .func_wrap(
             "env",
             "string.concat",
-            |mut caller: Caller<'_, WasmState>,
-             str1_ptr: i32,
-             str1_len: i32,
-             str2_ptr: i32,
-             str2_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, WasmState>, str1_ptr: i32, str2_ptr: i32| -> i32 {
                 let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                     Some(m) => m,
                     None => return 0,
@@ -220,29 +216,17 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
 
                 let data = memory.data(&caller);
 
-                // Read first string
-                let s1_start = str1_ptr as usize;
-                let s1_end = s1_start + str1_len as usize;
-                let s1 = if s1_end <= data.len() {
-                    data[s1_start..s1_end].to_vec()
-                } else {
-                    Vec::new()
-                };
+                // Read first string (length-prefixed)
+                let s1 = read_length_prefixed_string(data, str1_ptr as usize);
 
-                // Read second string
-                let s2_start = str2_ptr as usize;
-                let s2_end = s2_start + str2_len as usize;
-                let s2 = if s2_end <= data.len() {
-                    data[s2_start..s2_end].to_vec()
-                } else {
-                    Vec::new()
-                };
+                // Read second string (length-prefixed)
+                let s2 = read_length_prefixed_string(data, str2_ptr as usize);
 
                 // Concatenate
                 let mut result = s1;
                 result.extend(s2);
 
-                // Write result
+                // Write result with length prefix
                 write_bytes_to_caller(&mut caller, &result)
             },
         )
@@ -1532,5 +1516,28 @@ fn read_raw_string(data: &[u8], ptr: i32, len: i32) -> String {
             .to_string()
     } else {
         String::new()
+    }
+}
+
+/// Read a length-prefixed string from WASM memory
+/// Format: [4-byte little-endian length][UTF-8 bytes]
+fn read_length_prefixed_string(data: &[u8], ptr: usize) -> Vec<u8> {
+    // Need at least 4 bytes for length prefix
+    if ptr + STRING_LENGTH_PREFIX_SIZE > data.len() {
+        return Vec::new();
+    }
+
+    // Read length (4 bytes, little-endian)
+    let len_bytes: [u8; 4] = data[ptr..ptr + 4].try_into().unwrap_or([0; 4]);
+    let len = u32::from_le_bytes(len_bytes) as usize;
+
+    // Read string bytes
+    let str_start = ptr + STRING_LENGTH_PREFIX_SIZE;
+    let str_end = str_start + len;
+
+    if str_end <= data.len() {
+        data[str_start..str_end].to_vec()
+    } else {
+        Vec::new()
     }
 }

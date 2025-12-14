@@ -55,20 +55,48 @@ impl TestServer {
         // Find the clean-server binary
         let server_path = find_clean_server_binary()?;
 
-        // Start server
+        // Verify WASM file was created
+        if !wasm_path.exists() {
+            return Err(format!("WASM file not found at {:?}", wasm_path));
+        }
+
+        // Create a log file in the temp directory
+        let log_path = temp_dir.path().join("server.log");
+
+        // Start server with output redirected to log file
         let process = Command::new(&server_path)
             .args([
                 wasm_path.to_str().unwrap(),
                 "--port",
                 &port.to_string(),
             ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(std::fs::File::create(&log_path).unwrap())
+            .stderr(std::fs::File::create(temp_dir.path().join("server.err")).unwrap())
             .spawn()
             .map_err(|e| format!("Failed to start server: {}", e))?;
 
         // Wait for server to be ready (allow extra time for WASM module loading)
-        sleep(Duration::from_millis(2500)).await;
+        sleep(Duration::from_millis(3000)).await;
+
+        // Check if server is still running
+        // Try to connect to verify it's ready
+        let client = reqwest::Client::new();
+        let check_url = format!("http://127.0.0.1:{}/", port);
+        for attempt in 0..5 {
+            if client.get(&check_url).send().await.is_ok() {
+                break;
+            }
+            if attempt == 4 {
+                // Read server log on failure
+                let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let err_content = std::fs::read_to_string(temp_dir.path().join("server.err")).unwrap_or_default();
+                return Err(format!(
+                    "Server failed to start on port {}.\nLog: {}\nErr: {}",
+                    port, log_content, err_content
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
 
         Ok(Self {
             process,
