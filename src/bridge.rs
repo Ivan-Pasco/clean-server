@@ -70,14 +70,14 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define printl: {}", e)))?;
 
-    // input - Read user input (returns empty in server context)
+    // input - Read user input (returns empty string in server context)
     linker
         .func_wrap(
             "env",
             "input",
             |mut caller: Caller<'_, WasmState>, _prompt_ptr: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(8) as i32
+                // Return properly initialized empty string
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define input: {}", e)))?;
@@ -238,11 +238,21 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "string.split",
             |mut caller: Caller<'_, WasmState>, _str_ptr: i32, _delim_ptr: i32| -> i32 {
-                // Return empty array
-                let state = caller.data_mut();
-                let ptr = state.memory.allocate(4);
-                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    let _ = memory.write(&mut caller, ptr, &[0u8; 4]);
+                // Return empty array - properly allocated with memory growth
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return 0,
+                };
+
+                // Allocate 4 bytes for empty array (length = 0)
+                let ptr = allocate_at_memory_end(&mut caller, &memory, 4);
+                if ptr == 0 {
+                    return 0;
+                }
+
+                // Write zero length
+                if let Err(_) = memory.write(&mut caller, ptr, &[0u8; 4]) {
+                    return 0;
                 }
                 ptr as i32
             },
@@ -365,14 +375,24 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     // MEMORY_RUNTIME NAMESPACE
     // =========================================
 
-    // mem_alloc
+    // mem_alloc - Allocate memory in WASM linear memory
+    // This ensures memory is grown if needed before returning the pointer
     linker
         .func_wrap(
             "memory_runtime",
             "mem_alloc",
             |mut caller: Caller<'_, WasmState>, size: i32, _align: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(size as usize) as i32
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => {
+                        error!("mem_alloc: No memory export found");
+                        return 0;
+                    }
+                };
+
+                // Allocate using our bump allocator and ensure memory is grown
+                let ptr = allocate_at_memory_end(&mut caller, &memory, size as usize);
+                ptr as i32
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define mem_alloc: {}", e)))?;
@@ -708,9 +728,8 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "http_get",
             |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                // Return empty response placeholder
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                // Return properly initialized empty response
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_get: {}", e)))?;
@@ -726,8 +745,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _body_ptr: i32,
              _body_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post: {}", e)))?;
@@ -743,8 +761,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _body_ptr: i32,
              _body_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_put: {}", e)))?;
@@ -760,8 +777,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _body_ptr: i32,
              _body_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_patch: {}", e)))?;
@@ -772,8 +788,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "http_delete",
             |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_delete: {}", e)))?;
@@ -784,8 +799,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "http_head",
             |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_head: {}", e)))?;
@@ -796,8 +810,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "http_options",
             |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_options: {}", e)))?;
@@ -813,8 +826,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _headers_ptr: i32,
              _headers_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_get_with_headers: {}", e)))?;
@@ -832,8 +844,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _headers_ptr: i32,
              _headers_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post_with_headers: {}", e)))?;
@@ -849,8 +860,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _json_ptr: i32,
              _json_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post_json: {}", e)))?;
@@ -866,8 +876,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _json_ptr: i32,
              _json_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_put_json: {}", e)))?;
@@ -883,8 +892,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _json_ptr: i32,
              _json_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_patch_json: {}", e)))?;
@@ -900,8 +908,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _form_ptr: i32,
              _form_len: i32|
              -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post_form: {}", e)))?;
@@ -984,8 +991,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "http_build_query",
             |mut caller: Caller<'_, WasmState>, _params_ptr: i32, _params_len: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define http_build_query: {}", e)))?;
@@ -1016,8 +1022,8 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "file_read",
             |mut caller: Caller<'_, WasmState>, _path_ptr: i32, _path_len: i32, _buf_ptr: i32| -> i32 {
-                let state = caller.data_mut();
-                state.memory.allocate(4) as i32
+                // Return empty string for now (file I/O not implemented)
+                write_string_to_caller(&mut caller, "")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define file_read: {}", e)))?;
@@ -1071,9 +1077,8 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              _params_ptr: i32,
              _params_len: i32|
              -> i32 {
-                // Return empty result set
-                let state = caller.data_mut();
-                write_string_to_caller_state(state, "[]")
+                // Return empty result set as properly initialized string
+                write_string_to_caller(&mut caller, "[]")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _db_query: {}", e)))?;
@@ -1115,8 +1120,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "_auth_create_session",
             |mut caller: Caller<'_, WasmState>, _user_id: i32| -> i32 {
-                let state = caller.data_mut();
-                write_string_to_caller_state(state, "session_id")
+                write_string_to_caller(&mut caller, "session_id")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_create_session: {}", e)))?;
@@ -1138,8 +1142,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "_auth_hash_password",
             |mut caller: Caller<'_, WasmState>, _password_ptr: i32, _password_len: i32| -> i32 {
-                let state = caller.data_mut();
-                write_string_to_caller_state(state, "$argon2id$hash")
+                write_string_to_caller(&mut caller, "$argon2id$hash")
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_hash_password: {}", e)))?;
@@ -1495,15 +1498,10 @@ fn write_bytes_to_caller(caller: &mut Caller<'_, WasmState>, bytes: &[u8]) -> i3
     ptr as i32
 }
 
-/// Helper to write a string using only state (for functions that don't have caller access to memory)
-fn write_string_to_caller_state(state: &mut WasmState, s: &str) -> i32 {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let ptr = state.memory.allocate(STRING_LENGTH_PREFIX_SIZE + len);
-    // Note: This won't actually write to memory - it just allocates
-    // The actual write would need to happen with memory access
-    ptr as i32
-}
+// NOTE: write_string_to_caller_state was removed because it was broken.
+// It allocated memory but never wrote data. All functions that need to
+// return strings should use write_string_to_caller() which properly
+// allocates AND writes to WASM memory.
 
 /// Read a raw string from WASM memory (no length prefix)
 fn read_raw_string(data: &[u8], ptr: i32, len: i32) -> String {
