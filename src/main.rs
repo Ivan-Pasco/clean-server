@@ -54,6 +54,15 @@ struct Args {
     /// Request body size limit in MB
     #[arg(long, default_value = "10")]
     body_limit: usize,
+
+    /// Database URL (e.g., sqlite://app.db, postgres://user:pass@host/db)
+    /// Can also be set via DATABASE_URL environment variable
+    #[arg(long, env = "DATABASE_URL")]
+    database: Option<String>,
+
+    /// Database connection pool size
+    #[arg(long, default_value = "10")]
+    db_pool_size: u32,
 }
 
 #[tokio::main]
@@ -95,20 +104,30 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Create server config
-    let config = ServerConfig {
-        host: args.host,
-        port: args.port,
-        cors_enabled: !args.no_cors,
-        cors_origins: vec![],
-        body_limit: args.body_limit * 1024 * 1024,
-    };
+    // Create server config using builder pattern
+    let mut config = ServerConfig::default()
+        .with_host(args.host)
+        .with_port(args.port)
+        .with_database_pool_size(args.db_pool_size);
+
+    config.cors_enabled = !args.no_cors;
+    config.body_limit = args.body_limit * 1024 * 1024;
+
+    // Set database URL from CLI arg (overrides env var if provided)
+    if args.database.is_some() {
+        config.database_url = args.database;
+    }
 
     info!("Configuration:");
     info!("  WASM file: {:?}", args.wasm_path);
     info!("  Listen: {}:{}", config.host, config.port);
     info!("  CORS: {}", if config.cors_enabled { "enabled" } else { "disabled" });
     info!("  Body limit: {} MB", args.body_limit);
+    if config.database_url.is_some() {
+        info!("  Database: configured");
+    } else {
+        info!("  Database: not configured");
+    }
     println!();
 
     // Start server

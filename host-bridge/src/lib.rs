@@ -9,6 +9,8 @@ mod crypto;
 mod log;
 mod sys;
 mod fs;
+pub mod error;
+pub mod wasm_linker;
 
 pub use http::{HttpBridge, HttpRequest, HttpResponse};
 pub use db::{DbBridge, DbQuery, DbResult, DbConfig};
@@ -18,6 +20,19 @@ pub use crypto::CryptoBridge;
 pub use log::{LogBridge, LogLevel, LogConfig, LogEntry};
 pub use sys::SysBridge;
 pub use fs::FsBridge;
+pub use error::{BridgeError as WasmBridgeError, BridgeResult};
+pub use wasm_linker::{
+    // Linker creation
+    create_linker, register_all_functions,
+    // Core types and trait
+    WasmState, WasmStateCore, WasmMemory,
+    RequestContext, AuthContext, SharedDbBridge,
+    // Helper functions
+    read_string_from_caller, write_string_to_caller,
+    read_raw_string, write_bytes_to_caller,
+    read_length_prefixed_bytes, allocate_at_memory_end,
+    STRING_LENGTH_PREFIX_SIZE,
+};
 
 /// Standard envelope for all bridge responses
 #[derive(Debug, Clone, Serialize, Deserialize)]

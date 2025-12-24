@@ -4,13 +4,16 @@
 
 use crate::bridge::create_linker;
 use crate::error::{RuntimeError, RuntimeResult};
-use crate::memory::WasmMemory;
 use crate::router::SharedRouter;
-use parking_lot::Mutex;
+use host_bridge::{DbBridge, WasmMemory, WasmStateCore};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, info, warn};
 use wasmtime::{Engine, Instance, Module, Store};
+
+/// Shared database bridge type
+pub type SharedDbBridge = Arc<TokioRwLock<DbBridge>>;
 
 /// State held by each WASM store instance
 pub struct WasmState {
@@ -26,6 +29,8 @@ pub struct WasmState {
     pub auth_context: Option<AuthContext>,
     /// Last error (for error reporting)
     pub last_error: Option<String>,
+    /// Database bridge for database operations
+    pub db_bridge: SharedDbBridge,
 }
 
 /// Request context passed to handlers
@@ -56,6 +61,19 @@ impl WasmState {
             request_context: None,
             auth_context: None,
             last_error: None,
+            db_bridge: Arc::new(TokioRwLock::new(DbBridge::new())),
+        }
+    }
+
+    pub fn with_db_bridge(router: SharedRouter, db_bridge: SharedDbBridge) -> Self {
+        Self {
+            memory: WasmMemory::new(),
+            router,
+            port: 3000,
+            request_context: None,
+            auth_context: None,
+            last_error: None,
+            db_bridge,
         }
     }
 
@@ -73,19 +91,42 @@ impl WasmState {
     }
 }
 
+// Implement WasmStateCore trait from host-bridge
+// This allows clean-server to use all shared host functions from host-bridge
+impl WasmStateCore for WasmState {
+    fn memory(&self) -> &WasmMemory {
+        &self.memory
+    }
+
+    fn memory_mut(&mut self) -> &mut WasmMemory {
+        &mut self.memory
+    }
+
+    fn db_bridge(&self) -> Option<host_bridge::SharedDbBridge> {
+        Some(self.db_bridge.clone())
+    }
+
+    fn set_error(&mut self, error: String) {
+        self.last_error = Some(error);
+    }
+
+    fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+}
+
 /// WASM module instance ready for execution
 pub struct WasmInstance {
-    /// Wasmtime engine (kept for potential future use)
-    #[allow(dead_code)]
+    /// Wasmtime engine
     engine: Engine,
-    /// Compiled module
+    /// Compiled module (thread-safe, can create instances from this)
     module: Module,
     /// Shared router
     router: SharedRouter,
-    /// Store with state (wrapped for interior mutability)
-    store: Mutex<Store<WasmState>>,
-    /// Module instance
-    instance: Instance,
+    /// Linker for creating instances
+    linker: wasmtime::Linker<WasmState>,
+    /// Database bridge (shared with state for external configuration)
+    db_bridge: SharedDbBridge,
 }
 
 impl WasmInstance {
@@ -101,8 +142,33 @@ impl WasmInstance {
         Self::from_bytes(&wasm_bytes, router)
     }
 
+    /// Load a WASM module from a file with a custom database bridge
+    pub fn load_with_db(
+        wasm_path: &Path,
+        router: SharedRouter,
+        db_bridge: SharedDbBridge,
+    ) -> RuntimeResult<Self> {
+        info!("Loading WASM module from {:?}", wasm_path);
+
+        let wasm_bytes = std::fs::read(wasm_path).map_err(|e| {
+            RuntimeError::wasm(format!("Failed to read WASM file {:?}: {}", wasm_path, e))
+        })?;
+
+        Self::from_bytes_with_db(&wasm_bytes, router, db_bridge)
+    }
+
     /// Load a WASM module from bytes
     pub fn from_bytes(wasm_bytes: &[u8], router: SharedRouter) -> RuntimeResult<Self> {
+        let db_bridge = Arc::new(TokioRwLock::new(DbBridge::new()));
+        Self::from_bytes_with_db(wasm_bytes, router, db_bridge)
+    }
+
+    /// Load a WASM module from bytes with a custom database bridge
+    pub fn from_bytes_with_db(
+        wasm_bytes: &[u8],
+        router: SharedRouter,
+        db_bridge: SharedDbBridge,
+    ) -> RuntimeResult<Self> {
         // Create engine
         let engine = Engine::default();
 
@@ -115,38 +181,57 @@ impl WasmInstance {
         // Create linker with host functions
         let linker = create_linker(&engine)?;
 
-        // Create store with state
-        let state = WasmState::new(router.clone());
-        let mut store = Store::new(&engine, state);
-
-        // Instantiate module
-        let instance = linker.instantiate(&mut store, &module).map_err(|e| {
-            RuntimeError::wasm(format!("Failed to instantiate WASM module: {}", e))
-        })?;
-
-        debug!("WASM module instantiated");
+        debug!("WASM linker configured");
 
         Ok(Self {
             engine,
             module,
             router,
-            store: Mutex::new(store),
-            instance,
+            linker,
+            db_bridge,
         })
+    }
+
+    /// Create a fresh WASM instance for request handling
+    fn create_instance(&self) -> RuntimeResult<(Store<WasmState>, Instance)> {
+        let state = WasmState::with_db_bridge(self.router.clone(), self.db_bridge.clone());
+        let mut store = Store::new(&self.engine, state);
+
+        let instance = self.linker.instantiate(&mut store, &self.module).map_err(|e| {
+            RuntimeError::wasm(format!("Failed to instantiate WASM module: {}", e))
+        })?;
+
+        Ok((store, instance))
+    }
+
+    /// Get the database bridge for configuration
+    pub fn db_bridge(&self) -> &SharedDbBridge {
+        &self.db_bridge
     }
 
     /// Initialize the module (calls main/start function to register routes)
     pub fn initialize(&self) -> RuntimeResult<()> {
-        let mut store = self.store.lock();
+        // Create an instance specifically for initialization
+        let (mut store, instance) = self.create_instance()?;
+
+        // Save the initial heap pointer BEFORE calling _start
+        // Clean Language stores the heap allocator at memory address 0
+        if let Some(memory) = instance.get_memory(&mut store, "memory") {
+            let data = memory.data(&store);
+            if data.len() >= 4 {
+                let heap_ptr = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                info!("Initial heap pointer (before _start): {}", heap_ptr);
+            }
+        }
 
         // Try different entry point names
         let entry_names = ["main", "_start", "start", "init"];
 
         for name in entry_names {
-            if let Ok(func) = self.instance.get_typed_func::<(), ()>(&mut *store, name) {
+            if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, name) {
                 info!("Calling WASM entry point: {}", name);
 
-                func.call(&mut *store, ()).map_err(|e| {
+                func.call(&mut store, ()).map_err(|e| {
                     RuntimeError::wasm(format!("Failed to call {}: {}", name, e))
                 })?;
 
@@ -165,20 +250,22 @@ impl WasmInstance {
     }
 
     /// Call a route handler function
+    /// Creates a fresh WASM instance for each request to ensure clean memory state
     pub fn call_handler(
         &self,
         handler_index: u32,
         request: RequestContext,
     ) -> RuntimeResult<String> {
-        let mut store = self.store.lock();
+        // Create a fresh instance for this request
+        // This ensures each request starts with clean memory (no heap exhaustion)
+        let (mut store, instance) = self.create_instance()?;
 
         // Set request context
         store.data_mut().set_request(request);
 
         // Get memory
-        let memory = self
-            .instance
-            .get_memory(&mut *store, "memory")
+        let memory = instance
+            .get_memory(&mut store, "memory")
             .ok_or_else(|| RuntimeError::wasm("Module has no memory export"))?;
 
         // The handler function takes no arguments and returns a string pointer
@@ -189,58 +276,52 @@ impl WasmInstance {
         debug!("Calling handler: {}", handler_name);
 
         // Try the generated handler name first
-        if let Ok(handler) = self
-            .instance
-            .get_typed_func::<(), i32>(&mut *store, &handler_name)
+        if let Ok(handler) = instance
+            .get_typed_func::<(), i32>(&mut store, &handler_name)
         {
-            let result_ptr = handler.call(&mut *store, ()).map_err(|e| {
+            let result_ptr = handler.call(&mut store, ()).map_err(|e| {
                 RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
             })?;
 
             // Read result string from memory
-            let result = crate::memory::read_string_from_memory(&*store, &memory, result_ptr as u32)?;
+            let result = crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
 
-            store.data_mut().clear_request();
             return Ok(result);
         }
 
         // Try direct function table call
         // WASM function tables allow calling functions by index
-        if let Some(table) = self.instance.get_table(&mut *store, "__indirect_function_table") {
-            if let Some(func_ref) = table.get(&mut *store, handler_index as u64) {
+        if let Some(table) = instance.get_table(&mut store, "__indirect_function_table") {
+            if let Some(func_ref) = table.get(&mut store, handler_index as u64) {
                 if let Some(func) = func_ref.unwrap_func() {
                     // Try to call as a function returning i32
                     let result_ptr = func
-                        .typed::<(), i32>(&*store)
+                        .typed::<(), i32>(&store)
                         .map_err(|e| RuntimeError::wasm(format!("Invalid handler signature: {}", e)))?
-                        .call(&mut *store, ())
+                        .call(&mut store, ())
                         .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
 
                     let result =
-                        crate::memory::read_string_from_memory(&*store, &memory, result_ptr as u32)?;
+                        crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
 
-                    store.data_mut().clear_request();
                     return Ok(result);
                 }
             }
         }
 
         // Fallback: try calling a generic handler function with the index
-        if let Ok(dispatch) = self
-            .instance
-            .get_typed_func::<i32, i32>(&mut *store, "__dispatch_route")
+        if let Ok(dispatch) = instance
+            .get_typed_func::<i32, i32>(&mut store, "__dispatch_route")
         {
-            let result_ptr = dispatch.call(&mut *store, handler_index as i32).map_err(|e| {
+            let result_ptr = dispatch.call(&mut store, handler_index as i32).map_err(|e| {
                 RuntimeError::wasm(format!("Dispatch failed: {}", e))
             })?;
 
-            let result = crate::memory::read_string_from_memory(&*store, &memory, result_ptr as u32)?;
+            let result = crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
 
-            store.data_mut().clear_request();
             return Ok(result);
         }
 
-        store.data_mut().clear_request();
         Err(RuntimeError::wasm(format!(
             "Could not find or call handler index {}",
             handler_index
@@ -272,6 +353,16 @@ pub type SharedWasmInstance = Arc<WasmInstance>;
 /// Create a shared WASM instance
 pub fn create_shared_instance(wasm_path: &Path, router: SharedRouter) -> RuntimeResult<SharedWasmInstance> {
     let instance = WasmInstance::load(wasm_path, router)?;
+    Ok(Arc::new(instance))
+}
+
+/// Create a shared WASM instance with a database bridge
+pub fn create_shared_instance_with_db(
+    wasm_path: &Path,
+    router: SharedRouter,
+    db_bridge: SharedDbBridge,
+) -> RuntimeResult<SharedWasmInstance> {
+    let instance = WasmInstance::load_with_db(wasm_path, router, db_bridge)?;
     Ok(Arc::new(instance))
 }
 

@@ -1,433 +1,60 @@
-//! Host Bridge WASM Imports
+//! Host Bridge WASM Imports for Clean Server
 //!
-//! Provides host functions that WASM modules expect:
+//! This module provides server-specific host functions that extend host-bridge:
 //!
-//! ## Bridge Functions (platform services)
-//! - I/O functions (print, input) - bridge:io
-//! - Memory management (mem_alloc, mem_retain, mem_release)
-//! - HTTP server functions (_http_listen, _http_route) - bridge:server
-//! - HTTP client functions (http_get, http_post, etc.) - bridge:http
-//! - File I/O (file_read, file_write, etc.) - bridge:fs
-//! - Database functions (_db_query, _db_execute) - bridge:db
-//! - Authentication functions (_auth_verify, _auth_create_session) - bridge:auth
-//! - Math functions (sin, cos, tan, pow, ln, exp, etc.) - transcendental operations
+//! ## Shared Functions (from host-bridge)
+//! - Console I/O (print, input)
+//! - Math functions (sin, cos, tan, pow, etc.)
+//! - String operations (concat, substring, etc.)
+//! - Memory runtime (mem_alloc, etc.)
+//! - Database (_db_query, _db_execute)
+//! - File I/O (file_read, file_write)
+//! - HTTP client (http_get, http_post)
+//! - Crypto (password hashing)
 //!
-//! ## Stdlib Functions (still imported, may become native)
-//! - float_to_string, string_to_float - float conversions
-//! - string.concat, string.split - string operations
-//!
-//! ## Now Native WASM (v0.17.1+)
-//! - int_to_string, bool_to_string, string_to_int
+//! ## Server-Specific Functions (defined here)
+//! - HTTP server (_http_listen, _http_route, _http_route_protected)
+//! - Request context (_req_param, _req_query, _req_body, _req_header, _req_method, _req_path)
+//! - Session auth (_auth_get_session, _auth_require_auth, _auth_require_role)
 
 use crate::error::{RuntimeError, RuntimeResult};
-use crate::memory::{read_string_from_caller, STRING_LENGTH_PREFIX_SIZE};
 use crate::router::HttpMethod;
 use crate::wasm::WasmState;
+use host_bridge::{write_string_to_caller, read_raw_string};
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
 
 /// Create a linker with all host functions
+///
+/// This registers:
+/// 1. All shared functions from host-bridge (console, math, string, db, file, http client, crypto)
+/// 2. Server-specific functions (HTTP routing, request context)
 pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     let mut linker = Linker::new(engine);
 
-    // =========================================
-    // ENV NAMESPACE - Core I/O
-    // =========================================
+    // Register all shared functions from host-bridge
+    host_bridge::register_all_functions(&mut linker)
+        .map_err(|e| RuntimeError::wasm(format!("Failed to register host-bridge functions: {}", e)))?;
 
-    // print - Print without newline
-    linker
-        .func_wrap(
-            "env",
-            "print",
-            |mut caller: Caller<'_, WasmState>, ptr: i32, len: i32| {
-                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    let data = memory.data(&caller);
-                    if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
-                        if let Ok(s) = std::str::from_utf8(slice) {
-                            print!("{}", s);
-                        }
-                    }
-                }
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define print: {}", e)))?;
+    // Register server-specific functions
+    register_http_server_functions(&mut linker)?;
+    register_request_context_functions(&mut linker)?;
+    register_session_auth_functions(&mut linker)?;
 
-    // printl - Print with newline
-    linker
-        .func_wrap(
-            "env",
-            "printl",
-            |mut caller: Caller<'_, WasmState>, ptr: i32, len: i32| {
-                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    let data = memory.data(&caller);
-                    if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
-                        if let Ok(s) = std::str::from_utf8(slice) {
-                            println!("{}", s);
-                        }
-                    }
-                }
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define printl: {}", e)))?;
+    Ok(linker)
+}
 
-    // input - Read user input (returns empty string in server context)
-    linker
-        .func_wrap(
-            "env",
-            "input",
-            |mut caller: Caller<'_, WasmState>, _prompt_ptr: i32| -> i32 {
-                // Return properly initialized empty string
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define input: {}", e)))?;
-
-    // input_integer
-    linker
-        .func_wrap(
-            "env",
-            "input_integer",
-            |_: Caller<'_, WasmState>, _prompt_ptr: i32| -> i32 { 0 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define input_integer: {}", e)))?;
-
-    // input_float
-    linker
-        .func_wrap(
-            "env",
-            "input_float",
-            |_: Caller<'_, WasmState>, _prompt_ptr: i32| -> f64 { 0.0 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define input_float: {}", e)))?;
-
-    // input_yesno
-    linker
-        .func_wrap(
-            "env",
-            "input_yesno",
-            |_: Caller<'_, WasmState>, _prompt_ptr: i32| -> i32 { 0 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define input_yesno: {}", e)))?;
-
-    // input_range
-    linker
-        .func_wrap(
-            "env",
-            "input_range",
-            |_: Caller<'_, WasmState>, _prompt_ptr: i32, min: i32, _max: i32, _default: i32| -> i32 {
-                min
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define input_range: {}", e)))?;
-
-    // =========================================
-    // STDLIB: Type Conversion Functions (still imported by compiler)
-    // Note: int_to_string, bool_to_string, string_to_int are now native WASM (v0.17.1+)
-    // =========================================
-
-    // float_to_string - still imported by compiler
-    linker
-        .func_wrap(
-            "env",
-            "float_to_string",
-            |mut caller: Caller<'_, WasmState>, value: f64| -> i32 {
-                let s = value.to_string();
-                write_string_to_caller(&mut caller, &s)
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define float_to_string: {}", e)))?;
-
-    // string_to_float - still imported by compiler
-    linker
-        .func_wrap(
-            "env",
-            "string_to_float",
-            |mut caller: Caller<'_, WasmState>, str_ptr: i32| -> f64 {
-                if let Ok(s) = read_string_from_caller(&mut caller, str_ptr as u32) {
-                    s.parse::<f64>().unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define string_to_float: {}", e)))?;
-
-    // =========================================
-    // STDLIB: String Operations (temporary - until compiler enables native stdlib)
-    // =========================================
-
-    // string_concat - Concatenate two strings
-    linker
-        .func_wrap(
-            "env",
-            "string_concat",
-            |mut caller: Caller<'_, WasmState>,
-             str1_ptr: i32,
-             str1_len: i32,
-             str2_ptr: i32,
-             str2_len: i32|
-             -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return 0,
-                };
-
-                let data = memory.data(&caller);
-
-                // Read first string
-                let s1_start = str1_ptr as usize;
-                let s1_end = s1_start + str1_len as usize;
-                let s1 = if s1_end <= data.len() {
-                    data[s1_start..s1_end].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                // Read second string
-                let s2_start = str2_ptr as usize;
-                let s2_end = s2_start + str2_len as usize;
-                let s2 = if s2_end <= data.len() {
-                    data[s2_start..s2_end].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                // Concatenate
-                let mut result = s1;
-                result.extend(s2);
-
-                // Write result
-                write_bytes_to_caller(&mut caller, &result)
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define string_concat: {}", e)))?;
-
-    // string.concat - v0.17.2 signature: (str1_ptr, str2_ptr) -> i32
-    // Both strings are length-prefixed: [4-byte little-endian length][UTF-8 bytes]
-    linker
-        .func_wrap(
-            "env",
-            "string.concat",
-            |mut caller: Caller<'_, WasmState>, str1_ptr: i32, str2_ptr: i32| -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return 0,
-                };
-
-                let data = memory.data(&caller);
-
-                // Read first string (length-prefixed)
-                let s1 = read_length_prefixed_string(data, str1_ptr as usize);
-
-                // Read second string (length-prefixed)
-                let s2 = read_length_prefixed_string(data, str2_ptr as usize);
-
-                // Concatenate
-                let mut result = s1;
-                result.extend(s2);
-
-                // Write result with length prefix
-                write_bytes_to_caller(&mut caller, &result)
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define string.concat: {}", e)))?;
-
-    // string.split
-    linker
-        .func_wrap(
-            "env",
-            "string.split",
-            |mut caller: Caller<'_, WasmState>, _str_ptr: i32, _delim_ptr: i32| -> i32 {
-                // Return empty array - properly allocated with memory growth
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return 0,
-                };
-
-                // Allocate 4 bytes for empty array (length = 0)
-                let ptr = allocate_at_memory_end(&mut caller, &memory, 4);
-                if ptr == 0 {
-                    return 0;
-                }
-
-                // Write zero length
-                if let Err(_) = memory.write(&mut caller, ptr, &[0u8; 4]) {
-                    return 0;
-                }
-                ptr as i32
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define string.split: {}", e)))?;
-
-    // =========================================
-    // MATH FUNCTIONS (imported by compiler for transcendental operations)
-    // =========================================
-
-    // math_pow - power function (x^y)
-    linker
-        .func_wrap("env", "math_pow", |_: Caller<'_, WasmState>, base: f64, exp: f64| -> f64 {
-            base.powf(exp)
-        })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_pow: {}", e)))?;
-
-    // Trigonometric functions
-    linker
-        .func_wrap("env", "math_sin", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.sin() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_sin: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_cos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cos() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_cos: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.cos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cos() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.cos: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_tan", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.tan() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_tan: {}", e)))?;
-
-    // Inverse trigonometric functions
-    linker
-        .func_wrap("env", "math_asin", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.asin() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_asin: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_acos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.acos() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_acos: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.acos", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.acos() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.acos: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_atan", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.atan() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_atan: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_atan2", |_: Caller<'_, WasmState>, y: f64, x: f64| -> f64 { y.atan2(x) })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_atan2: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.atan2", |_: Caller<'_, WasmState>, y: f64, x: f64| -> f64 { y.atan2(x) })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.atan2: {}", e)))?;
-
-    // Hyperbolic functions
-    linker
-        .func_wrap("env", "math_sinh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.sinh() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_sinh: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.sinh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.sinh() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.sinh: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_cosh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cosh() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_cosh: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.cosh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.cosh() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.cosh: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_tanh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.tanh() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_tanh: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.tanh", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.tanh() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.tanh: {}", e)))?;
-
-    // Logarithmic functions
-    linker
-        .func_wrap("env", "math_ln", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.ln() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_ln: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.ln", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.ln() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.ln: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_log10", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.log10() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_log10: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_log2", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.log2() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_log2: {}", e)))?;
-
-    // Exponential functions
-    linker
-        .func_wrap("env", "math_exp", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_exp: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.exp", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.exp: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math_exp2", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp2() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math_exp2: {}", e)))?;
-
-    linker
-        .func_wrap("env", "math.exp2", |_: Caller<'_, WasmState>, x: f64| -> f64 { x.exp2() })
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define math.exp2: {}", e)))?;
-
-    // =========================================
-    // MEMORY_RUNTIME NAMESPACE
-    // =========================================
-
-    // mem_alloc - Allocate memory in WASM linear memory
-    // This ensures memory is grown if needed before returning the pointer
-    linker
-        .func_wrap(
-            "memory_runtime",
-            "mem_alloc",
-            |mut caller: Caller<'_, WasmState>, size: i32, _align: i32| -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => {
-                        error!("mem_alloc: No memory export found");
-                        return 0;
-                    }
-                };
-
-                // Allocate using our bump allocator and ensure memory is grown
-                let ptr = allocate_at_memory_end(&mut caller, &memory, size as usize);
-                ptr as i32
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define mem_alloc: {}", e)))?;
-
-    // mem_retain (no-op for now)
-    linker
-        .func_wrap(
-            "memory_runtime",
-            "mem_retain",
-            |_: Caller<'_, WasmState>, _ptr: i32| {},
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define mem_retain: {}", e)))?;
-
-    // mem_release (no-op for now)
-    linker
-        .func_wrap(
-            "memory_runtime",
-            "mem_release",
-            |_: Caller<'_, WasmState>, _ptr: i32| {},
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define mem_release: {}", e)))?;
-
-    // =========================================
-    // HTTP SERVER FUNCTIONS (Frame-specific)
-    // =========================================
-
+/// Register HTTP server functions (_http_listen, _http_route, _http_route_protected)
+fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _http_listen - Start listening on a port
     linker
         .func_wrap(
             "env",
             "_http_listen",
-            |mut caller: Caller<'_, WasmState>, port: i32| -> i32 {
-                info!("WASM requested HTTP listen on port {}", port);
-                caller.data_mut().port = port as u16;
-                0 // Success
+            |mut caller: Caller<'_, WasmState>, port: i32| {
+                let state = caller.data_mut();
+                state.port = port as u16;
+                info!("HTTP server configured to listen on port {}", port);
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_listen: {}", e)))?;
@@ -442,49 +69,36 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              method_len: i32,
              path_ptr: i32,
              path_len: i32,
-             handler_idx: i32|
-             -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return -1,
-                };
+             handler_idx: i32| {
+                let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                    .unwrap_or_else(|| "GET".to_string());
+                let path = read_raw_string(&mut caller, path_ptr, path_len)
+                    .unwrap_or_else(|| "/".to_string());
 
-                let data = memory.data(&caller);
-
-                // Read method
-                let method_str = read_raw_string(data, method_ptr, method_len);
-                let path_str = read_raw_string(data, path_ptr, path_len);
-
-                info!(
-                    "Registering route: {} {} -> handler {}",
-                    method_str, path_str, handler_idx
+                debug!(
+                    "_http_route: method={}, path={}, handler={}",
+                    method_str, path, handler_idx
                 );
 
                 let method = match HttpMethod::from_str(&method_str) {
                     Ok(m) => m,
-                    Err(_) => {
-                        error!("Invalid HTTP method: {}", method_str);
-                        return -1;
+                    Err(e) => {
+                        error!("Invalid HTTP method '{}': {}", method_str, e);
+                        return;
                     }
                 };
 
-                if let Err(e) = caller.data().router.register(
-                    method,
-                    path_str,
-                    handler_idx as u32,
-                    false,
-                    None,
-                ) {
-                    error!("Failed to register route: {}", e);
-                    return -1;
+                let state = caller.data();
+                let router = state.router.clone();
+                // Not protected, no required role
+                if let Err(e) = router.register(method, path.clone(), handler_idx as u32, false, None) {
+                    error!("Failed to register route {} {}: {}", method_str, path, e);
                 }
-
-                0 // Success
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_route: {}", e)))?;
 
-    // _http_route_protected - Register a protected route
+    // _http_route_protected - Register a protected route requiring authentication
     linker
         .func_wrap(
             "env",
@@ -496,137 +110,107 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
              path_len: i32,
              handler_idx: i32,
              role_ptr: i32,
-             role_len: i32|
-             -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return -1,
-                };
-
-                let data = memory.data(&caller);
-
-                let method_str = read_raw_string(data, method_ptr, method_len);
-                let path_str = read_raw_string(data, path_ptr, path_len);
-                let role_str = if role_len > 0 {
-                    Some(read_raw_string(data, role_ptr, role_len))
+             role_len: i32| {
+                let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                    .unwrap_or_else(|| "GET".to_string());
+                let path = read_raw_string(&mut caller, path_ptr, path_len)
+                    .unwrap_or_else(|| "/".to_string());
+                let required_role = if role_len > 0 {
+                    read_raw_string(&mut caller, role_ptr, role_len)
                 } else {
                     None
                 };
 
-                info!(
-                    "Registering protected route: {} {} -> handler {} (role: {:?})",
-                    method_str, path_str, handler_idx, role_str
+                debug!(
+                    "_http_route_protected: method={}, path={}, handler={}, role={:?}",
+                    method_str, path, handler_idx, required_role
                 );
 
                 let method = match HttpMethod::from_str(&method_str) {
                     Ok(m) => m,
-                    Err(_) => return -1,
+                    Err(e) => {
+                        error!("Invalid HTTP method '{}': {}", method_str, e);
+                        return;
+                    }
                 };
 
-                if let Err(_) = caller.data().router.register(
+                let state = caller.data();
+                let router = state.router.clone();
+                // Protected route with optional role requirement
+                if let Err(e) = router.register(
                     method,
-                    path_str,
+                    path.clone(),
                     handler_idx as u32,
                     true,
-                    role_str,
+                    required_role,
                 ) {
-                    return -1;
+                    error!(
+                        "Failed to register protected route {} {}: {}",
+                        method_str, path, e
+                    );
                 }
-
-                0 // Success
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_route_protected: {}", e)))?;
 
-    // =========================================
-    // REQUEST CONTEXT ACCESS FUNCTIONS
-    // =========================================
+    Ok(())
+}
 
-    // _req_param - Get a path parameter by name (e.g., :id from /users/:id)
+/// Register request context functions (_req_param, _req_query, _req_body, etc.)
+fn register_request_context_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _req_param - Get a path parameter by name
     linker
         .func_wrap(
             "env",
             "_req_param",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                debug!("_req_param called: ptr={}, len={}", name_ptr, name_len);
-
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => {
-                        error!("_req_param: No memory export found");
-                        return 0;
-                    }
+                let param_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, ""),
                 };
 
-                let data = memory.data(&caller);
-                let param_name = read_raw_string(data, name_ptr, name_len);
                 debug!("_req_param: Looking for param '{}'", param_name);
 
-                // Get the request context from state
                 let value = {
                     let state = caller.data();
-                    if let Some(ref ctx) = state.request_context {
-                        debug!("_req_param: Request context has {} params", ctx.params.len());
-                        for (k, v) in &ctx.params {
-                            debug!("_req_param: param '{}' = '{}'", k, v);
-                        }
-                        ctx.params.get(&param_name).cloned()
-                    } else {
-                        debug!("_req_param: No request context!");
-                        None
-                    }
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.params.get(&param_name).cloned())
+                        .unwrap_or_default()
                 };
 
-                // Write the parameter value to WASM memory
-                match value {
-                    Some(v) => {
-                        debug!("_req_param: Found value '{}', writing to memory", v);
-                        let ptr = write_string_to_caller(&mut caller, &v);
-                        debug!("_req_param: Wrote to ptr {}", ptr);
-                        ptr
-                    }
-                    None => {
-                        debug!("_req_param: No value found for '{}', writing empty string", param_name);
-                        write_string_to_caller(&mut caller, "")
-                    }
-                }
+                write_string_to_caller(&mut caller, &value)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_param: {}", e)))?;
 
-    // _req_query - Get a query parameter by name (e.g., ?q=search)
+    // _req_query - Get a query parameter by name
     linker
         .func_wrap(
             "env",
             "_req_query",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return 0,
+                let query_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, ""),
                 };
 
-                let data = memory.data(&caller);
-                let param_name = read_raw_string(data, name_ptr, name_len);
-
-                // Get the request context from state
                 let value = {
                     let state = caller.data();
-                    if let Some(ref ctx) = state.request_context {
-                        ctx.query.get(&param_name).cloned()
-                    } else {
-                        None
-                    }
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.query.get(&query_name).cloned())
+                        .unwrap_or_default()
                 };
 
-                match value {
-                    Some(v) => write_string_to_caller(&mut caller, &v),
-                    None => write_string_to_caller(&mut caller, ""),
-                }
+                write_string_to_caller(&mut caller, &value)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_query: {}", e)))?;
 
-    // _req_body - Get the request body as a string
+    // _req_body - Get the request body
     linker
         .func_wrap(
             "env",
@@ -634,12 +218,13 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             |mut caller: Caller<'_, WasmState>| -> i32 {
                 let body = {
                     let state = caller.data();
-                    if let Some(ref ctx) = state.request_context {
-                        ctx.body.clone()
-                    } else {
-                        String::new()
-                    }
+                    state
+                        .request_context
+                        .as_ref()
+                        .map(|ctx| ctx.body.clone())
+                        .unwrap_or_default()
                 };
+
                 write_string_to_caller(&mut caller, &body)
             },
         )
@@ -651,36 +236,31 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             "env",
             "_req_header",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
-                    None => return 0,
+                let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s.to_lowercase(),
+                    None => return write_string_to_caller(&mut caller, ""),
                 };
 
-                let data = memory.data(&caller);
-                let header_name = read_raw_string(data, name_ptr, name_len).to_lowercase();
-
-                // Get the request context from state
                 let value = {
                     let state = caller.data();
-                    if let Some(ref ctx) = state.request_context {
-                        ctx.headers
-                            .iter()
-                            .find(|(name, _)| name.to_lowercase() == header_name)
-                            .map(|(_, v)| v.clone())
-                    } else {
-                        None
-                    }
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| {
+                            ctx.headers
+                                .iter()
+                                .find(|(k, _)| k.to_lowercase() == header_name)
+                                .map(|(_, v)| v.clone())
+                        })
+                        .unwrap_or_default()
                 };
 
-                match value {
-                    Some(v) => write_string_to_caller(&mut caller, &v),
-                    None => write_string_to_caller(&mut caller, ""),
-                }
+                write_string_to_caller(&mut caller, &value)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_header: {}", e)))?;
 
-    // _req_method - Get the request method
+    // _req_method - Get the HTTP method
     linker
         .func_wrap(
             "env",
@@ -688,12 +268,13 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             |mut caller: Caller<'_, WasmState>| -> i32 {
                 let method = {
                     let state = caller.data();
-                    if let Some(ref ctx) = state.request_context {
-                        ctx.method.clone()
-                    } else {
-                        String::new()
-                    }
+                    state
+                        .request_context
+                        .as_ref()
+                        .map(|ctx| ctx.method.clone())
+                        .unwrap_or_else(|| "GET".to_string())
                 };
+
                 write_string_to_caller(&mut caller, &method)
             },
         )
@@ -707,835 +288,154 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
             |mut caller: Caller<'_, WasmState>| -> i32 {
                 let path = {
                     let state = caller.data();
-                    if let Some(ref ctx) = state.request_context {
-                        ctx.path.clone()
-                    } else {
-                        String::new()
-                    }
+                    state
+                        .request_context
+                        .as_ref()
+                        .map(|ctx| ctx.path.clone())
+                        .unwrap_or_else(|| "/".to_string())
                 };
+
                 write_string_to_caller(&mut caller, &path)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_path: {}", e)))?;
 
-    // =========================================
-    // HTTP CLIENT FUNCTIONS
-    // =========================================
+    Ok(())
+}
 
-    // http_get
-    linker
-        .func_wrap(
-            "env",
-            "http_get",
-            |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                // Return properly initialized empty response
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_get: {}", e)))?;
-
-    // http_post
-    linker
-        .func_wrap(
-            "env",
-            "http_post",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _body_ptr: i32,
-             _body_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post: {}", e)))?;
-
-    // http_put
-    linker
-        .func_wrap(
-            "env",
-            "http_put",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _body_ptr: i32,
-             _body_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_put: {}", e)))?;
-
-    // http_patch
-    linker
-        .func_wrap(
-            "env",
-            "http_patch",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _body_ptr: i32,
-             _body_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_patch: {}", e)))?;
-
-    // http_delete
-    linker
-        .func_wrap(
-            "env",
-            "http_delete",
-            |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_delete: {}", e)))?;
-
-    // http_head
-    linker
-        .func_wrap(
-            "env",
-            "http_head",
-            |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_head: {}", e)))?;
-
-    // http_options
-    linker
-        .func_wrap(
-            "env",
-            "http_options",
-            |mut caller: Caller<'_, WasmState>, _url_ptr: i32, _url_len: i32| -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_options: {}", e)))?;
-
-    // http_get_with_headers
-    linker
-        .func_wrap(
-            "env",
-            "http_get_with_headers",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _headers_ptr: i32,
-             _headers_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_get_with_headers: {}", e)))?;
-
-    // http_post_with_headers
-    linker
-        .func_wrap(
-            "env",
-            "http_post_with_headers",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _body_ptr: i32,
-             _body_len: i32,
-             _headers_ptr: i32,
-             _headers_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post_with_headers: {}", e)))?;
-
-    // http_post_json
-    linker
-        .func_wrap(
-            "env",
-            "http_post_json",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _json_ptr: i32,
-             _json_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post_json: {}", e)))?;
-
-    // http_put_json
-    linker
-        .func_wrap(
-            "env",
-            "http_put_json",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _json_ptr: i32,
-             _json_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_put_json: {}", e)))?;
-
-    // http_patch_json
-    linker
-        .func_wrap(
-            "env",
-            "http_patch_json",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _json_ptr: i32,
-             _json_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_patch_json: {}", e)))?;
-
-    // http_post_form
-    linker
-        .func_wrap(
-            "env",
-            "http_post_form",
-            |mut caller: Caller<'_, WasmState>,
-             _url_ptr: i32,
-             _url_len: i32,
-             _form_ptr: i32,
-             _form_len: i32|
-             -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_post_form: {}", e)))?;
-
-    // http_set_user_agent
-    linker
-        .func_wrap(
-            "env",
-            "http_set_user_agent",
-            |_: Caller<'_, WasmState>, _ua_ptr: i32, _ua_len: i32| {},
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_set_user_agent: {}", e)))?;
-
-    // http_set_timeout
-    linker
-        .func_wrap(
-            "env",
-            "http_set_timeout",
-            |_: Caller<'_, WasmState>, _timeout_ms: i32| {},
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_set_timeout: {}", e)))?;
-
-    // http_set_max_redirects
-    linker
-        .func_wrap(
-            "env",
-            "http_set_max_redirects",
-            |_: Caller<'_, WasmState>, _max: i32| {},
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_set_max_redirects: {}", e)))?;
-
-    // http_enable_cookies
-    linker
-        .func_wrap(
-            "env",
-            "http_enable_cookies",
-            |_: Caller<'_, WasmState>, _enable: i32| {},
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_enable_cookies: {}", e)))?;
-
-    // http_get_response_code
-    linker
-        .func_wrap(
-            "env",
-            "http_get_response_code",
-            |_: Caller<'_, WasmState>| -> i32 { 200 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_get_response_code: {}", e)))?;
-
-    // http_get_response_headers
-    linker
-        .func_wrap(
-            "env",
-            "http_get_response_headers",
-            |_: Caller<'_, WasmState>| -> i32 { 0 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_get_response_headers: {}", e)))?;
-
-    // http_encode_url
-    linker
-        .func_wrap(
-            "env",
-            "http_encode_url",
-            |_: Caller<'_, WasmState>, url_ptr: i32, _url_len: i32| -> i32 { url_ptr },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_encode_url: {}", e)))?;
-
-    // http_decode_url
-    linker
-        .func_wrap(
-            "env",
-            "http_decode_url",
-            |_: Caller<'_, WasmState>, url_ptr: i32, _url_len: i32| -> i32 { url_ptr },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_decode_url: {}", e)))?;
-
-    // http_build_query
-    linker
-        .func_wrap(
-            "env",
-            "http_build_query",
-            |mut caller: Caller<'_, WasmState>, _params_ptr: i32, _params_len: i32| -> i32 {
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define http_build_query: {}", e)))?;
-
-    // =========================================
-    // FILE I/O FUNCTIONS
-    // =========================================
-
-    // file_write
-    linker
-        .func_wrap(
-            "env",
-            "file_write",
-            |_: Caller<'_, WasmState>,
-             _path_ptr: i32,
-             _path_len: i32,
-             _content_ptr: i32,
-             _content_len: i32|
-             -> i32 {
-                0 // Success
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define file_write: {}", e)))?;
-
-    // file_read
-    linker
-        .func_wrap(
-            "env",
-            "file_read",
-            |mut caller: Caller<'_, WasmState>, _path_ptr: i32, _path_len: i32, _buf_ptr: i32| -> i32 {
-                // Return empty string for now (file I/O not implemented)
-                write_string_to_caller(&mut caller, "")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define file_read: {}", e)))?;
-
-    // file_exists
-    linker
-        .func_wrap(
-            "env",
-            "file_exists",
-            |_: Caller<'_, WasmState>, _path_ptr: i32, _path_len: i32| -> i32 { 0 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define file_exists: {}", e)))?;
-
-    // file_delete
-    linker
-        .func_wrap(
-            "env",
-            "file_delete",
-            |_: Caller<'_, WasmState>, _path_ptr: i32, _path_len: i32| -> i32 { 0 },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define file_delete: {}", e)))?;
-
-    // file_append
-    linker
-        .func_wrap(
-            "env",
-            "file_append",
-            |_: Caller<'_, WasmState>,
-             _path_ptr: i32,
-             _path_len: i32,
-             _content_ptr: i32,
-             _content_len: i32|
-             -> i32 {
-                0 // Success
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define file_append: {}", e)))?;
-
-    // =========================================
-    // DATABASE FUNCTIONS
-    // =========================================
-
-    // _db_query - Execute a SELECT query
-    linker
-        .func_wrap(
-            "env",
-            "_db_query",
-            |mut caller: Caller<'_, WasmState>,
-             _sql_ptr: i32,
-             _sql_len: i32,
-             _params_ptr: i32,
-             _params_len: i32|
-             -> i32 {
-                // Return empty result set as properly initialized string
-                write_string_to_caller(&mut caller, "[]")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _db_query: {}", e)))?;
-
-    // _db_execute - Execute an INSERT/UPDATE/DELETE
-    linker
-        .func_wrap(
-            "env",
-            "_db_execute",
-            |_: Caller<'_, WasmState>,
-             _sql_ptr: i32,
-             _sql_len: i32,
-             _params_ptr: i32,
-             _params_len: i32|
-             -> i32 {
-                0 // Rows affected
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _db_execute: {}", e)))?;
-
-    // =========================================
-    // AUTH FUNCTIONS
-    // =========================================
-
-    // _auth_verify - Verify a token/session
-    linker
-        .func_wrap(
-            "env",
-            "_auth_verify",
-            |_: Caller<'_, WasmState>, _token_ptr: i32, _token_len: i32| -> i32 {
-                0 // Not verified
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_verify: {}", e)))?;
-
-    // _auth_create_session - Create a new session
-    linker
-        .func_wrap(
-            "env",
-            "_auth_create_session",
-            |mut caller: Caller<'_, WasmState>, _user_id: i32| -> i32 {
-                write_string_to_caller(&mut caller, "session_id")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_create_session: {}", e)))?;
-
-    // _auth_destroy_session - Destroy a session
-    linker
-        .func_wrap(
-            "env",
-            "_auth_destroy_session",
-            |_: Caller<'_, WasmState>, _session_ptr: i32, _session_len: i32| -> i32 {
-                0 // Success
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_destroy_session: {}", e)))?;
-
-    // _auth_hash_password - Hash a password
-    linker
-        .func_wrap(
-            "env",
-            "_auth_hash_password",
-            |mut caller: Caller<'_, WasmState>, _password_ptr: i32, _password_len: i32| -> i32 {
-                write_string_to_caller(&mut caller, "$argon2id$hash")
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_hash_password: {}", e)))?;
-
-    // _auth_verify_password - Verify a password against hash
-    linker
-        .func_wrap(
-            "env",
-            "_auth_verify_password",
-            |_: Caller<'_, WasmState>,
-             _password_ptr: i32,
-             _password_len: i32,
-             _hash_ptr: i32,
-             _hash_len: i32|
-             -> i32 {
-                0 // Not verified
-            },
-        )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_verify_password: {}", e)))?;
-
-    // =========================================
-    // AUTH GUARD FUNCTIONS (for route protection)
-    // =========================================
-
-    // _auth_get_session - Get the current session/auth context
+/// Register session-based authentication functions
+fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _auth_get_session - Get session info from current request
     linker
         .func_wrap(
             "env",
             "_auth_get_session",
             |mut caller: Caller<'_, WasmState>| -> i32 {
-                let has_auth = {
+                let session_json = {
                     let state = caller.data();
-                    state.auth_context.is_some()
+                    if let Some(auth) = &state.auth_context {
+                        serde_json::json!({
+                            "user_id": auth.user_id,
+                            "role": auth.role,
+                            "session_id": auth.session_id
+                        })
+                        .to_string()
+                    } else {
+                        "null".to_string()
+                    }
                 };
 
-                if has_auth {
-                    // Return session info as JSON
-                    let session_json = {
-                        let state = caller.data();
-                        if let Some(ref auth) = state.auth_context {
-                            format!(
-                                "{{\"user_id\":{},\"role\":\"{}\",\"session_id\":\"{}\"}}",
-                                auth.user_id,
-                                auth.role,
-                                auth.session_id.as_deref().unwrap_or("")
-                            )
-                        } else {
-                            "null".to_string()
-                        }
-                    };
-                    write_string_to_caller(&mut caller, &session_json)
-                } else {
-                    write_string_to_caller(&mut caller, "null")
-                }
+                write_string_to_caller(&mut caller, &session_json)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_get_session: {}", e)))?;
 
     // _auth_require_auth - Check if user is authenticated
-    // Returns 1 if authenticated, 0 if not
     linker
         .func_wrap(
             "env",
             "_auth_require_auth",
             |caller: Caller<'_, WasmState>| -> i32 {
                 let state = caller.data();
-
-                // Check if auth context exists
                 if state.auth_context.is_some() {
-                    debug!("Auth check passed: user is authenticated");
-                    return 1; // Authenticated
+                    1
+                } else {
+                    0
                 }
-
-                // Check for authorization header in request context
-                if let Some(ref ctx) = state.request_context {
-                    for (name, _value) in &ctx.headers {
-                        if name.to_lowercase() == "authorization" {
-                            // For now, accept any authorization header as authenticated
-                            // In production, this would validate the token/session
-                            debug!("Auth check passed: Authorization header present");
-                            return 1;
-                        }
-                    }
-                }
-
-                debug!("Auth check failed: no authentication found");
-                0 // Not authenticated
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_require_auth: {}", e)))?;
 
     // _auth_require_role - Check if user has a specific role
-    // Returns 1 if user has role, 0 if not
     linker
         .func_wrap(
             "env",
             "_auth_require_role",
             |mut caller: Caller<'_, WasmState>, role_ptr: i32, role_len: i32| -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
+                let required_role = match read_raw_string(&mut caller, role_ptr, role_len) {
+                    Some(s) => s,
                     None => return 0,
                 };
 
-                let data = memory.data(&caller);
-                let required_role = read_raw_string(data, role_ptr, role_len);
-
-                debug!("Checking for role: {}", required_role);
-
                 let state = caller.data();
-
-                // Check auth context for role
-                if let Some(ref auth) = state.auth_context {
-                    if auth.role == required_role || auth.role == "admin" {
-                        // Admin role has access to everything
-                        debug!("Role check passed: user has role '{}' or 'admin'", required_role);
-                        return 1;
+                if let Some(auth) = &state.auth_context {
+                    if auth.role == required_role {
+                        1
+                    } else {
+                        0
                     }
+                } else {
+                    0
                 }
-
-                // For testing: check for X-User-Role header
-                if let Some(ref ctx) = state.request_context {
-                    for (name, value) in &ctx.headers {
-                        if name.to_lowercase() == "x-user-role" {
-                            if value == &required_role || value == "admin" {
-                                debug!("Role check passed: X-User-Role header matches");
-                                return 1;
-                            }
-                        }
-                    }
-                }
-
-                debug!("Role check failed: user does not have required role '{}'", required_role);
-                0 // Does not have role
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_require_role: {}", e)))?;
 
-    // _auth_can - Check if user has a specific permission
-    // Returns 1 if user has permission, 0 if not
+    // _auth_can - Check if user has permission (role-based)
     linker
         .func_wrap(
             "env",
             "_auth_can",
-            |mut caller: Caller<'_, WasmState>, perm_ptr: i32, perm_len: i32| -> i32 {
-                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    Some(m) => m,
+            |mut caller: Caller<'_, WasmState>, permission_ptr: i32, permission_len: i32| -> i32 {
+                let permission = match read_raw_string(&mut caller, permission_ptr, permission_len) {
+                    Some(s) => s,
                     None => return 0,
                 };
 
-                let data = memory.data(&caller);
-                let required_perm = read_raw_string(data, perm_ptr, perm_len);
-
-                debug!("Checking for permission: {}", required_perm);
-
                 let state = caller.data();
-
-                // Admin role has all permissions
-                if let Some(ref auth) = state.auth_context {
-                    if auth.role == "admin" {
-                        debug!("Permission check passed: user is admin");
-                        return 1;
+                if let Some(auth) = &state.auth_context {
+                    // Simple role-based check: admin can do anything
+                    if auth.role == "admin" || auth.role == permission {
+                        1
+                    } else {
+                        0
                     }
+                } else {
+                    0
                 }
-
-                // For testing: check for X-User-Permissions header (comma-separated)
-                if let Some(ref ctx) = state.request_context {
-                    for (name, value) in &ctx.headers {
-                        if name.to_lowercase() == "x-user-permissions" {
-                            let perms: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
-                            if perms.contains(&required_perm.as_str()) {
-                                debug!("Permission check passed: user has permission");
-                                return 1;
-                            }
-                        }
-                    }
-                }
-
-                debug!("Permission check failed: user does not have permission '{}'", required_perm);
-                0 // Does not have permission
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_can: {}", e)))?;
 
-    // _auth_has_any_role - Check if user has any role (generic check)
-    // Returns 1 if user is authenticated with any role, 0 if not
+    // _auth_has_any_role - Check if user has any of the specified roles
     linker
         .func_wrap(
             "env",
             "_auth_has_any_role",
-            |caller: Caller<'_, WasmState>| -> i32 {
+            |mut caller: Caller<'_, WasmState>, roles_ptr: i32, roles_len: i32| -> i32 {
+                let roles_json = match read_raw_string(&mut caller, roles_ptr, roles_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+
+                let roles: Vec<String> = serde_json::from_str(&roles_json).unwrap_or_default();
+
                 let state = caller.data();
-
-                if let Some(ref auth) = state.auth_context {
-                    if !auth.role.is_empty() {
-                        debug!("Has role check passed: user has role '{}'", auth.role);
-                        return 1;
+                if let Some(auth) = &state.auth_context {
+                    if roles.contains(&auth.role) {
+                        1
+                    } else {
+                        0
                     }
+                } else {
+                    0
                 }
-
-                // Check for X-User-Role header
-                if let Some(ref ctx) = state.request_context {
-                    for (name, value) in &ctx.headers {
-                        if name.to_lowercase() == "x-user-role" && !value.is_empty() {
-                            debug!("Has role check passed: X-User-Role header present");
-                            return 1;
-                        }
-                    }
-                }
-
-                debug!("Has role check failed: no role found");
-                0
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_has_any_role: {}", e)))?;
 
-    info!("Host Bridge linker initialized with all functions");
-    Ok(linker)
+    Ok(())
 }
 
-/// Helper to write a string to WASM memory using caller
-///
-/// This function allocates memory within the WASM linear memory by either:
-/// 1. Calling the WASM module's exported `malloc` function (if available)
-/// 2. Falling back to allocating at the end of current memory
-///
-/// This ensures the pointer is valid from the WASM module's perspective.
-fn write_string_to_caller(caller: &mut Caller<'_, WasmState>, s: &str) -> i32 {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let total_size = STRING_LENGTH_PREFIX_SIZE + len;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    debug!("write_string_to_caller: Writing '{}' ({} bytes, total_size={})", s, len, total_size);
-
-    // Get WASM memory
-    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-        Some(m) => m,
-        None => {
-            error!("write_string_to_caller: No memory export found");
-            return 0;
-        }
-    };
-
-    // Use the host-side allocator which starts at 65536 (page 1)
-    // This avoids conflicts with:
-    // 1. WASM static data section (typically at addresses 1024+)
-    // 2. WASM's internal heap pointer (global 0) which may also start at 1024
-    //
-    // The Clean compiler currently has a bug where it initializes the heap pointer
-    // to 1024 but also places static strings at that same address. Using our
-    // host-side allocator at 65536+ ensures we don't overwrite static data.
-    let ptr = allocate_at_memory_end(&mut *caller, &memory, total_size);
-
-    if ptr == 0 {
-        error!("write_string_to_caller: Failed to allocate {} bytes", total_size);
-        return 0;
-    }
-
-    debug!("write_string_to_caller: Writing to ptr={}, memory_size={}", ptr, memory.data_size(&*caller));
-
-    // Write length prefix (4 bytes, little-endian)
-    let len_bytes = (len as u32).to_le_bytes();
-    if let Err(e) = memory.write(&mut *caller, ptr, &len_bytes) {
-        error!("write_string_to_caller: Failed to write length at ptr={}: {}", ptr, e);
-        return 0;
-    }
-
-    // Write string data
-    if let Err(e) = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes) {
-        error!("write_string_to_caller: Failed to write string data at ptr={}: {}", ptr + STRING_LENGTH_PREFIX_SIZE, e);
-        return 0;
-    }
-
-    debug!("write_string_to_caller: Successfully wrote string at ptr={}", ptr);
-    ptr as i32
-}
-
-/// Allocate memory at the end of WASM linear memory
-///
-/// This function uses the host-side bump allocator but ensures the memory
-/// is properly grown to accommodate the allocation.
-fn allocate_at_memory_end(caller: &mut Caller<'_, WasmState>, memory: &wasmtime::Memory, size: usize) -> usize {
-    // Get current allocation offset from state
-    let state = caller.data_mut();
-    let ptr = state.memory.allocate(size);
-
-    // Ensure memory is large enough
-    let required = ptr + size;
-    let current_size = memory.data_size(&*caller);
-
-    debug!("allocate_at_memory_end: ptr={}, size={}, required={}, current_size={}", ptr, size, required, current_size);
-
-    if required > current_size {
-        // Calculate required pages (64KB per page)
-        let required_pages = ((required + 65535) / 65536) as u64;
-        let current_pages = memory.size(&*caller);
-        let pages_to_grow = required_pages.saturating_sub(current_pages);
-
-        debug!("allocate_at_memory_end: need to grow from {} to {} pages ({} new pages)", current_pages, required_pages, pages_to_grow);
-
-        if pages_to_grow > 0 {
-            match memory.grow(&mut *caller, pages_to_grow) {
-                Ok(prev_pages) => {
-                    debug!("allocate_at_memory_end: grew from {} to {} pages", prev_pages, prev_pages + pages_to_grow);
-                }
-                Err(e) => {
-                    error!("allocate_at_memory_end: Failed to grow memory by {} pages: {}", pages_to_grow, e);
-                    return 0;
-                }
-            }
-        }
-    }
-
-    ptr
-}
-
-/// Helper to write bytes to WASM memory with length prefix
-///
-/// Uses the host-side allocator at 65536+ to avoid conflicts with WASM static data.
-fn write_bytes_to_caller(caller: &mut Caller<'_, WasmState>, bytes: &[u8]) -> i32 {
-    let len = bytes.len();
-    let total_size = STRING_LENGTH_PREFIX_SIZE + len;
-
-    // Get WASM memory
-    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-        Some(m) => m,
-        None => {
-            error!("write_bytes_to_caller: No memory export found");
-            return 0;
-        }
-    };
-
-    // Use host-side allocator at 65536+ to avoid conflicts with WASM static data
-    let ptr = allocate_at_memory_end(&mut *caller, &memory, total_size);
-
-    if ptr == 0 {
-        error!("write_bytes_to_caller: Failed to allocate {} bytes", total_size);
-        return 0;
-    }
-
-    // Write length prefix
-    let len_bytes = (len as u32).to_le_bytes();
-    if let Err(e) = memory.write(&mut *caller, ptr, &len_bytes) {
-        error!("write_bytes_to_caller: Failed to write length: {}", e);
-        return 0;
-    }
-
-    // Write bytes data
-    if let Err(e) = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes) {
-        error!("write_bytes_to_caller: Failed to write bytes: {}", e);
-        return 0;
-    }
-
-    ptr as i32
-}
-
-// NOTE: write_string_to_caller_state was removed because it was broken.
-// It allocated memory but never wrote data. All functions that need to
-// return strings should use write_string_to_caller() which properly
-// allocates AND writes to WASM memory.
-
-/// Read a raw string from WASM memory (no length prefix)
-fn read_raw_string(data: &[u8], ptr: i32, len: i32) -> String {
-    let start = ptr as usize;
-    let end = start + len as usize;
-
-    if end <= data.len() {
-        std::str::from_utf8(&data[start..end])
-            .unwrap_or("")
-            .to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// Read a length-prefixed string from WASM memory
-/// Format: [4-byte little-endian length][UTF-8 bytes]
-fn read_length_prefixed_string(data: &[u8], ptr: usize) -> Vec<u8> {
-    // Need at least 4 bytes for length prefix
-    if ptr + STRING_LENGTH_PREFIX_SIZE > data.len() {
-        return Vec::new();
-    }
-
-    // Read length (4 bytes, little-endian)
-    let len_bytes: [u8; 4] = data[ptr..ptr + 4].try_into().unwrap_or([0; 4]);
-    let len = u32::from_le_bytes(len_bytes) as usize;
-
-    // Read string bytes
-    let str_start = ptr + STRING_LENGTH_PREFIX_SIZE;
-    let str_end = str_start + len;
-
-    if str_end <= data.len() {
-        data[str_start..str_end].to_vec()
-    } else {
-        Vec::new()
+    #[test]
+    fn test_create_linker() {
+        let engine = Engine::default();
+        // This will fail because WasmState requires a router, but the linker creation should work
+        let result = create_linker(&engine);
+        assert!(result.is_ok());
     }
 }

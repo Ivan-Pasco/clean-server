@@ -84,7 +84,13 @@ pub mod wasm;
 pub use error::{HttpError, RuntimeError, RuntimeResult};
 pub use router::{HttpMethod, RouteHandler, Router, SharedRouter};
 pub use server::{start_server, ServerConfig};
-pub use wasm::{AuthContext, RequestContext, SharedWasmInstance, WasmInstance, WasmState};
+pub use wasm::{
+    create_shared_instance_with_db, AuthContext, RequestContext, SharedDbBridge,
+    SharedWasmInstance, WasmInstance, WasmState,
+};
+
+// Re-export host-bridge types for database configuration
+pub use host_bridge::{DbBridge, DbConfig};
 
 /// Runtime version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

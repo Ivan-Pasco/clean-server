@@ -4,7 +4,7 @@
 
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
-use crate::wasm::{RequestContext, SharedWasmInstance};
+use crate::wasm::{RequestContext, SharedDbBridge, SharedWasmInstance};
 use axum::{
     body::Body,
     extract::State,
@@ -12,10 +12,13 @@ use axum::{
     response::{IntoResponse, Response},
     Router,
 };
+use host_bridge::{DbBridge, DbConfig};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::RwLock as TokioRwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
@@ -33,6 +36,11 @@ pub struct ServerConfig {
     pub cors_origins: Vec<String>,
     /// Request body size limit (bytes)
     pub body_limit: usize,
+    /// Database URL (e.g., "sqlite://app.db", "postgres://user:pass@host/db")
+    /// If None, database features are disabled
+    pub database_url: Option<String>,
+    /// Database pool max connections (default: 10)
+    pub database_max_connections: u32,
 }
 
 impl Default for ServerConfig {
@@ -43,6 +51,8 @@ impl Default for ServerConfig {
             cors_enabled: true,
             cors_origins: vec![],
             body_limit: 10 * 1024 * 1024, // 10MB
+            database_url: std::env::var("DATABASE_URL").ok(),
+            database_max_connections: 10,
         }
     }
 }
@@ -55,6 +65,16 @@ impl ServerConfig {
 
     pub fn with_host(mut self, host: impl Into<String>) -> Self {
         self.host = host.into();
+        self
+    }
+
+    pub fn with_database(mut self, url: impl Into<String>) -> Self {
+        self.database_url = Some(url.into());
+        self
+    }
+
+    pub fn with_database_pool_size(mut self, max_connections: u32) -> Self {
+        self.database_max_connections = max_connections;
         self
     }
 
@@ -88,8 +108,34 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     // Create shared router
     let router = crate::router::create_shared_router();
 
-    // Load WASM module
-    let wasm = crate::wasm::create_shared_instance(&wasm_path, router.clone())?;
+    // Create database bridge
+    let db_bridge: SharedDbBridge = Arc::new(TokioRwLock::new(DbBridge::new()));
+
+    // Configure database if URL is provided
+    if let Some(ref db_url) = config.database_url {
+        info!("Configuring database connection: {}", mask_db_url(db_url));
+
+        let db_config = DbConfig {
+            database_url: db_url.clone(),
+            max_connections: config.database_max_connections,
+            min_connections: 2,
+            connection_timeout: 10000,
+            query_timeout: 30000,
+        };
+
+        let mut bridge = db_bridge.write().await;
+        match bridge.configure(db_config).await {
+            Ok(()) => info!("Database connection pool initialized"),
+            Err(e) => {
+                warn!("Failed to initialize database: {}. Database features will be unavailable.", e);
+            }
+        }
+    } else {
+        info!("No DATABASE_URL configured. Database features disabled.");
+    }
+
+    // Load WASM module with database bridge
+    let wasm = crate::wasm::create_shared_instance_with_db(&wasm_path, router.clone(), db_bridge)?;
 
     // Initialize WASM module (registers routes)
     wasm.initialize()?;
@@ -303,6 +349,27 @@ async fn shutdown_signal() {
             info!("Received termination signal, shutting down...");
         }
     }
+}
+
+/// Mask password in database URL for logging
+fn mask_db_url(url: &str) -> String {
+    // Pattern: protocol://user:password@host/db -> protocol://user:***@host/db
+    if let Some(at_pos) = url.rfind('@') {
+        if let Some(colon_pos) = url[..at_pos].rfind(':') {
+            // Check if this colon is part of password (after ://)
+            if colon_pos > 3 && &url[colon_pos - 1..colon_pos] != "/" {
+                let protocol_end = url.find("://").map(|p| p + 3).unwrap_or(0);
+                if colon_pos > protocol_end {
+                    return format!(
+                        "{}***{}",
+                        &url[..colon_pos + 1],
+                        &url[at_pos..]
+                    );
+                }
+            }
+        }
+    }
+    url.to_string()
 }
 
 #[cfg(test)]

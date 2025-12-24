@@ -1,18 +1,542 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::any::{AnyConnectOptions, AnyPoolOptions, AnyQueryResult, AnyRow};
-use sqlx::{Any, AnyPool, Column, Row, TypeInfo};
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
+use sqlx::{Column, Row, TypeInfo};
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+// ============================================================================
+// DATABASE DRIVER - Native driver with runtime dispatch
+// ============================================================================
+
+/// Native database driver with full type support
+/// Dispatches to PostgreSQL, MySQL, or SQLite based on connection URL
+#[derive(Clone)]
+pub enum DatabaseDriver {
+	Postgres(PgPool),
+	MySql(MySqlPool),
+	Sqlite(SqlitePool),
+}
+
+impl DatabaseDriver {
+	/// Connect to a database based on the URL scheme
+	pub async fn connect(url: &str, config: &DbConfig) -> Result<Self> {
+		if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+			let pool = PgPoolOptions::new()
+				.max_connections(config.max_connections)
+				.min_connections(config.min_connections)
+				.acquire_timeout(Duration::from_millis(config.connection_timeout))
+				.idle_timeout(Duration::from_secs(90))
+				.max_lifetime(Duration::from_secs(1800))
+				.test_before_acquire(true)
+				.connect(url)
+				.await?;
+			Ok(Self::Postgres(pool))
+		} else if url.starts_with("mysql://") || url.starts_with("mariadb://") {
+			let pool = MySqlPoolOptions::new()
+				.max_connections(config.max_connections)
+				.min_connections(config.min_connections)
+				.acquire_timeout(Duration::from_millis(config.connection_timeout))
+				.idle_timeout(Duration::from_secs(90))
+				.max_lifetime(Duration::from_secs(1800))
+				.test_before_acquire(true)
+				.connect(url)
+				.await?;
+			Ok(Self::MySql(pool))
+		} else if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
+			let pool = SqlitePoolOptions::new()
+				.max_connections(config.max_connections)
+				.min_connections(config.min_connections)
+				.acquire_timeout(Duration::from_millis(config.connection_timeout))
+				.idle_timeout(Duration::from_secs(90))
+				.test_before_acquire(true)
+				.connect(url)
+				.await?;
+			Ok(Self::Sqlite(pool))
+		} else {
+			Err(anyhow::anyhow!(
+				"Unsupported database URL scheme. Supported: postgres://, mysql://, sqlite://"
+			))
+		}
+	}
+
+	/// Execute a SELECT query and return rows as JSON
+	pub async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<serde_json::Map<String, Value>>> {
+		match self {
+			Self::Postgres(pool) => Self::query_postgres(pool, sql, params).await,
+			Self::MySql(pool) => Self::query_mysql(pool, sql, params).await,
+			Self::Sqlite(pool) => Self::query_sqlite(pool, sql, params).await,
+		}
+	}
+
+	/// Execute an INSERT/UPDATE/DELETE and return affected rows
+	pub async fn execute(&self, sql: &str, params: &[Value]) -> Result<ExecuteResult> {
+		match self {
+			Self::Postgres(pool) => Self::execute_postgres(pool, sql, params).await,
+			Self::MySql(pool) => Self::execute_mysql(pool, sql, params).await,
+			Self::Sqlite(pool) => Self::execute_sqlite(pool, sql, params).await,
+		}
+	}
+
+	/// Begin a real database transaction and execute operations
+	pub async fn execute_transaction(&self, operations: &[(String, Vec<Value>)]) -> Result<()> {
+		match self {
+			Self::Postgres(pool) => Self::execute_transaction_postgres(pool, operations).await,
+			Self::MySql(pool) => Self::execute_transaction_mysql(pool, operations).await,
+			Self::Sqlite(pool) => Self::execute_transaction_sqlite(pool, operations).await,
+		}
+	}
+
+	// ========================================================================
+	// PostgreSQL Implementation
+	// ========================================================================
+
+	async fn query_postgres(pool: &PgPool, sql: &str, params: &[Value]) -> Result<Vec<serde_json::Map<String, Value>>> {
+		let mut query = sqlx::query(sql);
+
+		for param in params {
+			query = Self::bind_param_postgres(query, param);
+		}
+
+		let rows = query.fetch_all(pool).await?;
+
+		let mut result = Vec::new();
+		for row in rows {
+			let map = Self::row_to_json_postgres(&row)?;
+			result.push(map);
+		}
+
+		Ok(result)
+	}
+
+	fn bind_param_postgres<'q>(
+		query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+		param: &Value,
+	) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+		match param {
+			Value::Null => query.bind(None::<String>),
+			Value::Bool(b) => query.bind(*b),
+			Value::Number(n) => {
+				if let Some(i) = n.as_i64() {
+					query.bind(i)
+				} else if let Some(f) = n.as_f64() {
+					query.bind(f)
+				} else {
+					query.bind(n.to_string())
+				}
+			}
+			Value::String(s) => query.bind(s.clone()),
+			Value::Array(_) | Value::Object(_) => query.bind(param.to_string()),
+		}
+	}
+
+	fn row_to_json_postgres(row: &PgRow) -> Result<serde_json::Map<String, Value>> {
+		let mut map = serde_json::Map::new();
+
+		for (i, column) in row.columns().iter().enumerate() {
+			let name = column.name().to_string();
+			let type_info = column.type_info();
+			let type_name = type_info.name();
+
+			let value = match type_name {
+				"BOOL" => {
+					row.try_get::<bool, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"INT2" | "SMALLINT" => {
+					row.try_get::<i16, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"INT4" | "INT" | "INTEGER" => {
+					row.try_get::<i32, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"INT8" | "BIGINT" => {
+					row.try_get::<i64, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"FLOAT4" | "REAL" => {
+					row.try_get::<f32, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"FLOAT8" | "DOUBLE PRECISION" => {
+					row.try_get::<f64, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" => {
+					row.try_get::<String, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"TIMESTAMP" | "TIMESTAMPTZ" => {
+					// Use chrono for proper timestamp handling
+					row.try_get::<chrono::NaiveDateTime, _>(i)
+						.map(|v| json!(v.to_string()))
+						.or_else(|_| {
+							row.try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+								.map(|v| json!(v.to_rfc3339()))
+						})
+						.unwrap_or(Value::Null)
+				}
+				"DATE" => {
+					row.try_get::<chrono::NaiveDate, _>(i)
+						.map(|v| json!(v.to_string()))
+						.unwrap_or(Value::Null)
+				}
+				"TIME" | "TIMETZ" => {
+					row.try_get::<chrono::NaiveTime, _>(i)
+						.map(|v| json!(v.to_string()))
+						.unwrap_or(Value::Null)
+				}
+				"UUID" => {
+					row.try_get::<uuid::Uuid, _>(i)
+						.map(|v| json!(v.to_string()))
+						.unwrap_or(Value::Null)
+				}
+				"JSON" | "JSONB" => {
+					row.try_get::<serde_json::Value, _>(i)
+						.unwrap_or(Value::Null)
+				}
+				"BYTEA" => {
+					row.try_get::<Vec<u8>, _>(i)
+						.map(|v| json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &v)))
+						.unwrap_or(Value::Null)
+				}
+				_ => {
+					// Fallback: try to get as string
+					row.try_get::<String, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+			};
+
+			map.insert(name, value);
+		}
+
+		Ok(map)
+	}
+
+	async fn execute_postgres(pool: &PgPool, sql: &str, params: &[Value]) -> Result<ExecuteResult> {
+		let mut query = sqlx::query(sql);
+
+		for param in params {
+			query = Self::bind_param_postgres(query, param);
+		}
+
+		let result = query.execute(pool).await?;
+
+		Ok(ExecuteResult {
+			rows_affected: result.rows_affected(),
+			last_insert_id: None, // PostgreSQL uses RETURNING clause instead
+		})
+	}
+
+	async fn execute_transaction_postgres(pool: &PgPool, operations: &[(String, Vec<Value>)]) -> Result<()> {
+		let mut tx = pool.begin().await?;
+
+		for (sql, params) in operations {
+			let mut query = sqlx::query(sql);
+			for param in params {
+				query = Self::bind_param_postgres(query, param);
+			}
+			query.execute(&mut *tx).await?;
+		}
+
+		tx.commit().await?;
+		Ok(())
+	}
+
+	// ========================================================================
+	// MySQL Implementation
+	// ========================================================================
+
+	async fn query_mysql(pool: &MySqlPool, sql: &str, params: &[Value]) -> Result<Vec<serde_json::Map<String, Value>>> {
+		let mut query = sqlx::query(sql);
+
+		for param in params {
+			query = Self::bind_param_mysql(query, param);
+		}
+
+		let rows = query.fetch_all(pool).await?;
+
+		let mut result = Vec::new();
+		for row in rows {
+			let map = Self::row_to_json_mysql(&row)?;
+			result.push(map);
+		}
+
+		Ok(result)
+	}
+
+	fn bind_param_mysql<'q>(
+		query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+		param: &Value,
+	) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+		match param {
+			Value::Null => query.bind(None::<String>),
+			Value::Bool(b) => query.bind(*b),
+			Value::Number(n) => {
+				if let Some(i) = n.as_i64() {
+					query.bind(i)
+				} else if let Some(f) = n.as_f64() {
+					query.bind(f)
+				} else {
+					query.bind(n.to_string())
+				}
+			}
+			Value::String(s) => query.bind(s.clone()),
+			Value::Array(_) | Value::Object(_) => query.bind(param.to_string()),
+		}
+	}
+
+	fn row_to_json_mysql(row: &MySqlRow) -> Result<serde_json::Map<String, Value>> {
+		let mut map = serde_json::Map::new();
+
+		for (i, column) in row.columns().iter().enumerate() {
+			let name = column.name().to_string();
+			let type_info = column.type_info();
+			let type_name = type_info.name();
+
+			let value = match type_name {
+				"BOOLEAN" | "TINYINT(1)" | "BOOL" => {
+					// MySQL stores booleans as TINYINT(1)
+					row.try_get::<bool, _>(i)
+						.or_else(|_| row.try_get::<i8, _>(i).map(|v| v != 0))
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"TINYINT" => {
+					row.try_get::<i8, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"SMALLINT" => {
+					row.try_get::<i16, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"INT" | "INTEGER" | "MEDIUMINT" => {
+					row.try_get::<i32, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"BIGINT" => {
+					row.try_get::<i64, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"FLOAT" => {
+					row.try_get::<f32, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"DOUBLE" => {
+					row.try_get::<f64, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"DECIMAL" | "NUMERIC" => {
+					// Read as string to preserve precision
+					row.try_get::<String, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"VARCHAR" | "CHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => {
+					row.try_get::<String, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+				"TIMESTAMP" | "DATETIME" => {
+					row.try_get::<chrono::NaiveDateTime, _>(i)
+						.map(|v| json!(v.to_string()))
+						.unwrap_or(Value::Null)
+				}
+				"DATE" => {
+					row.try_get::<chrono::NaiveDate, _>(i)
+						.map(|v| json!(v.to_string()))
+						.unwrap_or(Value::Null)
+				}
+				"TIME" => {
+					row.try_get::<chrono::NaiveTime, _>(i)
+						.map(|v| json!(v.to_string()))
+						.unwrap_or(Value::Null)
+				}
+				"JSON" => {
+					row.try_get::<serde_json::Value, _>(i)
+						.unwrap_or(Value::Null)
+				}
+				"BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" => {
+					row.try_get::<Vec<u8>, _>(i)
+						.map(|v| json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &v)))
+						.unwrap_or(Value::Null)
+				}
+				_ => {
+					// Fallback: try to get as string
+					row.try_get::<String, _>(i)
+						.map(|v| json!(v))
+						.unwrap_or(Value::Null)
+				}
+			};
+
+			map.insert(name, value);
+		}
+
+		Ok(map)
+	}
+
+	async fn execute_mysql(pool: &MySqlPool, sql: &str, params: &[Value]) -> Result<ExecuteResult> {
+		let mut query = sqlx::query(sql);
+
+		for param in params {
+			query = Self::bind_param_mysql(query, param);
+		}
+
+		let result = query.execute(pool).await?;
+
+		Ok(ExecuteResult {
+			rows_affected: result.rows_affected(),
+			last_insert_id: Some(result.last_insert_id() as i64),
+		})
+	}
+
+	async fn execute_transaction_mysql(pool: &MySqlPool, operations: &[(String, Vec<Value>)]) -> Result<()> {
+		let mut tx = pool.begin().await?;
+
+		for (sql, params) in operations {
+			let mut query = sqlx::query(sql);
+			for param in params {
+				query = Self::bind_param_mysql(query, param);
+			}
+			query.execute(&mut *tx).await?;
+		}
+
+		tx.commit().await?;
+		Ok(())
+	}
+
+	// ========================================================================
+	// SQLite Implementation
+	// ========================================================================
+
+	async fn query_sqlite(pool: &SqlitePool, sql: &str, params: &[Value]) -> Result<Vec<serde_json::Map<String, Value>>> {
+		let mut query = sqlx::query(sql);
+
+		for param in params {
+			query = Self::bind_param_sqlite(query, param);
+		}
+
+		let rows = query.fetch_all(pool).await?;
+
+		let mut result = Vec::new();
+		for row in rows {
+			let map = Self::row_to_json_sqlite(&row)?;
+			result.push(map);
+		}
+
+		Ok(result)
+	}
+
+	fn bind_param_sqlite<'q>(
+		query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+		param: &Value,
+	) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+		match param {
+			Value::Null => query.bind(None::<String>),
+			Value::Bool(b) => query.bind(*b),
+			Value::Number(n) => {
+				if let Some(i) = n.as_i64() {
+					query.bind(i)
+				} else if let Some(f) = n.as_f64() {
+					query.bind(f)
+				} else {
+					query.bind(n.to_string())
+				}
+			}
+			Value::String(s) => query.bind(s.clone()),
+			Value::Array(_) | Value::Object(_) => query.bind(param.to_string()),
+		}
+	}
+
+	fn row_to_json_sqlite(row: &SqliteRow) -> Result<serde_json::Map<String, Value>> {
+		let mut map = serde_json::Map::new();
+
+		for (i, column) in row.columns().iter().enumerate() {
+			let name = column.name().to_string();
+
+			// SQLite is dynamically typed - always try to determine the actual type at runtime
+			// Type info from SQLite can be unreliable for expressions, aliases, and aggregates
+			let value = if let Ok(v) = row.try_get::<i64, _>(i) {
+				json!(v)
+			} else if let Ok(v) = row.try_get::<i32, _>(i) {
+				json!(v)
+			} else if let Ok(v) = row.try_get::<f64, _>(i) {
+				json!(v)
+			} else if let Ok(v) = row.try_get::<String, _>(i) {
+				json!(v)
+			} else if let Ok(v) = row.try_get::<bool, _>(i) {
+				json!(v)
+			} else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
+				json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &v))
+			} else {
+				Value::Null
+			};
+
+			map.insert(name, value);
+		}
+
+		Ok(map)
+	}
+
+	async fn execute_sqlite(pool: &SqlitePool, sql: &str, params: &[Value]) -> Result<ExecuteResult> {
+		let mut query = sqlx::query(sql);
+
+		for param in params {
+			query = Self::bind_param_sqlite(query, param);
+		}
+
+		let result = query.execute(pool).await?;
+
+		Ok(ExecuteResult {
+			rows_affected: result.rows_affected(),
+			last_insert_id: Some(result.last_insert_rowid()),
+		})
+	}
+
+	async fn execute_transaction_sqlite(pool: &SqlitePool, operations: &[(String, Vec<Value>)]) -> Result<()> {
+		let mut tx = pool.begin().await?;
+
+		for (sql, params) in operations {
+			let mut query = sqlx::query(sql);
+			for param in params {
+				query = Self::bind_param_sqlite(query, param);
+			}
+			query.execute(&mut *tx).await?;
+		}
+
+		tx.commit().await?;
+		Ok(())
+	}
+}
+
+// ============================================================================
+// DATABASE BRIDGE
+// ============================================================================
+
 /// Database bridge providing database access capabilities
 pub struct DbBridge {
-	pool: Arc<RwLock<Option<AnyPool>>>,
+	driver: Arc<RwLock<Option<DatabaseDriver>>>,
 	config: Arc<RwLock<Option<DbConfig>>>,
 	transactions: Arc<RwLock<HashMap<String, Transaction>>>,
 }
@@ -107,6 +631,13 @@ pub struct DbResult {
 	pub affected: usize,
 }
 
+/// Result from execute operations
+#[derive(Debug)]
+pub struct ExecuteResult {
+	pub rows_affected: u64,
+	pub last_insert_id: Option<i64>,
+}
+
 /// Transaction state
 struct Transaction {
 	#[allow(dead_code)]
@@ -120,7 +651,7 @@ impl DbBridge {
 	/// Create a new DbBridge without an active connection
 	pub fn new() -> Self {
 		Self {
-			pool: Arc::new(RwLock::new(None)),
+			driver: Arc::new(RwLock::new(None)),
 			config: Arc::new(RwLock::new(None)),
 			transactions: Arc::new(RwLock::new(HashMap::new())),
 		}
@@ -144,63 +675,26 @@ impl DbBridge {
 			));
 		}
 
-		// Parse connection options
-		let connect_options = match AnyConnectOptions::from_str(&config.database_url) {
-			Ok(opts) => opts,
-			Err(e) => {
-				return Err(anyhow::anyhow!("Invalid database URL: {}", e));
-			}
-		};
+		// Connect using the appropriate driver
+		let driver = DatabaseDriver::connect(&config.database_url, &config).await?;
 
-		// Create connection pool
-		let pool = AnyPoolOptions::new()
-			.max_connections(config.max_connections)
-			.min_connections(config.min_connections)
-			.acquire_timeout(Duration::from_millis(config.connection_timeout))
-			.idle_timeout(Duration::from_secs(90))
-			.max_lifetime(Duration::from_secs(1800)) // 30 minutes
-			.test_before_acquire(true)
-			.connect_with(connect_options)
-			.await?;
-
-		// Store the pool and config
-		*self.pool.write().await = Some(pool);
+		// Store the driver and config
+		*self.driver.write().await = Some(driver);
 		*self.config.write().await = Some(config);
 
 		Ok(())
 	}
 
-	/// Get the connection pool, initializing with default SQLite if needed
-	async fn get_pool(&self) -> Result<AnyPool> {
-		let pool_guard = self.pool.read().await;
+	/// Get the database driver
+	async fn get_driver(&self) -> Result<DatabaseDriver> {
+		let driver_guard = self.driver.read().await;
 
-		if let Some(pool) = pool_guard.as_ref() {
-			Ok(pool.clone())
+		if let Some(driver) = driver_guard.as_ref() {
+			Ok(driver.clone())
 		} else {
-			drop(pool_guard);
-
-			// Check if we have a config
-			let config_guard = self.config.read().await;
-			if let Some(config) = config_guard.as_ref() {
-				let config_clone = config.clone();
-				drop(config_guard);
-
-				// Create pool from config
-				let connect_options = AnyConnectOptions::from_str(&config_clone.database_url)?;
-				let pool = AnyPoolOptions::new()
-					.max_connections(config_clone.max_connections)
-					.min_connections(config_clone.min_connections)
-					.acquire_timeout(Duration::from_millis(config_clone.connection_timeout))
-					.connect_with(connect_options)
-					.await?;
-
-				*self.pool.write().await = Some(pool.clone());
-				Ok(pool)
-			} else {
-				Err(anyhow::anyhow!(
-					"Database not configured. Call configure() first or set DATABASE_URL environment variable."
-				))
-			}
+			Err(anyhow::anyhow!(
+				"Database not configured. Call configure() first or set DATABASE_URL environment variable."
+			))
 		}
 	}
 
@@ -214,7 +708,7 @@ impl DbBridge {
 			"transaction_rollback" => self.transaction_rollback(params).await,
 			"query_in_tx" => self.query_in_tx(params).await,
 			"execute_in_tx" => self.execute_in_tx(params).await,
-			"config" => self.config(params).await,
+			"config" => self.config_call(params).await,
 			_ => {
 				Ok(json!({
 					"ok": false,
@@ -229,10 +723,7 @@ impl DbBridge {
 	}
 
 	/// Execute a SELECT query and return rows
-	/// Args: {"sql": "SELECT * FROM users WHERE id = $1", "params": [123]}
-	/// Returns: {"ok": true, "data": {"rows": [...], "count": 1}}
 	async fn query(&self, params: Value) -> Result<Value> {
-		// Parse request parameters
 		let req: DbQueryRequest = match serde_json::from_value(params) {
 			Ok(req) => req,
 			Err(e) => {
@@ -247,7 +738,7 @@ impl DbBridge {
 			}
 		};
 
-		// Validate SQL (basic check for SELECT)
+		// Validate SQL
 		let sql_upper = req.sql.trim().to_uppercase();
 		if !sql_upper.starts_with("SELECT") && !sql_upper.starts_with("WITH") {
 			return Ok(json!({
@@ -260,9 +751,8 @@ impl DbBridge {
 			}));
 		}
 
-		// Get connection pool
-		let pool = match self.get_pool().await {
-			Ok(p) => p,
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
 			Err(e) => {
 				return Ok(json!({
 					"ok": false,
@@ -275,19 +765,14 @@ impl DbBridge {
 			}
 		};
 
-		// Get query timeout from config
 		let timeout = {
 			let config_guard = self.config.read().await;
-			config_guard
-				.as_ref()
-				.map(|c| c.query_timeout)
-				.unwrap_or(30000)
+			config_guard.as_ref().map(|c| c.query_timeout).unwrap_or(30000)
 		};
 
-		// Execute query with timeout
 		let result = tokio::time::timeout(
 			Duration::from_millis(timeout),
-			self.execute_query(&pool, &req.sql, &req.params),
+			driver.query(&req.sql, &req.params),
 		)
 		.await;
 
@@ -300,9 +785,7 @@ impl DbBridge {
 				}
 			})),
 			Ok(Err(e)) => {
-				let error_msg = format!("{}", e);
-				let (code, message) = self.categorize_error(&error_msg);
-
+				let (code, message) = self.categorize_error(&format!("{}", e));
 				Ok(json!({
 					"ok": false,
 					"err": {
@@ -323,11 +806,8 @@ impl DbBridge {
 		}
 	}
 
-	/// Execute an INSERT/UPDATE/DELETE query and return affected rows
-	/// Args: {"sql": "INSERT INTO users (name, email) VALUES ($1, $2)", "params": ["Bob", "bob@example.com"]}
-	/// Returns: {"ok": true, "data": {"affected_rows": 1, "last_insert_id": 124}}
+	/// Execute an INSERT/UPDATE/DELETE query
 	async fn execute(&self, params: Value) -> Result<Value> {
-		// Parse request parameters
 		let req: DbExecuteRequest = match serde_json::from_value(params) {
 			Ok(req) => req,
 			Err(e) => {
@@ -342,12 +822,10 @@ impl DbBridge {
 			}
 		};
 
-		// Validate SQL (must be INSERT, UPDATE, DELETE, or CREATE/DROP/ALTER)
+		// Validate SQL
 		let sql_upper = req.sql.trim().to_uppercase();
 		let valid_commands = ["INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "TRUNCATE"];
-		let is_valid = valid_commands
-			.iter()
-			.any(|cmd| sql_upper.starts_with(cmd));
+		let is_valid = valid_commands.iter().any(|cmd| sql_upper.starts_with(cmd));
 
 		if !is_valid {
 			return Ok(json!({
@@ -360,9 +838,8 @@ impl DbBridge {
 			}));
 		}
 
-		// Get connection pool
-		let pool = match self.get_pool().await {
-			Ok(p) => p,
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
 			Err(e) => {
 				return Ok(json!({
 					"ok": false,
@@ -375,34 +852,27 @@ impl DbBridge {
 			}
 		};
 
-		// Get query timeout from config
 		let timeout = {
 			let config_guard = self.config.read().await;
-			config_guard
-				.as_ref()
-				.map(|c| c.query_timeout)
-				.unwrap_or(30000)
+			config_guard.as_ref().map(|c| c.query_timeout).unwrap_or(30000)
 		};
 
-		// Execute query with timeout
 		let result = tokio::time::timeout(
 			Duration::from_millis(timeout),
-			self.execute_command(&pool, &req.sql, &req.params),
+			driver.execute(&req.sql, &req.params),
 		)
 		.await;
 
 		match result {
-			Ok(Ok(result)) => Ok(json!({
+			Ok(Ok(exec_result)) => Ok(json!({
 				"ok": true,
 				"data": {
-					"affected_rows": result.rows_affected,
-					"last_insert_id": result.last_insert_id
+					"affected_rows": exec_result.rows_affected,
+					"last_insert_id": exec_result.last_insert_id
 				}
 			})),
 			Ok(Err(e)) => {
-				let error_msg = format!("{}", e);
-				let (code, message) = self.categorize_error(&error_msg);
-
+				let (code, message) = self.categorize_error(&format!("{}", e));
 				Ok(json!({
 					"ok": false,
 					"err": {
@@ -424,13 +894,9 @@ impl DbBridge {
 	}
 
 	/// Begin a new transaction
-	/// Args: {}
-	/// Returns: {"ok": true, "data": {"tx_id": "tx_abc123def456"}}
 	async fn transaction_begin(&self, _params: Value) -> Result<Value> {
-		// Generate a unique transaction ID
 		let tx_id = format!("tx_{}", Uuid::new_v4().to_string().replace("-", ""));
 
-		// Create transaction state
 		let transaction = Transaction {
 			id: tx_id.clone(),
 			committed: false,
@@ -438,7 +904,6 @@ impl DbBridge {
 			operations: Vec::new(),
 		};
 
-		// Store transaction
 		let mut transactions = self.transactions.write().await;
 		transactions.insert(tx_id.clone(), transaction);
 
@@ -451,10 +916,7 @@ impl DbBridge {
 	}
 
 	/// Commit a transaction
-	/// Args: {"tx_id": "tx_abc123def456"}
-	/// Returns: {"ok": true, "data": null}
 	async fn transaction_commit(&self, params: Value) -> Result<Value> {
-		// Parse request parameters
 		let req: DbTransactionCommitRequest = match serde_json::from_value(params) {
 			Ok(req) => req,
 			Err(e) => {
@@ -469,7 +931,6 @@ impl DbBridge {
 			}
 		};
 
-		// Get transaction
 		let mut transactions = self.transactions.write().await;
 		let transaction = match transactions.get_mut(&req.tx_id) {
 			Some(tx) => tx,
@@ -485,7 +946,6 @@ impl DbBridge {
 			}
 		};
 
-		// Check if already committed or rolled back
 		if transaction.committed {
 			return Ok(json!({
 				"ok": false,
@@ -508,9 +968,8 @@ impl DbBridge {
 			}));
 		}
 
-		// Get connection pool
-		let pool = match self.get_pool().await {
-			Ok(p) => p,
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
 			Err(e) => {
 				return Ok(json!({
 					"ok": false,
@@ -523,57 +982,17 @@ impl DbBridge {
 			}
 		};
 
-		// Execute all operations in a real transaction
 		let operations = transaction.operations.clone();
-		drop(transactions); // Release lock before async operation
+		drop(transactions);
 
-		// Begin real transaction
-		let mut tx = match pool.begin().await {
-			Ok(tx) => tx,
-			Err(e) => {
-				return Ok(json!({
-					"ok": false,
-					"err": {
-						"code": "TRANSACTION_ERROR",
-						"message": format!("Failed to begin transaction: {}", e),
-						"details": {}
-					}
-				}));
-			}
-		};
-
-		// Execute all operations
-		for (sql, params) in operations {
-			let mut query = sqlx::query(&sql);
-			for param in &params {
-				query = self.bind_parameter(query, param);
-			}
-
-			if let Err(e) = query.execute(&mut *tx).await {
-				// Rollback on error
-				let _ = tx.rollback().await;
-
-				let error_msg = format!("{}", e);
-				let (code, message) = self.categorize_error(&error_msg);
-
-				return Ok(json!({
-					"ok": false,
-					"err": {
-						"code": code,
-						"message": message,
-						"details": {}
-					}
-				}));
-			}
-		}
-
-		// Commit transaction
-		if let Err(e) = tx.commit().await {
+		// Execute all operations in a real transaction
+		if let Err(e) = driver.execute_transaction(&operations).await {
+			let (code, message) = self.categorize_error(&format!("{}", e));
 			return Ok(json!({
 				"ok": false,
 				"err": {
-					"code": "TRANSACTION_ERROR",
-					"message": format!("Failed to commit transaction: {}", e),
+					"code": code,
+					"message": message,
 					"details": {}
 				}
 			}));
@@ -593,10 +1012,7 @@ impl DbBridge {
 	}
 
 	/// Rollback a transaction
-	/// Args: {"tx_id": "tx_abc123def456"}
-	/// Returns: {"ok": true, "data": null}
 	async fn transaction_rollback(&self, params: Value) -> Result<Value> {
-		// Parse request parameters
 		let req: DbTransactionRollbackRequest = match serde_json::from_value(params) {
 			Ok(req) => req,
 			Err(e) => {
@@ -611,7 +1027,6 @@ impl DbBridge {
 			}
 		};
 
-		// Get transaction
 		let mut transactions = self.transactions.write().await;
 		let transaction = match transactions.get_mut(&req.tx_id) {
 			Some(tx) => tx,
@@ -627,7 +1042,6 @@ impl DbBridge {
 			}
 		};
 
-		// Check if already committed or rolled back
 		if transaction.committed {
 			return Ok(json!({
 				"ok": false,
@@ -650,7 +1064,6 @@ impl DbBridge {
 			}));
 		}
 
-		// Mark as rolled back and remove from tracking
 		transaction.rolled_back = true;
 		transactions.remove(&req.tx_id);
 
@@ -661,10 +1074,7 @@ impl DbBridge {
 	}
 
 	/// Execute a query within a transaction
-	/// Args: {"tx_id": "tx_abc123def456", "sql": "SELECT * FROM users WHERE id = $1", "params": [123]}
-	/// Returns: {"ok": true, "data": {"rows": [...], "count": 1}}
 	async fn query_in_tx(&self, params: Value) -> Result<Value> {
-		// Parse request parameters
 		let req: DbQueryInTxRequest = match serde_json::from_value(params) {
 			Ok(req) => req,
 			Err(e) => {
@@ -679,7 +1089,6 @@ impl DbBridge {
 			}
 		};
 
-		// Validate SQL (basic check for SELECT)
 		let sql_upper = req.sql.trim().to_uppercase();
 		if !sql_upper.starts_with("SELECT") && !sql_upper.starts_with("WITH") {
 			return Ok(json!({
@@ -692,7 +1101,6 @@ impl DbBridge {
 			}));
 		}
 
-		// Get transaction
 		let transactions = self.transactions.read().await;
 		let transaction = match transactions.get(&req.tx_id) {
 			Some(tx) => tx,
@@ -708,7 +1116,6 @@ impl DbBridge {
 			}
 		};
 
-		// Check if already committed or rolled back
 		if transaction.committed {
 			return Ok(json!({
 				"ok": false,
@@ -732,10 +1139,8 @@ impl DbBridge {
 		}
 		drop(transactions);
 
-		// Execute query (will be included in transaction on commit)
-		// For now, execute immediately but track the operation
-		let pool = match self.get_pool().await {
-			Ok(p) => p,
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
 			Err(e) => {
 				return Ok(json!({
 					"ok": false,
@@ -748,8 +1153,7 @@ impl DbBridge {
 			}
 		};
 
-		// Execute query
-		match self.execute_query(&pool, &req.sql, &req.params).await {
+		match driver.query(&req.sql, &req.params).await {
 			Ok(rows) => Ok(json!({
 				"ok": true,
 				"data": {
@@ -758,9 +1162,7 @@ impl DbBridge {
 				}
 			})),
 			Err(e) => {
-				let error_msg = format!("{}", e);
-				let (code, message) = self.categorize_error(&error_msg);
-
+				let (code, message) = self.categorize_error(&format!("{}", e));
 				Ok(json!({
 					"ok": false,
 					"err": {
@@ -774,10 +1176,7 @@ impl DbBridge {
 	}
 
 	/// Execute a command within a transaction
-	/// Args: {"tx_id": "tx_abc123def456", "sql": "INSERT INTO users (name) VALUES ($1)", "params": ["Alice"]}
-	/// Returns: {"ok": true, "data": {"affected_rows": 1, "last_insert_id": 124}}
 	async fn execute_in_tx(&self, params: Value) -> Result<Value> {
-		// Parse request parameters
 		let req: DbExecuteInTxRequest = match serde_json::from_value(params) {
 			Ok(req) => req,
 			Err(e) => {
@@ -792,12 +1191,9 @@ impl DbBridge {
 			}
 		};
 
-		// Validate SQL
 		let sql_upper = req.sql.trim().to_uppercase();
 		let valid_commands = ["INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "TRUNCATE"];
-		let is_valid = valid_commands
-			.iter()
-			.any(|cmd| sql_upper.starts_with(cmd));
+		let is_valid = valid_commands.iter().any(|cmd| sql_upper.starts_with(cmd));
 
 		if !is_valid {
 			return Ok(json!({
@@ -810,7 +1206,6 @@ impl DbBridge {
 			}));
 		}
 
-		// Get transaction
 		let mut transactions = self.transactions.write().await;
 		let transaction = match transactions.get_mut(&req.tx_id) {
 			Some(tx) => tx,
@@ -826,7 +1221,6 @@ impl DbBridge {
 			}
 		};
 
-		// Check if already committed or rolled back
 		if transaction.committed {
 			return Ok(json!({
 				"ok": false,
@@ -849,12 +1243,8 @@ impl DbBridge {
 			}));
 		}
 
-		// Add operation to transaction
-		transaction
-			.operations
-			.push((req.sql.clone(), req.params.clone()));
+		transaction.operations.push((req.sql.clone(), req.params.clone()));
 
-		// Return success (actual execution happens on commit)
 		Ok(json!({
 			"ok": true,
 			"data": {
@@ -865,10 +1255,7 @@ impl DbBridge {
 	}
 
 	/// Configure database connection
-	/// Args: {"database_url": "postgres://...", "max_connections": 10, ...}
-	/// Returns: {"ok": true, "data": null}
-	async fn config(&mut self, params: Value) -> Result<Value> {
-		// Parse config parameters
+	async fn config_call(&mut self, params: Value) -> Result<Value> {
 		let config: DbConfig = match serde_json::from_value(params) {
 			Ok(cfg) => cfg,
 			Err(e) => {
@@ -883,7 +1270,6 @@ impl DbBridge {
 			}
 		};
 
-		// Configure the bridge
 		match self.configure(config).await {
 			Ok(_) => Ok(json!({
 				"ok": true,
@@ -898,141 +1284,6 @@ impl DbBridge {
 				}
 			})),
 		}
-	}
-
-	// Helper methods
-
-	/// Execute a query and return rows
-	async fn execute_query(
-		&self,
-		pool: &AnyPool,
-		sql: &str,
-		params: &[Value],
-	) -> Result<Vec<serde_json::Map<String, Value>>> {
-		let mut query = sqlx::query(sql);
-
-		// Bind parameters
-		for param in params {
-			query = self.bind_parameter(query, param);
-		}
-
-		// Execute query
-		let rows = query.fetch_all(pool).await?;
-
-		// Convert rows to JSON
-		let mut result = Vec::new();
-		for row in rows {
-			let mut map = serde_json::Map::new();
-
-			// Get all columns
-			for (i, column) in row.columns().iter().enumerate() {
-				let column_name = column.name().to_string();
-				let value = self.row_value_to_json(&row, i)?;
-				map.insert(column_name, value);
-			}
-
-			result.push(map);
-		}
-
-		Ok(result)
-	}
-
-	/// Execute a command and return result
-	async fn execute_command(
-		&self,
-		pool: &AnyPool,
-		sql: &str,
-		params: &[Value],
-	) -> Result<ExecuteResult> {
-		let mut query = sqlx::query(sql);
-
-		// Bind parameters
-		for param in params {
-			query = self.bind_parameter(query, param);
-		}
-
-		// Execute query
-		let result = query.execute(pool).await?;
-
-		Ok(ExecuteResult {
-			rows_affected: result.rows_affected(),
-			last_insert_id: self.extract_last_insert_id(result),
-		})
-	}
-
-	/// Bind a JSON parameter to a SQL query
-	fn bind_parameter<'q>(
-		&self,
-		query: sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>>,
-		param: &Value,
-	) -> sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>> {
-		match param {
-			Value::Null => query.bind(None::<String>),
-			Value::Bool(b) => query.bind(*b),
-			Value::Number(n) => {
-				if let Some(i) = n.as_i64() {
-					query.bind(i)
-				} else if let Some(f) = n.as_f64() {
-					query.bind(f)
-				} else {
-					query.bind(n.to_string())
-				}
-			}
-			Value::String(s) => query.bind(s.clone()),
-			Value::Array(_) | Value::Object(_) => query.bind(param.to_string()),
-		}
-	}
-
-	/// Convert a row value to JSON
-	fn row_value_to_json(&self, row: &AnyRow, index: usize) -> Result<Value> {
-		let column = &row.columns()[index];
-		let type_info = column.type_info();
-		let type_name = type_info.name();
-
-		// Try different types in order
-		// Start with boolean
-		if let Ok(v) = row.try_get::<bool, _>(index) {
-			return Ok(json!(v));
-		}
-
-		// Try integers
-		if let Ok(v) = row.try_get::<i64, _>(index) {
-			return Ok(json!(v));
-		}
-		if let Ok(v) = row.try_get::<i32, _>(index) {
-			return Ok(json!(v));
-		}
-		if let Ok(v) = row.try_get::<i16, _>(index) {
-			return Ok(json!(v));
-		}
-
-		// Try floats
-		if let Ok(v) = row.try_get::<f64, _>(index) {
-			return Ok(json!(v));
-		}
-		if let Ok(v) = row.try_get::<f32, _>(index) {
-			return Ok(json!(v));
-		}
-
-		// Try string (works for many types including dates, timestamps, UUIDs)
-		if let Ok(v) = row.try_get::<String, _>(index) {
-			// Check if this looks like a JSON value
-			if type_name == "JSON" || type_name == "JSONB" {
-				// Try to parse as JSON
-				if let Ok(json_value) = serde_json::from_str::<Value>(&v) {
-					return Ok(json_value);
-				}
-			}
-			return Ok(json!(v));
-		}
-
-		// If all else fails, return null
-		Ok(Value::Null)
-	}
-
-	/// Extract last insert ID from query result
-	fn extract_last_insert_id(&self, result: AnyQueryResult) -> Option<i64> {
-		result.last_insert_id()
 	}
 
 	/// Categorize database error and return appropriate code and message
@@ -1062,10 +1313,8 @@ impl DbBridge {
 		}
 	}
 
-	/// Sanitize error message to prevent SQL injection in error responses
+	/// Sanitize error message
 	fn sanitize_error(&self, error: &str) -> String {
-		// Remove potential SQL from error messages
-		// Keep it simple but informative
 		let sanitized = error
 			.lines()
 			.next()
@@ -1082,17 +1331,15 @@ impl DbBridge {
 	}
 }
 
-/// Result from execute operations
-struct ExecuteResult {
-	rows_affected: u64,
-	last_insert_id: Option<i64>,
-}
-
 impl Default for DbBridge {
 	fn default() -> Self {
 		Self::new()
 	}
 }
+
+// ============================================================================
+// TESTS
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1100,31 +1347,16 @@ mod tests {
 	use std::sync::Arc;
 	use tokio::sync::Mutex as AsyncMutex;
 
-	// Global mutex to serialize test database access
 	static TEST_DB_MUTEX: once_cell::sync::Lazy<Arc<AsyncMutex<()>>> =
 		once_cell::sync::Lazy::new(|| Arc::new(AsyncMutex::new(())));
 
-	// Enable SQLite driver for testing
-	fn install_driver() {
-		use sqlx::any::install_default_drivers;
-		static INIT: std::sync::Once = std::sync::Once::new();
-		INIT.call_once(|| {
-			install_default_drivers();
-		});
-	}
-
 	async fn setup_test_db() -> (DbBridge, tokio::sync::MutexGuard<'static, ()>) {
-		install_driver();
-
-		// Lock the test database to prevent concurrent access
 		let guard = TEST_DB_MUTEX.lock().await;
 
 		let mut bridge = DbBridge::new();
 
-		// Use a shared in-memory SQLite database for testing
-		// The ?mode=memory&cache=shared makes it accessible across connections
 		let config = DbConfig {
-			database_url: "sqlite:file::memory:?cache=shared".to_string(),
+			database_url: "sqlite::memory:".to_string(),
 			max_connections: 5,
 			min_connections: 1,
 			connection_timeout: 5000,
@@ -1133,7 +1365,7 @@ mod tests {
 
 		bridge.configure(config).await.unwrap();
 
-		// Drop table if exists (cleanup from previous test)
+		// Drop table if exists
 		let _ = bridge.call("execute", json!({
 			"sql": "DROP TABLE IF EXISTS users",
 			"params": []
@@ -1155,8 +1387,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_db_config() {
-		install_driver();
-
 		let mut bridge = DbBridge::new();
 
 		let params = json!({
@@ -1168,7 +1398,6 @@ mod tests {
 		});
 
 		let result = bridge.call("config", params).await.unwrap();
-
 		assert_eq!(result["ok"], true);
 	}
 
@@ -1185,8 +1414,6 @@ mod tests {
 
 		assert_eq!(result["ok"], true);
 		assert_eq!(result["data"]["affected_rows"], 1);
-		// SQLite may or may not return last_insert_id
-		assert!(result["data"]["last_insert_id"].is_number() || result["data"]["last_insert_id"].is_null());
 	}
 
 	#[tokio::test]
@@ -1219,7 +1446,6 @@ mod tests {
 	async fn test_db_query_select_all() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Insert multiple rows
 		for i in 1..=3 {
 			let insert = json!({
 				"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
@@ -1228,7 +1454,6 @@ mod tests {
 			bridge.call("execute", insert).await.unwrap();
 		}
 
-		// Query all
 		let params = json!({
 			"sql": "SELECT * FROM users ORDER BY age",
 			"params": []
@@ -1244,14 +1469,12 @@ mod tests {
 	async fn test_db_execute_update() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Insert
 		let insert = json!({
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
 			"params": ["Charlie", "charlie@example.com", 35]
 		});
 		bridge.call("execute", insert).await.unwrap();
 
-		// Update
 		let update = json!({
 			"sql": "UPDATE users SET age = $1 WHERE email = $2",
 			"params": [40, "charlie@example.com"]
@@ -1262,7 +1485,6 @@ mod tests {
 		assert_eq!(result["ok"], true);
 		assert_eq!(result["data"]["affected_rows"], 1);
 
-		// Verify update
 		let query = json!({
 			"sql": "SELECT age FROM users WHERE email = $1",
 			"params": ["charlie@example.com"]
@@ -1276,14 +1498,12 @@ mod tests {
 	async fn test_db_execute_delete() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Insert
 		let insert = json!({
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
 			"params": ["David", "david@example.com", 28]
 		});
 		bridge.call("execute", insert).await.unwrap();
 
-		// Delete
 		let delete = json!({
 			"sql": "DELETE FROM users WHERE email = $1",
 			"params": ["david@example.com"]
@@ -1299,13 +1519,11 @@ mod tests {
 	async fn test_db_transaction_commit() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Begin transaction
 		let begin_result = bridge.call("transaction_begin", json!({})).await.unwrap();
 		assert_eq!(begin_result["ok"], true);
 
 		let tx_id = begin_result["data"]["tx_id"].as_str().unwrap();
 
-		// Execute in transaction
 		let execute1 = json!({
 			"tx_id": tx_id,
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
@@ -1320,13 +1538,11 @@ mod tests {
 		});
 		bridge.call("execute_in_tx", execute2).await.unwrap();
 
-		// Commit
 		let commit = json!({"tx_id": tx_id});
 		let result = bridge.call("transaction_commit", commit).await.unwrap();
 
 		assert_eq!(result["ok"], true);
 
-		// Verify both inserts succeeded
 		let query = json!({
 			"sql": "SELECT COUNT(*) as count FROM users",
 			"params": []
@@ -1339,11 +1555,9 @@ mod tests {
 	async fn test_db_transaction_rollback() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Begin transaction
 		let begin_result = bridge.call("transaction_begin", json!({})).await.unwrap();
 		let tx_id = begin_result["data"]["tx_id"].as_str().unwrap();
 
-		// Execute in transaction
 		let execute = json!({
 			"tx_id": tx_id,
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
@@ -1351,13 +1565,11 @@ mod tests {
 		});
 		bridge.call("execute_in_tx", execute).await.unwrap();
 
-		// Rollback
 		let rollback = json!({"tx_id": tx_id});
 		let result = bridge.call("transaction_rollback", rollback).await.unwrap();
 
 		assert_eq!(result["ok"], true);
 
-		// Verify insert was rolled back
 		let query = json!({
 			"sql": "SELECT COUNT(*) as count FROM users",
 			"params": []
@@ -1370,7 +1582,6 @@ mod tests {
 	async fn test_db_validation_error() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Try to use query() with INSERT (should fail)
 		let params = json!({
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
 			"params": ["Test", "test@example.com", 25]
@@ -1386,14 +1597,12 @@ mod tests {
 	async fn test_db_unique_constraint_error() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Insert first user
 		let insert1 = json!({
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
 			"params": ["Alice", "alice@example.com", 30]
 		});
 		bridge.call("execute", insert1).await.unwrap();
 
-		// Try to insert duplicate email
 		let insert2 = json!({
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
 			"params": ["Bob", "alice@example.com", 25]
@@ -1409,18 +1618,15 @@ mod tests {
 	async fn test_db_query_in_tx() {
 		let (mut bridge, _guard) = setup_test_db().await;
 
-		// Insert some data
 		let insert = json!({
 			"sql": "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
 			"params": ["Test", "test@example.com", 25]
 		});
 		bridge.call("execute", insert).await.unwrap();
 
-		// Begin transaction
 		let begin_result = bridge.call("transaction_begin", json!({})).await.unwrap();
 		let tx_id = begin_result["data"]["tx_id"].as_str().unwrap();
 
-		// Query in transaction
 		let query = json!({
 			"tx_id": tx_id,
 			"sql": "SELECT * FROM users WHERE email = $1",
@@ -1432,7 +1638,6 @@ mod tests {
 		assert_eq!(result["ok"], true);
 		assert_eq!(result["data"]["count"], 1);
 
-		// Rollback (should still work for queries)
 		bridge
 			.call("transaction_rollback", json!({"tx_id": tx_id}))
 			.await
@@ -1464,12 +1669,324 @@ mod tests {
 	async fn test_invalid_params() {
 		let mut bridge = DbBridge::new();
 
-		// Invalid params (missing required fields)
 		let params = json!({"invalid": "params"});
 
 		let result = bridge.call("query", params).await.unwrap();
 
 		assert_eq!(result["ok"], false);
 		assert_eq!(result["err"]["code"], "VALIDATION_ERROR");
+	}
+}
+
+/// Integration tests for PostgreSQL and MySQL
+/// Run with: INTEGRATION_TESTS=1 cargo test integration --no-fail-fast -- --test-threads=1
+#[cfg(test)]
+mod integration_tests {
+	use super::*;
+
+	fn skip_if_no_integration() -> bool {
+		std::env::var("INTEGRATION_TESTS").is_err()
+	}
+
+	async fn setup_postgres() -> Option<DbBridge> {
+		if skip_if_no_integration() {
+			return None;
+		}
+
+		let mut bridge = DbBridge::new();
+		let config = DbConfig {
+			database_url: "postgres://clean:cleanpass@localhost:5432/cleantest".to_string(),
+			max_connections: 5,
+			min_connections: 1,
+			connection_timeout: 10000,
+			query_timeout: 30000,
+		};
+
+		match bridge.configure(config).await {
+			Ok(()) => Some(bridge),
+			Err(e) => {
+				eprintln!("Failed to connect to PostgreSQL: {}", e);
+				None
+			}
+		}
+	}
+
+	async fn setup_mysql() -> Option<DbBridge> {
+		if skip_if_no_integration() {
+			return None;
+		}
+
+		let mut bridge = DbBridge::new();
+		let config = DbConfig {
+			database_url: "mysql://clean:cleanpass@localhost:3306/cleantest".to_string(),
+			max_connections: 5,
+			min_connections: 1,
+			connection_timeout: 10000,
+			query_timeout: 30000,
+		};
+
+		match bridge.configure(config).await {
+			Ok(()) => Some(bridge),
+			Err(e) => {
+				eprintln!("Failed to connect to MySQL: {}", e);
+				None
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn integration_test_postgres_query() {
+		let Some(mut bridge) = setup_postgres().await else {
+			println!("Skipping PostgreSQL integration test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		// Query users table with all columns - native driver supports all types
+		let query = json!({
+			"sql": "SELECT * FROM users ORDER BY id",
+			"params": []
+		});
+
+		let result = bridge.call("query", query).await.unwrap();
+
+		assert_eq!(result["ok"], true, "PostgreSQL query failed: {:?}", result);
+		assert!(result["data"]["count"].as_i64().unwrap() >= 4, "Expected at least 4 users");
+
+		let first_user = &result["data"]["rows"][0];
+		assert_eq!(first_user["name"], "Alice Johnson");
+		assert_eq!(first_user["email"], "alice@example.com");
+		assert_eq!(first_user["role"], "admin");
+		// Native driver supports booleans!
+		assert_eq!(first_user["active"], true);
+
+		println!("PostgreSQL query test passed!");
+	}
+
+	#[tokio::test]
+	async fn integration_test_postgres_crud() {
+		let Some(mut bridge) = setup_postgres().await else {
+			println!("Skipping PostgreSQL CRUD test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		// Cleanup
+		let cleanup = json!({
+			"sql": "DELETE FROM users WHERE email = $1",
+			"params": ["testuser@integration.com"]
+		});
+		let _ = bridge.call("execute", cleanup).await;
+
+		// INSERT
+		let insert = json!({
+			"sql": "INSERT INTO users (name, email, role) VALUES ($1, $2, $3)",
+			"params": ["Test User", "testuser@integration.com", "tester"]
+		});
+		let result = bridge.call("execute", insert).await.unwrap();
+		assert_eq!(result["ok"], true, "PostgreSQL INSERT failed: {:?}", result);
+		assert_eq!(result["data"]["affected_rows"], 1);
+
+		// SELECT with all columns
+		let query = json!({
+			"sql": "SELECT * FROM users WHERE email = $1",
+			"params": ["testuser@integration.com"]
+		});
+		let result = bridge.call("query", query).await.unwrap();
+		assert_eq!(result["ok"], true, "PostgreSQL SELECT failed: {:?}", result);
+		assert_eq!(result["data"]["count"], 1);
+		assert_eq!(result["data"]["rows"][0]["name"], "Test User");
+
+		// UPDATE
+		let update = json!({
+			"sql": "UPDATE users SET role = $1 WHERE email = $2",
+			"params": ["admin", "testuser@integration.com"]
+		});
+		let result = bridge.call("execute", update).await.unwrap();
+		assert_eq!(result["ok"], true, "PostgreSQL UPDATE failed: {:?}", result);
+		assert_eq!(result["data"]["affected_rows"], 1);
+
+		// DELETE
+		let delete = json!({
+			"sql": "DELETE FROM users WHERE email = $1",
+			"params": ["testuser@integration.com"]
+		});
+		let result = bridge.call("execute", delete).await.unwrap();
+		assert_eq!(result["ok"], true, "PostgreSQL DELETE failed: {:?}", result);
+		assert_eq!(result["data"]["affected_rows"], 1);
+
+		println!("PostgreSQL CRUD test passed!");
+	}
+
+	#[tokio::test]
+	async fn integration_test_postgres_join() {
+		let Some(mut bridge) = setup_postgres().await else {
+			println!("Skipping PostgreSQL JOIN test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		let query = json!({
+			"sql": "SELECT p.title, u.name as author, u.active FROM posts p JOIN users u ON p.author_id = u.id WHERE u.active = true ORDER BY p.id",
+			"params": []
+		});
+
+		let result = bridge.call("query", query).await.unwrap();
+
+		assert_eq!(result["ok"], true, "PostgreSQL JOIN failed: {:?}", result);
+		assert!(result["data"]["count"].as_i64().unwrap() >= 3, "Expected at least 3 posts");
+		// Verify boolean is properly returned
+		assert_eq!(result["data"]["rows"][0]["active"], true);
+
+		println!("PostgreSQL JOIN test passed!");
+	}
+
+	#[tokio::test]
+	async fn integration_test_mysql_query() {
+		let Some(mut bridge) = setup_mysql().await else {
+			println!("Skipping MySQL integration test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		// Query with all columns - native driver supports all types
+		let query = json!({
+			"sql": "SELECT * FROM users ORDER BY id",
+			"params": []
+		});
+
+		let result = bridge.call("query", query).await.unwrap();
+
+		assert_eq!(result["ok"], true, "MySQL query failed: {:?}", result);
+		assert!(result["data"]["count"].as_i64().unwrap() >= 4, "Expected at least 4 users");
+
+		let first_user = &result["data"]["rows"][0];
+		assert_eq!(first_user["name"], "Alice Johnson");
+		assert_eq!(first_user["email"], "alice@example.com");
+		assert_eq!(first_user["role"], "admin");
+		// Native driver supports MySQL booleans!
+		assert_eq!(first_user["active"], true);
+
+		println!("MySQL query test passed!");
+	}
+
+	#[tokio::test]
+	async fn integration_test_mysql_crud() {
+		let Some(mut bridge) = setup_mysql().await else {
+			println!("Skipping MySQL CRUD test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		// Cleanup
+		let cleanup = json!({
+			"sql": "DELETE FROM users WHERE email = ?",
+			"params": ["testuser_mysql@integration.com"]
+		});
+		let _ = bridge.call("execute", cleanup).await;
+
+		// INSERT
+		let insert = json!({
+			"sql": "INSERT INTO users (name, email, role) VALUES (?, ?, ?)",
+			"params": ["Test User", "testuser_mysql@integration.com", "tester"]
+		});
+		let result = bridge.call("execute", insert).await.unwrap();
+		assert_eq!(result["ok"], true, "MySQL INSERT failed: {:?}", result);
+		assert_eq!(result["data"]["affected_rows"], 1);
+		// MySQL returns last_insert_id
+		assert!(result["data"]["last_insert_id"].is_number());
+
+		// SELECT with all columns
+		let query = json!({
+			"sql": "SELECT * FROM users WHERE email = ?",
+			"params": ["testuser_mysql@integration.com"]
+		});
+		let result = bridge.call("query", query).await.unwrap();
+		assert_eq!(result["ok"], true, "MySQL SELECT failed: {:?}", result);
+		assert_eq!(result["data"]["count"], 1);
+		assert_eq!(result["data"]["rows"][0]["name"], "Test User");
+
+		// UPDATE
+		let update = json!({
+			"sql": "UPDATE users SET role = ? WHERE email = ?",
+			"params": ["admin", "testuser_mysql@integration.com"]
+		});
+		let result = bridge.call("execute", update).await.unwrap();
+		assert_eq!(result["ok"], true, "MySQL UPDATE failed: {:?}", result);
+		assert_eq!(result["data"]["affected_rows"], 1);
+
+		// DELETE
+		let delete = json!({
+			"sql": "DELETE FROM users WHERE email = ?",
+			"params": ["testuser_mysql@integration.com"]
+		});
+		let result = bridge.call("execute", delete).await.unwrap();
+		assert_eq!(result["ok"], true, "MySQL DELETE failed: {:?}", result);
+		assert_eq!(result["data"]["affected_rows"], 1);
+
+		println!("MySQL CRUD test passed!");
+	}
+
+	#[tokio::test]
+	async fn integration_test_mysql_join() {
+		let Some(mut bridge) = setup_mysql().await else {
+			println!("Skipping MySQL JOIN test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		let query = json!({
+			"sql": "SELECT p.title, u.name as author, u.active FROM posts p JOIN users u ON p.author_id = u.id WHERE u.active = true ORDER BY p.id",
+			"params": []
+		});
+
+		let result = bridge.call("query", query).await.unwrap();
+
+		assert_eq!(result["ok"], true, "MySQL JOIN failed: {:?}", result);
+		assert!(result["data"]["count"].as_i64().unwrap() >= 3, "Expected at least 3 posts");
+		// Verify boolean is properly returned
+		assert_eq!(result["data"]["rows"][0]["active"], true);
+
+		println!("MySQL JOIN test passed!");
+	}
+
+	#[tokio::test]
+	async fn integration_test_postgres_transaction() {
+		let Some(mut bridge) = setup_postgres().await else {
+			println!("Skipping PostgreSQL transaction test (set INTEGRATION_TESTS=1 to run)");
+			return;
+		};
+
+		let begin_result = bridge.call("transaction_begin", json!({})).await.unwrap();
+		assert_eq!(begin_result["ok"], true);
+		let tx_id = begin_result["data"]["tx_id"].as_str().unwrap();
+
+		let execute1 = json!({
+			"tx_id": tx_id,
+			"sql": "INSERT INTO users (name, email, role) VALUES ($1, $2, $3)",
+			"params": ["TxUser1", "txuser1@integration.com", "tester"]
+		});
+		bridge.call("execute_in_tx", execute1).await.unwrap();
+
+		let execute2 = json!({
+			"tx_id": tx_id,
+			"sql": "INSERT INTO users (name, email, role) VALUES ($1, $2, $3)",
+			"params": ["TxUser2", "txuser2@integration.com", "tester"]
+		});
+		bridge.call("execute_in_tx", execute2).await.unwrap();
+
+		let commit = json!({"tx_id": tx_id});
+		let result = bridge.call("transaction_commit", commit).await.unwrap();
+		assert_eq!(result["ok"], true, "PostgreSQL transaction commit failed: {:?}", result);
+
+		let query = json!({
+			"sql": "SELECT COUNT(*) as count FROM users WHERE email LIKE $1",
+			"params": ["%@integration.com"]
+		});
+		let result = bridge.call("query", query).await.unwrap();
+		assert!(result["data"]["rows"][0]["count"].as_i64().unwrap() >= 2);
+
+		// Cleanup
+		let cleanup = json!({
+			"sql": "DELETE FROM users WHERE email LIKE $1",
+			"params": ["%@integration.com"]
+		});
+		bridge.call("execute", cleanup).await.unwrap();
+
+		println!("PostgreSQL transaction test passed!");
 	}
 }
