@@ -24,12 +24,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_read - Read file contents
-    // Args: path_ptr, path_len
+    // Args: path_ptr, path_len, max_size
     // Returns: pointer to file contents as length-prefixed string
     linker.func_wrap(
         "env",
         "file_read",
-        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32| -> i32 {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, _max_size: i32| -> i32 {
             let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {

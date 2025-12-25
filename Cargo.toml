@@ -1,8 +1,8 @@
 [package]
 name = "clean-server"
-version = "1.0.0"
-edition = "2021"
-authors = ["Ivan Pasco <ivan@cleanframework.com>"]
+version = "0.2.1"
+edition = "2024"
+authors = ["Ivan Pasco"]
 license = "MIT OR Apache-2.0"
 description = "HTTP Server Runtime for Clean Language - executes compiled WASM applications"
 repository = "https://github.com/Ivan-Pasco/clean-server"
