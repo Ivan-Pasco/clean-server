@@ -64,7 +64,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
     linker
         .func_wrap(
             "env",
-            "_http_route__raw",
+            "_http_route",
             |mut caller: Caller<'_, WasmState>,
              method_ptr: i32,
              method_len: i32,
@@ -105,7 +105,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
     linker
         .func_wrap(
             "env",
-            "_http_route_protected__raw",
+            "_http_route_protected",
             |mut caller: Caller<'_, WasmState>,
              method_ptr: i32,
              method_len: i32,
@@ -167,7 +167,7 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     linker
         .func_wrap(
             "env",
-            "_req_param__raw",
+            "_req_param",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
                 let param_name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
@@ -194,7 +194,7 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     linker
         .func_wrap(
             "env",
-            "_req_query__raw",
+            "_req_query",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
                 let query_name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
@@ -239,7 +239,7 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     linker
         .func_wrap(
             "env",
-            "_req_header__raw",
+            "_req_header",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
                 let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s.to_lowercase(),
@@ -355,7 +355,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     linker
         .func_wrap(
             "env",
-            "_auth_require_role__raw",
+            "_auth_require_role",
             |mut caller: Caller<'_, WasmState>, role_ptr: i32, role_len: i32| -> i32 {
                 let required_role = match read_raw_string(&mut caller, role_ptr, role_len) {
                     Some(s) => s,
@@ -380,7 +380,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     linker
         .func_wrap(
             "env",
-            "_auth_can__raw",
+            "_auth_can",
             |mut caller: Caller<'_, WasmState>, permission_ptr: i32, permission_len: i32| -> i32 {
                 let permission = match read_raw_string(&mut caller, permission_ptr, permission_len) {
                     Some(s) => s,
@@ -406,7 +406,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     linker
         .func_wrap(
             "env",
-            "_auth_has_any_role__raw",
+            "_auth_has_any_role",
             |mut caller: Caller<'_, WasmState>, roles_ptr: i32, roles_len: i32| -> i32 {
                 let roles_json = match read_raw_string(&mut caller, roles_ptr, roles_len) {
                     Some(s) => s,

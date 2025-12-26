@@ -25,7 +25,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // Returns: pointer to JSON string with query results
     linker.func_wrap(
         "env",
-        "_db_query__raw",
+        "_db_query",
         |mut caller: Caller<'_, S>,
          sql_ptr: i32,
          sql_len: i32,
@@ -112,7 +112,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // Returns: number of affected rows (or -1 on error)
     linker.func_wrap(
         "env",
-        "_db_execute__raw",
+        "_db_execute",
         |mut caller: Caller<'_, S>,
          sql_ptr: i32,
          sql_len: i32,
@@ -241,7 +241,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // Returns: 0 on success, -1 on error
     linker.func_wrap(
         "env",
-        "_db_commit__raw",
+        "_db_commit",
         |mut caller: Caller<'_, S>, tx_id_ptr: i32, tx_id_len: i32| -> i32 {
             let tx_id = match read_raw_string(&mut caller, tx_id_ptr, tx_id_len) {
                 Some(s) => s,
@@ -280,7 +280,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // Returns: 0 on success, -1 on error
     linker.func_wrap(
         "env",
-        "_db_rollback__raw",
+        "_db_rollback",
         |mut caller: Caller<'_, S>, tx_id_ptr: i32, tx_id_len: i32| -> i32 {
             let tx_id = match read_raw_string(&mut caller, tx_id_ptr, tx_id_len) {
                 Some(s) => s,
