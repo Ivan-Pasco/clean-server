@@ -51,7 +51,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 "[]".to_string()
             };
 
-            debug!("_db_query: SQL={}, params={}", sql, params_json);
+            debug!("_db_query: SQL='{}' (len={}), params={}", sql, sql.len(), params_json);
+
+            // Debug: Check if SQL contains WHERE clause
+            if !sql.to_uppercase().contains("WHERE") {
+                error!("_db_query: SQL appears to be missing WHERE clause! SQL='{}' (len={})", sql, sql.len());
+            }
 
             // Parse params
             let params: Vec<serde_json::Value> =

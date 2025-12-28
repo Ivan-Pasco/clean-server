@@ -54,14 +54,25 @@ pub fn read_raw_string<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32, l
     let start = ptr as usize;
     let end = start + len as usize;
 
+    debug!("read_raw_string: ptr={}, len={}, start={}, end={}, memory_size={}", ptr, len, start, end, data.len());
+
     if end > data.len() {
         error!("read_raw_string: out of bounds: {}..{} (memory size: {})", start, end, data.len());
         return None;
     }
 
-    std::str::from_utf8(&data[start..end])
-        .map(|s| s.to_string())
-        .ok()
+    match std::str::from_utf8(&data[start..end]) {
+        Ok(s) => {
+            debug!("read_raw_string: successfully read '{}' ({} bytes)",
+                   if s.len() > 100 { format!("{}...", &s[..100]) } else { s.to_string() },
+                   s.len());
+            Some(s.to_string())
+        }
+        Err(e) => {
+            error!("read_raw_string: UTF-8 conversion failed: {}", e);
+            None
+        }
+    }
 }
 
 /// Read raw bytes from WASM memory (no length prefix, uses explicit length)

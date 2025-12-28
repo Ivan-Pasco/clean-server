@@ -2,7 +2,7 @@
 name = "host-bridge"
 version = "1.0.0"
 edition = "2021"
-authors = ["Ivan Pasco <ivan@cleanframework.com>"]
+authors = ["Ivan Pasco"]
 license = "MIT OR Apache-2.0"
 description = "Host Bridge for Clean Language WASM Runtime"
 
