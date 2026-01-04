@@ -103,25 +103,17 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_string_to_caller: Writing string ({} bytes)", len);
+    error!("write_string_to_caller: Writing string ({} bytes)", len);
 
     // MUST use WASM's malloc to allocate - updating memory[0] doesn't work
     // because WASM's allocator uses a global variable, not linear memory.
     let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
+        error!("write_string_to_caller: Found malloc export, calling WASM malloc({})", total_size);
         match malloc.typed::<i32, i32>(&*caller) {
             Ok(typed_malloc) => {
-                // Log heap state before malloc
-                if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    let data = mem.data(&*caller);
-                    if data.len() >= 4 {
-                        let heap_before = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                        debug!("write_string_to_caller: heap_ptr at memory[0] BEFORE malloc = {}", heap_before);
-                    }
-                }
-
                 match typed_malloc.call(&mut *caller, total_size as i32) {
                     Ok(p) if p > 0 => {
-                        debug!("write_string_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
+                        error!("write_string_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
                         p as usize
                     }
                     Ok(p) => {
@@ -167,7 +159,7 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
         return 0;
     }
 
-    debug!("write_string_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
+    error!("write_string_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
 }
 
@@ -179,17 +171,18 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_bytes_to_caller: Writing {} bytes", len);
+    error!("write_bytes_to_caller: Writing {} bytes", len);
 
     // MUST use WASM's malloc to allocate - using State allocator causes memory overlap
     // because WASM's allocator uses a global variable that grows from ~1024 upward,
     // while State's allocator starts at 65536 and grows upward - they can overlap!
     let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
+        error!("write_bytes_to_caller: Found malloc, calling WASM malloc({})", total_size);
         match malloc.typed::<i32, i32>(&*caller) {
             Ok(typed_malloc) => {
                 match typed_malloc.call(&mut *caller, total_size as i32) {
                     Ok(p) if p > 0 => {
-                        debug!("write_bytes_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
+                        error!("write_bytes_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
                         p as usize
                     }
                     Ok(p) => {
@@ -234,7 +227,7 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
         return 0;
     }
 
-    debug!("write_bytes_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
+    error!("write_bytes_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
 }
 
