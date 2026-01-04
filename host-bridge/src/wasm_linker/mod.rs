@@ -44,7 +44,7 @@ pub use helpers::{
     read_string_from_caller, write_string_to_caller,
     read_raw_string, write_bytes_to_caller,
     read_length_prefixed_bytes, allocate_at_memory_end,
-    read_raw_bytes, STRING_LENGTH_PREFIX_SIZE
+    allocate_in_fresh_memory, read_raw_bytes, STRING_LENGTH_PREFIX_SIZE
 };
 
 use crate::error::BridgeResult;

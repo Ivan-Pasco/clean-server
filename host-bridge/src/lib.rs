@@ -31,7 +31,7 @@ pub use wasm_linker::{
     read_string_from_caller, write_string_to_caller,
     read_raw_string, write_bytes_to_caller,
     read_length_prefixed_bytes, allocate_at_memory_end,
-    STRING_LENGTH_PREFIX_SIZE,
+    allocate_in_fresh_memory, STRING_LENGTH_PREFIX_SIZE,
 };
 
 /// Standard envelope for all bridge responses

@@ -104,7 +104,39 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
-            write_string_to_caller(&mut caller, &result_str)
+            // Debug: print the result JSON and allocated pointer
+            let ptr = write_string_to_caller(&mut caller, &result_str);
+            error!("_db_query: Allocated result string at ptr={}, len={}", ptr, result_str.len());
+
+            // Verify the string was written correctly by reading it back
+            if ptr > 0 {
+                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    let data = memory.data(&caller);
+                    if (ptr as usize) + 4 <= data.len() {
+                        let stored_len = u32::from_le_bytes([
+                            data[ptr as usize],
+                            data[ptr as usize + 1],
+                            data[ptr as usize + 2],
+                            data[ptr as usize + 3],
+                        ]);
+                        error!("_db_query: Stored length at ptr={} is {}", ptr, stored_len);
+
+                        // Print first 100 chars of stored string
+                        if (ptr as usize) + 4 + 100 <= data.len() {
+                            let preview = std::str::from_utf8(&data[(ptr as usize + 4)..(ptr as usize + 4 + 100)]).unwrap_or("(invalid utf8)");
+                            error!("_db_query: String preview: {}", preview);
+                        }
+                    }
+
+                    // Read the WASM heap_ptr from global to understand allocation state
+                    // Log memory around where arrays would be stored
+                    let end_of_json = (ptr as usize) + 4 + result_str.len();
+                    error!("_db_query: JSON ends at {}, next allocs expected starting around {}",
+                           end_of_json, (end_of_json + 7) & !7);
+                }
+            }
+
+            ptr
         },
     )?;
 

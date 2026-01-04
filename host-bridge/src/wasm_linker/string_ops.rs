@@ -14,6 +14,7 @@ use super::helpers::{
 };
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
+use tracing::error;
 use wasmtime::{Caller, Linker};
 
 /// Register all string operation functions with the linker
@@ -35,6 +36,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // string.concat - Concatenate two length-prefixed strings
+    // IMPORTANT: Use write_string_to_caller (WASM malloc) for consistency with WASM heap
     linker.func_wrap(
         "env",
         "string.concat",
@@ -50,10 +52,28 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let bytes2 = read_length_prefixed_bytes(data, ptr2 as usize);
 
             // Concatenate bytes
-            let mut result = bytes1;
-            result.extend(bytes2);
+            let mut result = bytes1.clone();
+            result.extend(&bytes2);
 
-            write_bytes_to_caller(&mut caller, &result)
+            // Debug: Log the concat operation
+            let s1_preview = std::str::from_utf8(&bytes1).unwrap_or("(invalid utf8)");
+            let s2_preview = std::str::from_utf8(&bytes2).unwrap_or("(invalid utf8)");
+            error!("string.concat: ptr1={} ('{}'), ptr2={} ('{}'), result_len={}",
+                   ptr1,
+                   if s1_preview.len() > 50 { &s1_preview[..50] } else { s1_preview },
+                   ptr2,
+                   if s2_preview.len() > 50 { &s2_preview[..50] } else { s2_preview },
+                   result.len());
+
+            // Convert to string and use write_string_to_caller for WASM malloc consistency
+            let output_ptr = match std::str::from_utf8(&result) {
+                Ok(s) => write_string_to_caller(&mut caller, s),
+                Err(_) => write_bytes_to_caller(&mut caller, &result),
+            };
+
+            error!("string.concat: output_ptr={}, total_size={}", output_ptr, result.len() + 4);
+
+            output_ptr
         },
     )?;
 
@@ -226,30 +246,34 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // string_split / string.split - Split string by delimiter (returns array pointer)
+    // CRITICAL: Use WASM malloc to allocate, not State allocator, to avoid memory overlap
     linker.func_wrap(
         "env",
         "string_split",
         |mut caller: Caller<'_, S>, _str_ptr: i32, _delim_ptr: i32| -> i32 {
             // For now, return empty array
             // Full implementation would create array of strings
+
+            // Use WASM malloc to allocate 4 bytes for empty array (length = 0)
+            let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
+                match malloc.typed::<i32, i32>(&caller) {
+                    Ok(typed_malloc) => {
+                        match typed_malloc.call(&mut caller, 4) {
+                            Ok(p) if p > 0 => p as usize,
+                            _ => return 0,
+                        }
+                    }
+                    Err(_) => return 0,
+                }
+            } else {
+                return 0;
+            };
+
+            // Re-acquire memory after malloc call
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return 0,
             };
-
-            // Allocate 4 bytes for empty array (length = 0)
-            let state = caller.data_mut();
-            let ptr = state.memory_mut().allocate(4);
-
-            // Ensure memory is large enough
-            let current_size = memory.data_size(&caller);
-            if ptr + 4 > current_size {
-                let pages_needed = ((ptr + 4 + 65535) / 65536) as u64;
-                let current_pages = memory.size(&caller);
-                if pages_needed > current_pages {
-                    let _ = memory.grow(&mut caller, pages_needed - current_pages);
-                }
-            }
 
             // Write zero length for empty array
             let _ = memory.write(&mut caller, ptr, &[0u8; 4]);
@@ -261,23 +285,25 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         "env",
         "string.split",
         |mut caller: Caller<'_, S>, _str_ptr: i32, _delim_ptr: i32| -> i32 {
-            // Same as above - return empty array for now
+            // Same as above - return empty array for now using WASM malloc
+            let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
+                match malloc.typed::<i32, i32>(&caller) {
+                    Ok(typed_malloc) => {
+                        match typed_malloc.call(&mut caller, 4) {
+                            Ok(p) if p > 0 => p as usize,
+                            _ => return 0,
+                        }
+                    }
+                    Err(_) => return 0,
+                }
+            } else {
+                return 0;
+            };
+
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return 0,
             };
-
-            let state = caller.data_mut();
-            let ptr = state.memory_mut().allocate(4);
-
-            let current_size = memory.data_size(&caller);
-            if ptr + 4 > current_size {
-                let pages_needed = ((ptr + 4 + 65535) / 65536) as u64;
-                let current_pages = memory.size(&caller);
-                if pages_needed > current_pages {
-                    let _ = memory.grow(&mut caller, pages_needed - current_pages);
-                }
-            }
 
             let _ = memory.write(&mut caller, ptr, &[0u8; 4]);
             ptr as i32

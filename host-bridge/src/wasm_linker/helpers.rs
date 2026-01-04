@@ -6,7 +6,7 @@
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
 use super::state::WasmStateCore;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 use wasmtime::Caller;
 
 /// Clean string format: [4-byte little-endian length][UTF-8 bytes]
@@ -94,58 +94,65 @@ pub fn read_raw_bytes<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32, le
 /// Write a Clean Language string to WASM memory
 ///
 /// Returns the pointer to the written string, or 0 on failure.
-/// Uses WASM's malloc if available, otherwise falls back to bump allocator.
+///
+/// This function uses WASM's malloc to allocate memory, ensuring the allocation
+/// is properly tracked by WASM's memory management. This is critical because
+/// WASM's allocator uses a global variable for the heap pointer, not linear memory.
 pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &str) -> i32 {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_string_to_caller: Writing '{}' ({} bytes, total_size={})", s, len, total_size);
+    debug!("write_string_to_caller: Writing string ({} bytes)", len);
 
-    // Get WASM memory
-    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-        Some(m) => m,
-        None => {
-            error!("write_string_to_caller: No memory export found");
-            return 0;
-        }
-    };
-
-    // Try to use WASM's malloc function to allocate memory
+    // MUST use WASM's malloc to allocate - updating memory[0] doesn't work
+    // because WASM's allocator uses a global variable, not linear memory.
     let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
         match malloc.typed::<i32, i32>(&*caller) {
             Ok(typed_malloc) => {
+                // Log heap state before malloc
+                if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    let data = mem.data(&*caller);
+                    if data.len() >= 4 {
+                        let heap_before = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                        debug!("write_string_to_caller: heap_ptr at memory[0] BEFORE malloc = {}", heap_before);
+                    }
+                }
+
                 match typed_malloc.call(&mut *caller, total_size as i32) {
                     Ok(p) if p > 0 => {
-                        debug!("write_string_to_caller: WASM malloc returned ptr={}", p);
+                        debug!("write_string_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
                         p as usize
                     }
-                    Ok(_) => {
-                        warn!("write_string_to_caller: WASM malloc returned 0, falling back to host allocator");
-                        allocate_at_memory_end(caller, &memory, total_size)
+                    Ok(p) => {
+                        error!("write_string_to_caller: WASM malloc returned invalid ptr={}", p);
+                        return 0;
                     }
                     Err(e) => {
-                        warn!("write_string_to_caller: WASM malloc failed: {}, falling back to host allocator", e);
-                        allocate_at_memory_end(caller, &memory, total_size)
+                        error!("write_string_to_caller: WASM malloc call failed: {}", e);
+                        return 0;
                     }
                 }
             }
-            Err(_) => {
-                debug!("write_string_to_caller: malloc type mismatch, using host allocator");
-                allocate_at_memory_end(caller, &memory, total_size)
+            Err(e) => {
+                error!("write_string_to_caller: malloc type mismatch: {}", e);
+                return 0;
             }
         }
     } else {
-        debug!("write_string_to_caller: No malloc export, using host allocator");
-        allocate_at_memory_end(caller, &memory, total_size)
+        error!("write_string_to_caller: No malloc export found");
+        return 0;
     };
 
-    if ptr == 0 {
-        error!("write_string_to_caller: Failed to allocate {} bytes", total_size);
-        return 0;
-    }
-
-    debug!("write_string_to_caller: Writing to ptr={}, memory_size={}", ptr, memory.data_size(&*caller));
+    // Re-acquire memory reference after malloc call - malloc might have grown memory
+    // and we need the updated memory view
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => {
+            error!("write_string_to_caller: No memory export found after malloc");
+            return 0;
+        }
+    };
 
     // Write length prefix (4 bytes, little-endian)
     let len_bytes = (len as u32).to_le_bytes();
@@ -160,29 +167,59 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
         return 0;
     }
 
-    debug!("write_string_to_caller: Successfully wrote string at ptr={}", ptr);
+    debug!("write_string_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
 }
 
 /// Write bytes to WASM memory with length prefix
+/// CRITICAL: Uses WASM malloc to allocate memory, ensuring coordination with WASM's heap.
+/// Previously used allocate_at_memory_end which caused memory corruption when overlapping
+/// with WASM's heap (State allocator starts at 65536, WASM heap grows from ~1024).
 pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes: &[u8]) -> i32 {
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    // Get WASM memory
+    debug!("write_bytes_to_caller: Writing {} bytes", len);
+
+    // MUST use WASM's malloc to allocate - using State allocator causes memory overlap
+    // because WASM's allocator uses a global variable that grows from ~1024 upward,
+    // while State's allocator starts at 65536 and grows upward - they can overlap!
+    let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
+        match malloc.typed::<i32, i32>(&*caller) {
+            Ok(typed_malloc) => {
+                match typed_malloc.call(&mut *caller, total_size as i32) {
+                    Ok(p) if p > 0 => {
+                        debug!("write_bytes_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
+                        p as usize
+                    }
+                    Ok(p) => {
+                        error!("write_bytes_to_caller: WASM malloc returned invalid ptr={}", p);
+                        return 0;
+                    }
+                    Err(e) => {
+                        error!("write_bytes_to_caller: WASM malloc call failed: {}", e);
+                        return 0;
+                    }
+                }
+            }
+            Err(e) => {
+                error!("write_bytes_to_caller: malloc type mismatch: {}", e);
+                return 0;
+            }
+        }
+    } else {
+        error!("write_bytes_to_caller: No malloc export found");
+        return 0;
+    };
+
+    // Re-acquire memory reference after malloc call - malloc might have grown memory
     let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => {
-            error!("write_bytes_to_caller: No memory export found");
+            error!("write_bytes_to_caller: No memory export found after malloc");
             return 0;
         }
     };
-
-    // Allocate memory
-    let ptr = allocate_at_memory_end(caller, &memory, total_size);
-    if ptr == 0 {
-        return 0;
-    }
 
     // Write length prefix
     let len_bytes = (len as u32).to_le_bytes();
@@ -197,6 +234,7 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
         return 0;
     }
 
+    debug!("write_bytes_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
 }
 
@@ -222,9 +260,70 @@ pub fn read_length_prefixed_bytes(data: &[u8], ptr: usize) -> Vec<u8> {
     data[data_start..data_end].to_vec()
 }
 
+/// Allocate memory by updating WASM's heap pointer directly
+///
+/// This function allocates memory in a way that's compatible with WASM's
+/// internal allocator. It works by:
+/// 1. Reading the current heap pointer from memory address 0
+/// 2. Allocating at that location
+/// 3. Updating the heap pointer to skip past the allocation
+/// 4. Growing memory if needed
+///
+/// This ensures host allocations are properly tracked and won't conflict
+/// with subsequent WASM allocations.
+pub fn allocate_in_fresh_memory<S: WasmStateCore>(caller: &mut Caller<'_, S>, memory: &wasmtime::Memory, size: usize) -> usize {
+    // Read current WASM heap pointer (stored at address 0)
+    let mut heap_ptr_bytes = [0u8; 4];
+    if memory.read(&*caller, 0, &mut heap_ptr_bytes).is_err() {
+        error!("allocate_in_fresh_memory: Failed to read heap pointer");
+        return 0;
+    }
+    let current_heap_ptr = u32::from_le_bytes(heap_ptr_bytes) as usize;
+
+    // Align allocation to 8 bytes for safety
+    let aligned_size = (size + 7) & !7;
+
+    // Allocate at the current heap pointer location
+    let ptr = current_heap_ptr;
+    let new_heap_ptr = ptr + aligned_size;
+
+    // Ensure memory is large enough
+    let current_size = memory.data_size(&*caller);
+    if new_heap_ptr > current_size {
+        // Calculate required pages (64KB per page)
+        let required_pages = ((new_heap_ptr + 65535) / 65536) as u64;
+        let current_pages = memory.size(&*caller);
+        let pages_to_grow = required_pages.saturating_sub(current_pages);
+
+        if pages_to_grow > 0 {
+            match memory.grow(&mut *caller, pages_to_grow) {
+                Ok(_) => {
+                    debug!("allocate_in_fresh_memory: Grew memory by {} pages", pages_to_grow);
+                }
+                Err(e) => {
+                    error!("allocate_in_fresh_memory: Failed to grow memory: {}", e);
+                    return 0;
+                }
+            }
+        }
+    }
+
+    // Update WASM's heap pointer to skip past our allocation
+    let new_heap_ptr_bytes = (new_heap_ptr as u32).to_le_bytes();
+    if memory.write(&mut *caller, 0, &new_heap_ptr_bytes).is_err() {
+        error!("allocate_in_fresh_memory: Failed to update heap pointer");
+        return 0;
+    }
+
+    debug!("allocate_in_fresh_memory: Allocated {} bytes at ptr={}", size, ptr);
+    ptr
+}
+
 /// Allocate memory at the end of WASM linear memory
 ///
 /// Uses the state's bump allocator and grows memory if needed.
+/// NOTE: This uses a fixed-offset allocator which may conflict with WASM's heap.
+/// For host-returned strings, prefer allocate_in_fresh_memory() instead.
 pub fn allocate_at_memory_end<S: WasmStateCore>(caller: &mut Caller<'_, S>, memory: &wasmtime::Memory, size: usize) -> usize {
     // Get current allocation offset from state
     let state = caller.data_mut();
