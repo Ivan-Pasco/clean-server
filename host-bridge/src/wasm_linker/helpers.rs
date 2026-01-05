@@ -163,16 +163,10 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
         return 0;
     }
 
-    // CRITICAL: Update __heap_ptr global to ensure subsequent WASM allocations
-    // don't overlap with our allocation. Align to 8 bytes for safety.
-    let new_heap_ptr = ((ptr + total_size + 7) & !7) as i32;
-    if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
-        if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(new_heap_ptr)) {
-            error!("write_string_to_caller: Failed to update __heap_ptr: {}", e);
-        } else {
-            debug!("write_string_to_caller: Updated __heap_ptr to {}", new_heap_ptr);
-        }
-    }
+    // NOTE: WASM's malloc already updated __heap_ptr internally.
+    // We don't need to update it again - doing so was redundant and could
+    // cause subtle alignment issues. Single allocator ownership pattern:
+    // all allocations go through WASM's malloc which manages __heap_ptr.
 
     debug!("write_string_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
@@ -245,16 +239,8 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
         return 0;
     }
 
-    // CRITICAL: Update __heap_ptr global to ensure subsequent WASM allocations
-    // don't overlap with our allocation. Align to 8 bytes for safety.
-    let new_heap_ptr = ((ptr + total_size + 7) & !7) as i32;
-    if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
-        if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(new_heap_ptr)) {
-            error!("write_bytes_to_caller: Failed to update __heap_ptr: {}", e);
-        } else {
-            debug!("write_bytes_to_caller: Updated __heap_ptr to {}", new_heap_ptr);
-        }
-    }
+    // NOTE: WASM's malloc already updated __heap_ptr internally.
+    // We don't need to update it again - single allocator ownership pattern.
 
     debug!("write_bytes_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
