@@ -39,7 +39,12 @@ impl TestServer {
         // Compile to WASM using cln compiler
         let cln_path = find_cln_compiler()?;
         let compile_output = Command::new(&cln_path)
-            .args(["compile", source_path.to_str().unwrap(), "-o", wasm_path.to_str().unwrap()])
+            .args([
+                "compile",
+                source_path.to_str().unwrap(),
+                "-o",
+                wasm_path.to_str().unwrap(),
+            ])
             .output()
             .map_err(|e| format!("Failed to run compiler: {}", e))?;
 
@@ -65,11 +70,7 @@ impl TestServer {
 
         // Start server with output redirected to log file
         let process = Command::new(&server_path)
-            .args([
-                wasm_path.to_str().unwrap(),
-                "--port",
-                &port.to_string(),
-            ])
+            .args([wasm_path.to_str().unwrap(), "--port", &port.to_string()])
             .stdout(std::fs::File::create(&log_path).unwrap())
             .stderr(std::fs::File::create(temp_dir.path().join("server.err")).unwrap())
             .spawn()
@@ -89,7 +90,8 @@ impl TestServer {
             if attempt == 4 {
                 // Read server log on failure
                 let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
-                let err_content = std::fs::read_to_string(temp_dir.path().join("server.err")).unwrap_or_default();
+                let err_content =
+                    std::fs::read_to_string(temp_dir.path().join("server.err")).unwrap_or_default();
                 return Err(format!(
                     "Server failed to start on port {}.\nLog: {}\nErr: {}",
                     port, log_content, err_content
@@ -144,15 +146,14 @@ fn find_cln_compiler() -> Result<PathBuf, String> {
 /// Find the clean-server binary (debug or release)
 fn find_clean_server_binary() -> Result<PathBuf, String> {
     // Try debug build first (most common during development)
-    let debug_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/debug/clean-server");
+    let debug_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/clean-server");
     if debug_path.exists() {
         return Ok(debug_path);
     }
 
     // Try release build
-    let release_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/release/clean-server");
+    let release_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/clean-server");
     if release_path.exists() {
         return Ok(release_path);
     }

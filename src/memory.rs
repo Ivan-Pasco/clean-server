@@ -212,7 +212,11 @@ pub fn read_bytes_from_memory<T>(
 }
 
 /// Ensure WASM memory is at least the specified size
-fn ensure_memory_size<T>(store: &mut Store<T>, memory: &Memory, required: usize) -> RuntimeResult<()> {
+fn ensure_memory_size<T>(
+    store: &mut Store<T>,
+    memory: &Memory,
+    required: usize,
+) -> RuntimeResult<()> {
     let current_size = memory.data_size(&*store);
 
     if required > current_size {
@@ -235,7 +239,12 @@ fn ensure_memory_size<T>(store: &mut Store<T>, memory: &Memory, required: usize)
 }
 
 /// Write an i32 to WASM memory at the given pointer
-pub fn write_i32<T>(store: &mut Store<T>, memory: &Memory, ptr: u32, value: i32) -> RuntimeResult<()> {
+pub fn write_i32<T>(
+    store: &mut Store<T>,
+    memory: &Memory,
+    ptr: u32,
+    value: i32,
+) -> RuntimeResult<()> {
     let bytes = value.to_le_bytes();
     memory
         .write(store, ptr as usize, &bytes)

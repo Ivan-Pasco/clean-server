@@ -107,7 +107,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             // Call write_string_to_caller which uses WASM malloc
             // WASM malloc reads/writes Global[0] (heap_ptr), NOT memory[0]
             let ptr = write_string_to_caller(&mut caller, &result_str);
-            error!("_db_query: write_string_to_caller returned ptr={}, str_len={}", ptr, result_str.len());
+            debug!("_db_query: write_string_to_caller returned ptr={}, str_len={}", ptr, result_str.len());
 
             ptr
         },

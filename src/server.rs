@@ -6,11 +6,11 @@ use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
 use crate::wasm::{RequestContext, SharedDbBridge, SharedWasmInstance};
 use axum::{
+    Router,
     body::Body,
     extract::State,
-    http::{header, HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    Router,
 };
 use host_bridge::{DbBridge, DbConfig};
 use std::collections::HashMap;
@@ -127,7 +127,10 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         match bridge.configure(db_config).await {
             Ok(()) => info!("Database connection pool initialized"),
             Err(e) => {
-                warn!("Failed to initialize database: {}. Database features will be unavailable.", e);
+                warn!(
+                    "Failed to initialize database: {}. Database features will be unavailable.",
+                    e
+                );
             }
         }
     } else {
@@ -147,7 +150,10 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     } else {
         info!("Registered {} routes:", router.len());
         for route in router.all_routes() {
-            info!("  {} {} -> handler {}", route.method, route.path, route.handler_index);
+            info!(
+                "  {} {} -> handler {}",
+                route.method, route.path, route.handler_index
+            );
         }
     }
 
@@ -227,11 +233,7 @@ async fn handle_request(
         Method::HEAD => HttpMethod::HEAD,
         Method::OPTIONS => HttpMethod::OPTIONS,
         _ => {
-            return (
-                StatusCode::METHOD_NOT_ALLOWED,
-                "Method not allowed",
-            )
-                .into_response();
+            return (StatusCode::METHOD_NOT_ALLOWED, "Method not allowed").into_response();
         }
     };
 
@@ -265,9 +267,10 @@ async fn handle_request(
     }
 
     // Parse query parameters
-    let query_params: HashMap<String, String> = url::form_urlencoded::parse(query_string.as_bytes())
-        .into_owned()
-        .collect();
+    let query_params: HashMap<String, String> =
+        url::form_urlencoded::parse(query_string.as_bytes())
+            .into_owned()
+            .collect();
 
     // Convert headers
     let header_vec: Vec<(String, String)> = headers
@@ -290,7 +293,10 @@ async fn handle_request(
     };
 
     // Call WASM handler
-    match state.wasm.call_handler(route_handler.handler_index, request_ctx) {
+    match state
+        .wasm
+        .call_handler(route_handler.handler_index, request_ctx)
+    {
         Ok(response_body) => {
             debug!("Handler returned: {} bytes", response_body.len());
 
@@ -314,7 +320,10 @@ async fn handle_request(
             let http_err = HttpError::from(e);
 
             Response::builder()
-                .status(StatusCode::from_u16(http_err.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+                .status(
+                    StatusCode::from_u16(http_err.status)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                )
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(http_err.to_json().to_string()))
                 .unwrap()
@@ -360,11 +369,7 @@ fn mask_db_url(url: &str) -> String {
             if colon_pos > 3 && &url[colon_pos - 1..colon_pos] != "/" {
                 let protocol_end = url.find("://").map(|p| p + 3).unwrap_or(0);
                 if colon_pos > protocol_end {
-                    return format!(
-                        "{}***{}",
-                        &url[..colon_pos + 1],
-                        &url[at_pos..]
-                    );
+                    return format!("{}***{}", &url[..colon_pos + 1], &url[at_pos..]);
                 }
             }
         }

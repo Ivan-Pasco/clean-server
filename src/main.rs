@@ -19,9 +19,9 @@
 //! ```
 
 use clap::Parser;
-use clean_server::{start_server, ServerConfig};
+use clean_server::{ServerConfig, start_server};
 use std::path::PathBuf;
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 /// Clean Server - HTTP Server for Clean Language Applications
@@ -88,7 +88,10 @@ async fn main() {
     // Print banner
     println!();
     println!("  ╔═══════════════════════════════════════════╗");
-    println!("  ║         Clean Server v{}            ║", env!("CARGO_PKG_VERSION"));
+    println!(
+        "  ║         Clean Server v{}            ║",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("  ║   HTTP Server for Clean Language Apps     ║");
     println!("  ╚═══════════════════════════════════════════╝");
     println!();
@@ -99,7 +102,11 @@ async fn main() {
         std::process::exit(1);
     }
 
-    if !args.wasm_path.extension().map_or(false, |ext| ext == "wasm") {
+    if !args
+        .wasm_path
+        .extension()
+        .map_or(false, |ext| ext == "wasm")
+    {
         error!("File must have .wasm extension: {:?}", args.wasm_path);
         std::process::exit(1);
     }
@@ -121,7 +128,14 @@ async fn main() {
     info!("Configuration:");
     info!("  WASM file: {:?}", args.wasm_path);
     info!("  Listen: {}:{}", config.host, config.port);
-    info!("  CORS: {}", if config.cors_enabled { "enabled" } else { "disabled" });
+    info!(
+        "  CORS: {}",
+        if config.cors_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     info!("  Body limit: {} MB", args.body_limit);
     if config.database_url.is_some() {
         info!("  Database: configured");

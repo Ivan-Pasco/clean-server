@@ -20,7 +20,7 @@
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
 use crate::wasm::WasmState;
-use host_bridge::{write_string_to_caller, read_raw_string};
+use host_bridge::{read_raw_string, write_string_to_caller};
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
 
@@ -33,8 +33,9 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     let mut linker = Linker::new(engine);
 
     // Register all shared functions from host-bridge
-    host_bridge::register_all_functions(&mut linker)
-        .map_err(|e| RuntimeError::wasm(format!("Failed to register host-bridge functions: {}", e)))?;
+    host_bridge::register_all_functions(&mut linker).map_err(|e| {
+        RuntimeError::wasm(format!("Failed to register host-bridge functions: {}", e))
+    })?;
 
     // Register server-specific functions
     register_http_server_functions(&mut linker)?;
@@ -70,7 +71,8 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
              method_len: i32,
              path_ptr: i32,
              path_len: i32,
-             handler_idx: i32| -> i32 {
+             handler_idx: i32|
+             -> i32 {
                 let method_str = read_raw_string(&mut caller, method_ptr, method_len)
                     .unwrap_or_else(|| "GET".to_string());
                 let path = read_raw_string(&mut caller, path_ptr, path_len)
@@ -92,7 +94,9 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 let state = caller.data();
                 let router = state.router.clone();
                 // Not protected, no required role
-                if let Err(e) = router.register(method, path.clone(), handler_idx as u32, false, None) {
+                if let Err(e) =
+                    router.register(method, path.clone(), handler_idx as u32, false, None)
+                {
                     error!("Failed to register route {} {}: {}", method_str, path, e);
                     return -1; // Error
                 }
@@ -113,7 +117,8 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
              path_len: i32,
              handler_idx: i32,
              role_ptr: i32,
-             role_len: i32| -> i32 {
+             role_len: i32|
+             -> i32 {
                 let method_str = read_raw_string(&mut caller, method_ptr, method_len)
                     .unwrap_or_else(|| "GET".to_string());
                 let path = read_raw_string(&mut caller, path_ptr, path_len)
@@ -156,7 +161,9 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 0 // Success
             },
         )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_route_protected: {}", e)))?;
+        .map_err(|e| {
+            RuntimeError::wasm(format!("Failed to define _http_route_protected: {}", e))
+        })?;
 
     Ok(())
 }
@@ -342,11 +349,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             "_auth_require_auth",
             |caller: Caller<'_, WasmState>| -> i32 {
                 let state = caller.data();
-                if state.auth_context.is_some() {
-                    1
-                } else {
-                    0
-                }
+                if state.auth_context.is_some() { 1 } else { 0 }
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_require_auth: {}", e)))?;
@@ -364,11 +367,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
 
                 let state = caller.data();
                 if let Some(auth) = &state.auth_context {
-                    if auth.role == required_role {
-                        1
-                    } else {
-                        0
-                    }
+                    if auth.role == required_role { 1 } else { 0 }
                 } else {
                     0
                 }
@@ -382,7 +381,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             "env",
             "_auth_can",
             |mut caller: Caller<'_, WasmState>, permission_ptr: i32, permission_len: i32| -> i32 {
-                let permission = match read_raw_string(&mut caller, permission_ptr, permission_len) {
+                let permission = match read_raw_string(&mut caller, permission_ptr, permission_len)
+                {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -417,11 +417,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
 
                 let state = caller.data();
                 if let Some(auth) = &state.auth_context {
-                    if roles.contains(&auth.role) {
-                        1
-                    } else {
-                        0
-                    }
+                    if roles.contains(&auth.role) { 1 } else { 0 }
                 } else {
                     0
                 }

@@ -83,10 +83,10 @@ pub mod wasm;
 // Re-exports for convenience
 pub use error::{HttpError, RuntimeError, RuntimeResult};
 pub use router::{HttpMethod, RouteHandler, Router, SharedRouter};
-pub use server::{start_server, ServerConfig};
+pub use server::{ServerConfig, start_server};
 pub use wasm::{
-    create_shared_instance_with_db, AuthContext, RequestContext, SharedDbBridge,
-    SharedWasmInstance, WasmInstance, WasmState,
+    AuthContext, RequestContext, SharedDbBridge, SharedWasmInstance, WasmInstance, WasmState,
+    create_shared_instance_with_db,
 };
 
 // Re-export host-bridge types for database configuration

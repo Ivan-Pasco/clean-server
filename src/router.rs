@@ -57,7 +57,10 @@ impl HttpMethod {
             "DELETE" => Ok(HttpMethod::DELETE),
             "HEAD" => Ok(HttpMethod::HEAD),
             "OPTIONS" => Ok(HttpMethod::OPTIONS),
-            other => Err(RuntimeError::route(format!("Unknown HTTP method: {}", other))),
+            other => Err(RuntimeError::route(format!(
+                "Unknown HTTP method: {}",
+                other
+            ))),
         }
     }
 
@@ -164,7 +167,11 @@ impl Router {
     }
 
     /// Find a handler for the given method and path
-    pub fn find(&self, method: HttpMethod, path: &str) -> Option<(RouteHandler, HashMap<String, String>)> {
+    pub fn find(
+        &self,
+        method: HttpMethod,
+        path: &str,
+    ) -> Option<(RouteHandler, HashMap<String, String>)> {
         let matcher = self.path_matcher.read();
         let routes = self.routes.read();
 

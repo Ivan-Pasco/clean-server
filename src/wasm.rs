@@ -197,9 +197,10 @@ impl WasmInstance {
         let state = WasmState::with_db_bridge(self.router.clone(), self.db_bridge.clone());
         let mut store = Store::new(&self.engine, state);
 
-        let instance = self.linker.instantiate(&mut store, &self.module).map_err(|e| {
-            RuntimeError::wasm(format!("Failed to instantiate WASM module: {}", e))
-        })?;
+        let instance = self
+            .linker
+            .instantiate(&mut store, &self.module)
+            .map_err(|e| RuntimeError::wasm(format!("Failed to instantiate WASM module: {}", e)))?;
 
         Ok((store, instance))
     }
@@ -231,9 +232,8 @@ impl WasmInstance {
             if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, name) {
                 info!("Calling WASM entry point: {}", name);
 
-                func.call(&mut store, ()).map_err(|e| {
-                    RuntimeError::wasm(format!("Failed to call {}: {}", name, e))
-                })?;
+                func.call(&mut store, ())
+                    .map_err(|e| RuntimeError::wasm(format!("Failed to call {}: {}", name, e)))?;
 
                 // Check if routes were registered
                 let route_count = self.router.len();
@@ -276,15 +276,14 @@ impl WasmInstance {
         debug!("Calling handler: {}", handler_name);
 
         // Try the generated handler name first
-        if let Ok(handler) = instance
-            .get_typed_func::<(), i32>(&mut store, &handler_name)
-        {
+        if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, &handler_name) {
             let result_ptr = handler.call(&mut store, ()).map_err(|e| {
                 RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
             })?;
 
             // Read result string from memory
-            let result = crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
+            let result =
+                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
 
             return Ok(result);
         }
@@ -297,7 +296,9 @@ impl WasmInstance {
                     // Try to call as a function returning i32
                     let result_ptr = func
                         .typed::<(), i32>(&store)
-                        .map_err(|e| RuntimeError::wasm(format!("Invalid handler signature: {}", e)))?
+                        .map_err(|e| {
+                            RuntimeError::wasm(format!("Invalid handler signature: {}", e))
+                        })?
                         .call(&mut store, ())
                         .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
 
@@ -310,14 +311,13 @@ impl WasmInstance {
         }
 
         // Fallback: try calling a generic handler function with the index
-        if let Ok(dispatch) = instance
-            .get_typed_func::<i32, i32>(&mut store, "__dispatch_route")
-        {
-            let result_ptr = dispatch.call(&mut store, handler_index as i32).map_err(|e| {
-                RuntimeError::wasm(format!("Dispatch failed: {}", e))
-            })?;
+        if let Ok(dispatch) = instance.get_typed_func::<i32, i32>(&mut store, "__dispatch_route") {
+            let result_ptr = dispatch
+                .call(&mut store, handler_index as i32)
+                .map_err(|e| RuntimeError::wasm(format!("Dispatch failed: {}", e)))?;
 
-            let result = crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
+            let result =
+                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
 
             return Ok(result);
         }
@@ -351,7 +351,10 @@ impl WasmInstance {
 pub type SharedWasmInstance = Arc<WasmInstance>;
 
 /// Create a shared WASM instance
-pub fn create_shared_instance(wasm_path: &Path, router: SharedRouter) -> RuntimeResult<SharedWasmInstance> {
+pub fn create_shared_instance(
+    wasm_path: &Path,
+    router: SharedRouter,
+) -> RuntimeResult<SharedWasmInstance> {
     let instance = WasmInstance::load(wasm_path, router)?;
     Ok(Arc::new(instance))
 }
