@@ -104,32 +104,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
-            // Read heap pointer BEFORE malloc
-            let heap_before = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
-                heap_global.get(&mut caller).i32().unwrap_or(-1)
-            } else {
-                // Try to read from global index 0 directly
-                -1
-            };
-            error!("_db_query: heap_ptr BEFORE write_string = {}", heap_before);
-
+            // Call write_string_to_caller which uses WASM malloc
+            // WASM malloc reads/writes Global[0] (heap_ptr), NOT memory[0]
             let ptr = write_string_to_caller(&mut caller, &result_str);
             error!("_db_query: write_string_to_caller returned ptr={}, str_len={}", ptr, result_str.len());
-
-            // Read heap pointer AFTER malloc
-            let heap_after = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
-                heap_global.get(&mut caller).i32().unwrap_or(-1)
-            } else {
-                -1
-            };
-            error!("_db_query: heap_ptr AFTER write_string = {}", heap_after);
-
-            // Verify: heap should have advanced by at least the string size
-            let expected_end = ptr as i32 + 4 + result_str.len() as i32;
-            if heap_after >= 0 && heap_after < expected_end {
-                error!("_db_query: WARNING! heap_ptr ({}) is LESS than end of string ({})! Corruption will occur!",
-                       heap_after, expected_end);
-            }
 
             ptr
         },

@@ -34,3 +34,5 @@ Thumbs.db
 
 # Documentation build
 /book/
+host-bridge/target/
+tests/docker/

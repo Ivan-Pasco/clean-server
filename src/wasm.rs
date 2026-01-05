@@ -214,14 +214,14 @@ impl WasmInstance {
         // Create an instance specifically for initialization
         let (mut store, instance) = self.create_instance()?;
 
-        // Save the initial heap pointer BEFORE calling _start
-        // Clean Language stores the heap allocator at memory address 0
-        if let Some(memory) = instance.get_memory(&mut store, "memory") {
-            let data = memory.data(&store);
-            if data.len() >= 4 {
-                let heap_ptr = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                info!("Initial heap pointer (before _start): {}", heap_ptr);
-            }
+        // Read the heap pointer from WASM Global[0], NOT from memory[0]
+        // Clean Language native malloc stores heap_ptr in Global index 0, initialized to 65536
+        if let Some(heap_global) = instance.get_global(&mut store, "__heap_ptr") {
+            let heap_ptr = heap_global.get(&mut store).i32().unwrap_or(-1);
+            info!("Initial heap pointer from __heap_ptr global: {}", heap_ptr);
+        } else {
+            // Fallback: try to read from exported global or log that it's not available
+            info!("No __heap_ptr global exported - heap pointer tracking unavailable");
         }
 
         // Try different entry point names
