@@ -78,12 +78,17 @@ pub mod error;
 pub mod memory;
 pub mod router;
 pub mod server;
+pub mod session;
 pub mod wasm;
 
 // Re-exports for convenience
 pub use error::{HttpError, RuntimeError, RuntimeResult};
 pub use router::{HttpMethod, RouteHandler, Router, SharedRouter};
 pub use server::{ServerConfig, start_server};
+pub use session::{
+    SessionConfig, SessionData, SessionStore, SharedSessionStore, create_session_store,
+    parse_cookies,
+};
 pub use wasm::{
     AuthContext, RequestContext, SharedDbBridge, SharedWasmInstance, WasmInstance, WasmState,
     create_shared_instance_with_db,
