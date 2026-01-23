@@ -4,7 +4,8 @@
 
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
-use crate::wasm::{RequestContext, SharedDbBridge, SharedWasmInstance};
+use crate::session::{SharedSessionStore, parse_cookies};
+use crate::wasm::{AuthContext, RequestContext, SharedDbBridge, SharedWasmInstance};
 use axum::{
     Router,
     body::Body,
@@ -251,18 +252,40 @@ async fn handle_request(
         route_handler.method, route_handler.path, route_handler.handler_index
     );
 
+    // Try to extract auth context from session cookie
+    let auth_context = extract_auth_from_headers(&headers, state.wasm.session_store());
+
     // Check authentication for protected routes
     if route_handler.protected {
-        // TODO: Implement actual auth checking
-        // For now, we'll check for an Authorization header
-        if !headers.contains_key(header::AUTHORIZATION) {
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        // Check if user is authenticated
+        if auth_context.is_none() {
+            debug!("Protected route requires authentication");
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"ok":false,"error":"Unauthorized"}"#))
+                .unwrap();
         }
 
         // Check role if required
         if let Some(required_role) = &route_handler.required_role {
-            // TODO: Extract role from token and verify
-            debug!("Route requires role: {}", required_role);
+            let has_role = auth_context
+                .as_ref()
+                .map(|ctx| ctx.role == *required_role || ctx.role == "admin")
+                .unwrap_or(false);
+
+            if !has_role {
+                debug!(
+                    "Route requires role '{}' but user has '{}'",
+                    required_role,
+                    auth_context.as_ref().map(|c| c.role.as_str()).unwrap_or("none")
+                );
+                return Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"ok":false,"error":"Forbidden"}"#))
+                    .unwrap();
+            }
         }
     }
 
@@ -292,28 +315,60 @@ async fn handle_request(
         query: query_params,
     };
 
-    // Call WASM handler
+    // Call WASM handler with auth context
     match state
         .wasm
-        .call_handler(route_handler.handler_index, request_ctx)
+        .call_handler_with_auth(route_handler.handler_index, request_ctx, auth_context)
     {
-        Ok(response_body) => {
-            debug!("Handler returned: {} bytes", response_body.len());
+        Ok(handler_response) => {
+            debug!("Handler returned: {} bytes", handler_response.body.len());
+
+            // Check for redirect first
+            if let Some((status_code, redirect_url)) = handler_response.redirect {
+                debug!("Redirecting {} -> {}", status_code, redirect_url);
+                let mut builder = Response::builder()
+                    .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::FOUND))
+                    .header(header::LOCATION, &redirect_url);
+
+                // Add Set-Cookie header if pending (for post-login redirects)
+                if let Some(cookie) = handler_response.set_cookie {
+                    builder = builder.header(header::SET_COOKIE, cookie);
+                }
+
+                // Add custom headers
+                for (name, value) in handler_response.headers {
+                    builder = builder.header(name.as_str(), value.as_str());
+                }
+
+                return builder.body(Body::empty()).unwrap();
+            }
 
             // Determine content type based on response
-            let content_type = if response_body.starts_with('{') || response_body.starts_with('[') {
+            let content_type = if handler_response.body.starts_with('{') || handler_response.body.starts_with('[') {
                 "application/json"
-            } else if response_body.starts_with("<!") || response_body.starts_with("<html") {
+            } else if handler_response.body.starts_with("<!") || handler_response.body.starts_with("<html") {
                 "text/html; charset=utf-8"
             } else {
                 "text/plain; charset=utf-8"
             };
 
-            Response::builder()
+            let mut builder = Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, content_type)
-                .body(Body::from(response_body))
-                .unwrap()
+                .header(header::CONTENT_TYPE, content_type);
+
+            // Add Set-Cookie header if pending
+            if let Some(cookie) = handler_response.set_cookie {
+                debug!("Setting cookie: {}", cookie);
+                builder = builder.header(header::SET_COOKIE, cookie);
+            }
+
+            // Add custom headers
+            for (name, value) in handler_response.headers {
+                debug!("Setting header: {}={}", name, value);
+                builder = builder.header(name.as_str(), value.as_str());
+            }
+
+            builder.body(Body::from(handler_response.body)).unwrap()
         }
         Err(e) => {
             error!("Handler error: {}", e);
@@ -329,6 +384,52 @@ async fn handle_request(
                 .unwrap()
         }
     }
+}
+
+/// Extract auth context from request headers (session cookie or JWT)
+fn extract_auth_from_headers(
+    headers: &HeaderMap,
+    session_store: &SharedSessionStore,
+) -> Option<AuthContext> {
+    // Try to get session from cookie first
+    if let Some(cookie_header) = headers.get(header::COOKIE) {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            let cookies = parse_cookies(cookie_str);
+
+            // Try common session cookie names
+            let session_id = cookies.get("session")
+                .or_else(|| cookies.get("todo.sid"))
+                .or_else(|| cookies.get("sid"));
+
+            if let Some(session_id) = session_id {
+                // Look up session
+                let mut store = session_store.write().unwrap();
+                if let Some(session) = store.get(session_id) {
+                    debug!("Found valid session {} for user {}", session.session_id, session.user_id);
+                    return Some(AuthContext {
+                        user_id: session.user_id,
+                        role: session.role,
+                        session_id: Some(session.session_id),
+                    });
+                }
+            }
+        }
+    }
+
+    // Try Bearer token from Authorization header
+    if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..];
+                // For now, just log that we received a token
+                // Full JWT validation would go here
+                debug!("Received Bearer token: {}...", &token[..token.len().min(10)]);
+                // JWT validation would return AuthContext here
+            }
+        }
+    }
+
+    None
 }
 
 /// Graceful shutdown signal handler

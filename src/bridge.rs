@@ -14,11 +14,14 @@
 //!
 //! ## Server-Specific Functions (defined here)
 //! - HTTP server (_http_listen, _http_route, _http_route_protected)
-//! - Request context (_req_param, _req_query, _req_body, _req_header, _req_method, _req_path)
-//! - Session auth (_auth_get_session, _auth_require_auth, _auth_require_role)
+//! - Request context (_req_param, _req_query, _req_body, _req_header, _req_method, _req_path, _req_cookie)
+//! - Response manipulation (_res_set_header, _res_redirect)
+//! - Session management (_session_create, _session_get, _session_destroy, _session_set_cookie)
+//! - Session auth (_auth_get_session, _auth_require_auth, _auth_require_role, _auth_can, _auth_has_any_role)
 
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
+use crate::session::parse_cookies;
 use crate::wasm::WasmState;
 use host_bridge::{read_raw_string, write_string_to_caller};
 use tracing::{debug, error, info};
@@ -40,7 +43,9 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     // Register server-specific functions
     register_http_server_functions(&mut linker)?;
     register_request_context_functions(&mut linker)?;
+    register_session_management_functions(&mut linker)?;
     register_session_auth_functions(&mut linker)?;
+    register_response_functions(&mut linker)?;
 
     Ok(linker)
 }
@@ -312,6 +317,242 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_path: {}", e)))?;
 
+    // _req_cookie - Get a cookie value by name
+    linker
+        .func_wrap(
+            "env",
+            "_req_cookie",
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
+                let cookie_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, ""),
+                };
+
+                debug!("_req_cookie: Looking for cookie '{}'", cookie_name);
+
+                let value = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| {
+                            // Find Cookie header
+                            ctx.headers
+                                .iter()
+                                .find(|(k, _)| k.to_lowercase() == "cookie")
+                                .and_then(|(_, cookie_header)| {
+                                    let cookies = parse_cookies(cookie_header);
+                                    cookies.get(&cookie_name).cloned()
+                                })
+                        })
+                        .unwrap_or_default()
+                };
+
+                write_string_to_caller(&mut caller, &value)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_cookie: {}", e)))?;
+
+    Ok(())
+}
+
+/// Register session management functions (_session_create, _session_get, _session_destroy)
+fn register_session_management_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _session_create - Create a new session for a user
+    // Arguments: user_id (i32), role_ptr, role_len, claims_ptr, claims_len
+    // Returns: session_id string pointer
+    linker
+        .func_wrap(
+            "env",
+            "_session_create",
+            |mut caller: Caller<'_, WasmState>,
+             user_id: i32,
+             role_ptr: i32,
+             role_len: i32,
+             claims_ptr: i32,
+             claims_len: i32|
+             -> i32 {
+                let role = read_raw_string(&mut caller, role_ptr, role_len)
+                    .unwrap_or_else(|| "user".to_string());
+                let claims = read_raw_string(&mut caller, claims_ptr, claims_len)
+                    .unwrap_or_else(|| "{}".to_string());
+
+                info!("_session_create: user_id={}, role={}", user_id, role);
+
+                // Get the session store and create session (uses std::sync::RwLock)
+                let session_store = caller.data().session_store.clone();
+
+                let session = {
+                    let mut store = session_store.write().unwrap();
+                    store.create(user_id, &role, &claims)
+                };
+
+                let session_id = session.session_id.clone();
+
+                // Format and store Set-Cookie header
+                let set_cookie = {
+                    let store = session_store.read().unwrap();
+                    store.format_cookie(&session_id)
+                };
+
+                caller.data_mut().pending_set_cookie = Some(set_cookie);
+
+                // Set auth context for current request
+                caller.data_mut().set_auth_from_session(user_id, role, session_id.clone());
+
+                write_string_to_caller(&mut caller, &session_id)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_create: {}", e)))?;
+
+    // _session_get - Get session data by session ID (returns JSON or empty)
+    linker
+        .func_wrap(
+            "env",
+            "_session_get",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                // Get session ID from cookie
+                let session_id = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| {
+                            ctx.headers
+                                .iter()
+                                .find(|(k, _)| k.to_lowercase() == "cookie")
+                                .and_then(|(_, cookie_header)| {
+                                    let cookies = parse_cookies(cookie_header);
+                                    // Try common session cookie names
+                                    cookies.get("session").cloned()
+                                        .or_else(|| cookies.get("todo.sid").cloned())
+                                        .or_else(|| cookies.get("sid").cloned())
+                                })
+                        })
+                };
+
+                let session_id = match session_id {
+                    Some(id) => id,
+                    None => {
+                        debug!("_session_get: No session cookie found");
+                        return write_string_to_caller(&mut caller, "");
+                    }
+                };
+
+                debug!("_session_get: Looking up session {}", session_id);
+
+                let session_store = caller.data().session_store.clone();
+
+                let session_data = {
+                    let mut store = session_store.write().unwrap();
+                    store.get(&session_id)
+                };
+
+                match session_data {
+                    Some(session) => {
+                        // Set auth context
+                        caller.data_mut().set_auth_from_session(
+                            session.user_id,
+                            session.role.clone(),
+                            session.session_id.clone(),
+                        );
+
+                        let json = serde_json::json!({
+                            "userId": session.user_id,
+                            "role": session.role,
+                            "sessionId": session.session_id,
+                            "claims": session.claims
+                        })
+                        .to_string();
+                        write_string_to_caller(&mut caller, &json)
+                    }
+                    None => {
+                        debug!("_session_get: Session {} not found or expired", session_id);
+                        write_string_to_caller(&mut caller, "")
+                    }
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_get: {}", e)))?;
+
+    // _session_destroy - Destroy the current session (logout)
+    linker
+        .func_wrap(
+            "env",
+            "_session_destroy",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                // Get session ID from auth context or cookie
+                let session_id = {
+                    let state = caller.data();
+                    state
+                        .auth_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.session_id.clone())
+                        .or_else(|| {
+                            state.request_context.as_ref().and_then(|ctx| {
+                                ctx.headers
+                                    .iter()
+                                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                                    .and_then(|(_, cookie_header)| {
+                                        let cookies = parse_cookies(cookie_header);
+                                        cookies.get("session").cloned()
+                                            .or_else(|| cookies.get("todo.sid").cloned())
+                                            .or_else(|| cookies.get("sid").cloned())
+                                    })
+                            })
+                        })
+                };
+
+                let session_id = match session_id {
+                    Some(id) => id,
+                    None => {
+                        debug!("_session_destroy: No session to destroy");
+                        return 0;
+                    }
+                };
+
+                info!("_session_destroy: Destroying session {}", session_id);
+
+                let session_store = caller.data().session_store.clone();
+
+                // Delete session
+                let deleted = {
+                    let mut store = session_store.write().unwrap();
+                    store.delete(&session_id)
+                };
+
+                // Set clear cookie header
+                let clear_cookie = {
+                    let store = session_store.read().unwrap();
+                    store.format_clear_cookie()
+                };
+
+                caller.data_mut().pending_set_cookie = Some(clear_cookie);
+                caller.data_mut().auth_context = None;
+
+                if deleted { 1 } else { 0 }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_destroy: {}", e)))?;
+
+    // _session_set_cookie - Set a pending Set-Cookie header (for custom cookie values)
+    linker
+        .func_wrap(
+            "env",
+            "_session_set_cookie",
+            |mut caller: Caller<'_, WasmState>, cookie_ptr: i32, cookie_len: i32| -> i32 {
+                let cookie = match read_raw_string(&mut caller, cookie_ptr, cookie_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+
+                debug!("_session_set_cookie: {}", cookie);
+                caller.data_mut().pending_set_cookie = Some(cookie);
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_set_cookie: {}", e)))?;
+
     Ok(())
 }
 
@@ -424,6 +665,91 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_has_any_role: {}", e)))?;
+
+    Ok(())
+}
+
+/// Register response manipulation functions (_res_set_header, _res_redirect)
+fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _res_set_header - Set a custom response header
+    // Args: name_ptr, name_len, value_ptr, value_len
+    // Returns: 1 on success, 0 on error
+    linker
+        .func_wrap(
+            "env",
+            "_res_set_header",
+            |mut caller: Caller<'_, WasmState>,
+             name_ptr: i32,
+             name_len: i32,
+             value_ptr: i32,
+             value_len: i32|
+             -> i32 {
+                let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_res_set_header: Failed to read header name");
+                        return 0;
+                    }
+                };
+
+                let header_value = match read_raw_string(&mut caller, value_ptr, value_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_res_set_header: Failed to read header value");
+                        return 0;
+                    }
+                };
+
+                debug!("_res_set_header: {}={}", header_name, header_value);
+                caller.data_mut().add_header(header_name, header_value);
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _res_set_header: {}", e)))?;
+
+    // _res_redirect - Set a redirect response
+    // Args: url_ptr, url_len, status_code (301, 302, 307, 308)
+    // Returns: 1 on success, 0 on error
+    // Note: Status codes:
+    //   301 = Moved Permanently (cacheable, may change method to GET)
+    //   302 = Found (temporary, may change method to GET)
+    //   307 = Temporary Redirect (preserves method)
+    //   308 = Permanent Redirect (preserves method)
+    linker
+        .func_wrap(
+            "env",
+            "_res_redirect",
+            |mut caller: Caller<'_, WasmState>,
+             url_ptr: i32,
+             url_len: i32,
+             status_code: i32|
+             -> i32 {
+                let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_res_redirect: Failed to read URL");
+                        return 0;
+                    }
+                };
+
+                // Validate status code
+                let status = match status_code {
+                    301 | 302 | 303 | 307 | 308 => status_code as u16,
+                    _ => {
+                        debug!(
+                            "_res_redirect: Invalid status code {}, defaulting to 302",
+                            status_code
+                        );
+                        302
+                    }
+                };
+
+                info!("_res_redirect: {} -> {}", status, url);
+                caller.data_mut().set_redirect(status, url);
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _res_redirect: {}", e)))?;
 
     Ok(())
 }
