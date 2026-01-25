@@ -247,6 +247,68 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_body: {}", e)))?;
 
+    // _req_body_field - Get a field from JSON request body
+    linker
+        .func_wrap(
+            "env",
+            "_req_body_field",
+            |mut caller: Caller<'_, WasmState>, field_ptr: i32, field_len: i32| -> i32 {
+                let field_name = match read_raw_string(&mut caller, field_ptr, field_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, ""),
+                };
+
+                let value = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| {
+                            serde_json::from_str::<serde_json::Value>(&ctx.body).ok()
+                        })
+                        .and_then(|json| {
+                            json.get(&field_name).map(|v| match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                serde_json::Value::Null => String::new(),
+                                other => other.to_string(),
+                            })
+                        })
+                        .unwrap_or_default()
+                };
+
+                debug!("_req_body_field({}): {}", field_name, value);
+                write_string_to_caller(&mut caller, &value)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_body_field: {}", e)))?;
+
+    // _req_param_int - Get a path parameter as integer
+    linker
+        .func_wrap(
+            "env",
+            "_req_param_int",
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
+                let param_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => return 0,
+                };
+
+                let value = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.params.get(&param_name))
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .unwrap_or(0)
+                };
+
+                debug!("_req_param_int({}): {}", param_name, value);
+                value
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_param_int: {}", e)))?;
+
     // _req_header - Get a request header by name
     linker
         .func_wrap(
@@ -666,11 +728,130 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_has_any_role: {}", e)))?;
 
+    // _auth_user_id - Get the current user's ID
+    linker
+        .func_wrap(
+            "env",
+            "_auth_user_id",
+            |caller: Caller<'_, WasmState>| -> i32 {
+                let state = caller.data();
+                state.auth_context.as_ref().map(|a| a.user_id).unwrap_or(0)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_user_id: {}", e)))?;
+
+    // _auth_user_role - Get the current user's role
+    linker
+        .func_wrap(
+            "env",
+            "_auth_user_role",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                let role = {
+                    let state = caller.data();
+                    state
+                        .auth_context
+                        .as_ref()
+                        .map(|a| a.role.clone())
+                        .unwrap_or_default()
+                };
+                write_string_to_caller(&mut caller, &role)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_user_role: {}", e)))?;
+
     Ok(())
 }
 
 /// Register response manipulation functions (_res_set_header, _res_redirect)
 fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _http_respond - Send an HTTP response with status, content type, and body
+    // Args: status, content_type_ptr, content_type_len, body_ptr, body_len
+    // Returns: pointer to body (for chaining)
+    linker
+        .func_wrap(
+            "env",
+            "_http_respond",
+            |mut caller: Caller<'_, WasmState>,
+             status: i32,
+             content_type_ptr: i32,
+             content_type_len: i32,
+             body_ptr: i32,
+             body_len: i32|
+             -> i32 {
+                let content_type = read_raw_string(&mut caller, content_type_ptr, content_type_len)
+                    .unwrap_or_else(|| "text/plain".to_string());
+                let body = read_raw_string(&mut caller, body_ptr, body_len)
+                    .unwrap_or_default();
+
+                debug!(
+                    "_http_respond: status={}, content_type={}, body_len={}",
+                    status,
+                    content_type,
+                    body.len()
+                );
+
+                // Set response properties
+                let state = caller.data_mut();
+                state.set_status(status as u16);
+                state.add_header("Content-Type".to_string(), content_type);
+                state.set_body(body.clone());
+
+                // Return pointer to body for chaining
+                write_string_to_caller(&mut caller, &body)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_respond: {}", e)))?;
+
+    // _http_redirect - Send an HTTP redirect (alternative signature)
+    // Args: status, url_ptr, url_len
+    // Returns: pointer to url
+    linker
+        .func_wrap(
+            "env",
+            "_http_redirect",
+            |mut caller: Caller<'_, WasmState>, status: i32, url_ptr: i32, url_len: i32| -> i32 {
+                let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, ""),
+                };
+
+                debug!("_http_redirect: status={}, url={}", status, url);
+
+                caller.data_mut().set_redirect(status as u16, url.clone());
+
+                write_string_to_caller(&mut caller, &url)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_redirect: {}", e)))?;
+
+    // _http_set_header - Alias for _res_set_header
+    // Args: name_ptr, name_len, value_ptr, value_len
+    // Returns: pointer to header name
+    linker
+        .func_wrap(
+            "env",
+            "_http_set_header",
+            |mut caller: Caller<'_, WasmState>,
+             name_ptr: i32,
+             name_len: i32,
+             value_ptr: i32,
+             value_len: i32|
+             -> i32 {
+                let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, ""),
+                };
+                let header_value = read_raw_string(&mut caller, value_ptr, value_len)
+                    .unwrap_or_default();
+
+                debug!("_http_set_header: {}={}", header_name, header_value);
+                caller.data_mut().add_header(header_name.clone(), header_value);
+
+                write_string_to_caller(&mut caller, &header_name)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_set_header: {}", e)))?;
+
     // _res_set_header - Set a custom response header
     // Args: name_ptr, name_len, value_ptr, value_len
     // Returns: 1 on success, 0 on error

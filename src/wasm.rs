@@ -40,6 +40,10 @@ pub struct WasmState {
     pub pending_headers: Vec<(String, String)>,
     /// Pending redirect (status_code, url)
     pub pending_redirect: Option<(u16, String)>,
+    /// Pending response status (for _http_respond)
+    pub pending_status: Option<u16>,
+    /// Pending response body (for _http_respond)
+    pub pending_body: Option<String>,
 }
 
 /// Request context passed to handlers
@@ -72,6 +76,8 @@ pub struct HandlerResponse {
     pub headers: Vec<(String, String)>,
     /// Pending redirect (status_code, url)
     pub redirect: Option<(u16, String)>,
+    /// Response status code (from _http_respond)
+    pub status: Option<u16>,
 }
 
 impl WasmState {
@@ -88,6 +94,8 @@ impl WasmState {
             pending_set_cookie: None,
             pending_headers: Vec::new(),
             pending_redirect: None,
+            pending_status: None,
+            pending_body: None,
         }
     }
 
@@ -104,6 +112,8 @@ impl WasmState {
             pending_set_cookie: None,
             pending_headers: Vec::new(),
             pending_redirect: None,
+            pending_status: None,
+            pending_body: None,
         }
     }
 
@@ -124,6 +134,8 @@ impl WasmState {
             pending_set_cookie: None,
             pending_headers: Vec::new(),
             pending_redirect: None,
+            pending_status: None,
+            pending_body: None,
         }
     }
 
@@ -165,6 +177,21 @@ impl WasmState {
     /// Take pending redirect (consumes it)
     pub fn take_pending_redirect(&mut self) -> Option<(u16, String)> {
         self.pending_redirect.take()
+    }
+
+    /// Take pending status (consumes it)
+    pub fn take_pending_status(&mut self) -> Option<u16> {
+        self.pending_status.take()
+    }
+
+    /// Set response status
+    pub fn set_status(&mut self, status: u16) {
+        self.pending_status = Some(status);
+    }
+
+    /// Set response body
+    pub fn set_body(&mut self, body: String) {
+        self.pending_body = Some(body);
     }
 
     /// Add a custom response header
@@ -511,12 +538,14 @@ impl WasmInstance {
         let set_cookie = store.data_mut().take_pending_cookie();
         let headers = store.data_mut().take_pending_headers();
         let redirect = store.data_mut().take_pending_redirect();
+        let status = store.data_mut().take_pending_status();
 
         Ok(HandlerResponse {
             body: result,
             set_cookie,
             headers,
             redirect,
+            status,
         })
     }
 

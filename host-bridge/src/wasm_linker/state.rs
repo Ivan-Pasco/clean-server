@@ -54,6 +54,45 @@ pub trait WasmStateCore: Send + 'static {
     fn last_error(&self) -> Option<&str> {
         None
     }
+
+    // =========================================
+    // HTTP SERVER METHODS (optional, for server runtimes)
+    // =========================================
+
+    /// Get the current request context (for HTTP server mode)
+    fn request_context(&self) -> Option<&RequestContext> {
+        None
+    }
+
+    /// Get the authentication context (for HTTP server mode)
+    fn auth_context(&self) -> Option<&AuthContext> {
+        None
+    }
+
+    /// Get the router interface (for HTTP server mode)
+    fn router(&self) -> Option<Arc<dyn RouterInterface + Send + Sync>> {
+        None
+    }
+
+    /// Get the server port
+    fn port(&self) -> u16 {
+        3000
+    }
+
+    /// Set the server port
+    fn set_port(&mut self, _port: u16) {
+        // Default implementation does nothing
+    }
+
+    /// Get immutable access to HTTP response being built
+    fn http_response(&self) -> Option<&HttpResponseBuilder> {
+        None
+    }
+
+    /// Get mutable access to HTTP response being built
+    fn http_response_mut(&mut self) -> Option<&mut HttpResponseBuilder> {
+        None
+    }
 }
 
 /// Memory manager for WASM instance (bump allocator)
@@ -124,9 +163,72 @@ impl Default for RequestContext {
 /// Authentication context
 #[derive(Debug, Clone)]
 pub struct AuthContext {
-    pub user_id: i64,
+    pub user_id: i32,
     pub role: String,
     pub session_id: Option<String>,
+}
+
+/// HTTP Response builder for server handlers
+#[derive(Debug, Clone, Default)]
+pub struct HttpResponseBuilder {
+    /// Response status code
+    pub status: u16,
+    /// Response headers
+    pub headers: HashMap<String, String>,
+    /// Response body
+    pub body: String,
+    /// Redirect URL (if set, body is ignored)
+    pub redirect_url: Option<String>,
+    /// Whether the response has been finalized
+    pub finalized: bool,
+}
+
+impl HttpResponseBuilder {
+    /// Create a new response builder with default 200 status
+    pub fn new() -> Self {
+        Self {
+            status: 200,
+            headers: HashMap::new(),
+            body: String::new(),
+            redirect_url: None,
+            finalized: false,
+        }
+    }
+
+    /// Set the status code
+    pub fn set_status(&mut self, status: u16) {
+        self.status = status;
+    }
+
+    /// Set a header
+    pub fn set_header(&mut self, name: String, value: String) {
+        self.headers.insert(name, value);
+    }
+
+    /// Set the body
+    pub fn set_body(&mut self, body: String) {
+        self.body = body;
+    }
+
+    /// Set redirect
+    pub fn set_redirect(&mut self, url: String, status: u16) {
+        self.redirect_url = Some(url);
+        self.status = status;
+    }
+
+    /// Check if this is a redirect response
+    pub fn is_redirect(&self) -> bool {
+        self.redirect_url.is_some()
+    }
+
+    /// Reset the builder for a new request
+    pub fn reset(&mut self) {
+        self.status = 200;
+        self.headers.clear();
+        self.body.clear();
+        self.redirect_url = None;
+        self.finalized = false;
+    }
 }
 
 /// State held by each WASM store instance
@@ -139,6 +241,8 @@ pub struct WasmState {
     pub request_context: Option<RequestContext>,
     /// Auth context (if authenticated)
     pub auth_context: Option<AuthContext>,
+    /// HTTP response being built
+    pub http_response: HttpResponseBuilder,
     /// Last error (for error reporting)
     pub last_error: Option<String>,
     /// Database bridge for database operations
@@ -169,6 +273,7 @@ impl WasmState {
             port: 3000,
             request_context: None,
             auth_context: None,
+            http_response: HttpResponseBuilder::new(),
             last_error: None,
             db_bridge: Arc::new(TokioRwLock::new(DbBridge::new())),
             router: None,
@@ -182,6 +287,7 @@ impl WasmState {
             port: 3000,
             request_context: None,
             auth_context: None,
+            http_response: HttpResponseBuilder::new(),
             last_error: None,
             db_bridge,
             router: None,
@@ -197,14 +303,16 @@ impl WasmState {
     /// Set request context for the current request
     pub fn set_request(&mut self, ctx: RequestContext) {
         self.request_context = Some(ctx);
-        // Reset memory allocator for new request
+        // Reset memory allocator and response builder for new request
         self.memory.reset();
+        self.http_response.reset();
     }
 
     /// Clear request context
     pub fn clear_request(&mut self) {
         self.request_context = None;
         self.auth_context = None;
+        self.http_response.reset();
     }
 }
 
@@ -234,6 +342,35 @@ impl WasmStateCore for WasmState {
 
     fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    // HTTP Server methods
+    fn request_context(&self) -> Option<&RequestContext> {
+        self.request_context.as_ref()
+    }
+
+    fn auth_context(&self) -> Option<&AuthContext> {
+        self.auth_context.as_ref()
+    }
+
+    fn router(&self) -> Option<Arc<dyn RouterInterface + Send + Sync>> {
+        self.router.clone()
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.port = port;
+    }
+
+    fn http_response(&self) -> Option<&HttpResponseBuilder> {
+        Some(&self.http_response)
+    }
+
+    fn http_response_mut(&mut self) -> Option<&mut HttpResponseBuilder> {
+        Some(&mut self.http_response)
     }
 }
 
