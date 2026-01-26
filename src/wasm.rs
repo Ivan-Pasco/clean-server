@@ -141,6 +141,8 @@ impl WasmState {
 
     /// Set request context for the current request
     pub fn set_request(&mut self, ctx: RequestContext) {
+        tracing::debug!("WasmState::set_request: Setting context with params: {:?}", ctx.params);
+        tracing::debug!("WasmState::set_request: Path: {}", ctx.path);
         self.request_context = Some(ctx);
         // Reset memory allocator for new request
         self.memory.reset();
@@ -473,11 +475,21 @@ impl WasmInstance {
         request: RequestContext,
         auth_context: Option<AuthContext>,
     ) -> RuntimeResult<HandlerResponse> {
+        debug!("call_handler_with_auth: handler={}, path={}, params={:?}",
+               handler_index, request.path, request.params);
+
         // Create a fresh instance for this request
         let (mut store, instance) = self.create_instance()?;
 
         // Set request context
+        debug!("call_handler_with_auth: Setting request context with {} params",
+               request.params.len());
         store.data_mut().set_request(request);
+
+        // Verify the params were set correctly
+        if let Some(ref ctx) = store.data().request_context {
+            debug!("call_handler_with_auth: Verified params in store: {:?}", ctx.params);
+        }
 
         // Set auth context if provided
         if let Some(auth) = auth_context {

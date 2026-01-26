@@ -248,9 +248,10 @@ async fn handle_request(
     };
 
     debug!(
-        "Matched route: {} {} -> handler {}",
-        route_handler.method, route_handler.path, route_handler.handler_index
+        "Matched route: {} {} -> handler {} (extracted {} params)",
+        route_handler.method, route_handler.path, route_handler.handler_index, params.len()
     );
+    debug!("Extracted route params: {:?}", params);
 
     // Try to extract auth context from session cookie
     let auth_context = extract_auth_from_headers(&headers, state.wasm.session_store());
@@ -306,6 +307,7 @@ async fn handle_request(
         .collect();
 
     // Create request context
+    debug!("handle_request: Creating RequestContext with params: {:?}", params);
     let request_ctx = RequestContext {
         method: method.to_string(),
         path: path.to_string(),
@@ -314,6 +316,7 @@ async fn handle_request(
         params,
         query: query_params,
     };
+    debug!("handle_request: RequestContext params: {:?}", request_ctx.params);
 
     // Call WASM handler with auth context
     match state

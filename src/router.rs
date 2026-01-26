@@ -172,11 +172,18 @@ impl Router {
         method: HttpMethod,
         path: &str,
     ) -> Option<(RouteHandler, HashMap<String, String>)> {
+        use tracing::debug;
+
+        debug!("Router::find: Looking for {} {}", method.as_str(), path);
+
         let matcher = self.path_matcher.read();
         let routes = self.routes.read();
 
         // Try to match the path
         if let Ok(matched) = matcher.at(path) {
+            debug!("Router::find: matchit matched path '{}' to route '{}'",
+                   path, matched.value.path);
+
             // Check if this path has a handler for the requested method
             let key = RouteKey {
                 method,
@@ -191,8 +198,13 @@ impl Router {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
 
+                debug!("Router::find: Extracted params: {:?}", params);
                 return Some((handler.clone(), params));
+            } else {
+                debug!("Router::find: No handler found for method {} on matched route", method.as_str());
             }
+        } else {
+            debug!("Router::find: matchit did not match path '{}'", path);
         }
 
         None
@@ -383,5 +395,23 @@ mod tests {
             convert_express_to_matchit("/api/users/:id/profile"),
             "/api/users/{id}/profile"
         );
+    }
+
+    #[test]
+    fn test_router_api_users_id() {
+        // Specific test for the reported bug scenario
+        let router = Router::new();
+
+        router
+            .register(HttpMethod::GET, "/api/users/:id".to_string(), 2, false, None)
+            .unwrap();
+
+        // Test that the route matches and params are extracted
+        let result = router.find(HttpMethod::GET, "/api/users/1");
+        assert!(result.is_some(), "Route should match /api/users/1");
+
+        let (handler, params) = result.unwrap();
+        assert_eq!(handler.handler_index, 2);
+        assert_eq!(params.get("id"), Some(&"1".to_string()), "Param 'id' should be '1'");
     }
 }

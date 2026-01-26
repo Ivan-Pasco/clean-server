@@ -7,7 +7,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;

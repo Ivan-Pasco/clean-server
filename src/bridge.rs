@@ -181,15 +181,54 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
             "env",
             "_req_param",
             |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
+                debug!("_req_param: CALLED with ptr={}, len={}", name_ptr, name_len);
+
+                // First, dump raw bytes from WASM memory for debugging
+                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    let data = memory.data(&caller);
+                    if (name_ptr as usize) + (name_len as usize) <= data.len() {
+                        let raw_bytes = &data[name_ptr as usize..(name_ptr + name_len) as usize];
+                        debug!("_req_param: Raw bytes at ptr: {:02x?}", raw_bytes);
+                        debug!("_req_param: As string (lossy): '{}'", String::from_utf8_lossy(raw_bytes));
+                    } else {
+                        error!("_req_param: ptr+len ({}) exceeds memory size ({})",
+                               name_ptr as usize + name_len as usize, data.len());
+                    }
+                } else {
+                    error!("_req_param: Could not get WASM memory export!");
+                }
+
                 let param_name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
-                    None => return write_string_to_caller(&mut caller, ""),
+                    None => {
+                        error!("_req_param: Failed to read param name from ptr={}, len={}", name_ptr, name_len);
+                        return write_string_to_caller(&mut caller, "");
+                    }
                 };
 
                 debug!("_req_param: Looking for param '{}'", param_name);
 
                 let value = {
                     let state = caller.data();
+
+                    // Log all available params for debugging
+                    if let Some(ref ctx) = state.request_context {
+                        debug!("_req_param: Request context EXISTS");
+                        debug!("_req_param: Request method: {}", ctx.method);
+                        debug!("_req_param: Request path: {}", ctx.path);
+                        debug!("_req_param: Params count: {}", ctx.params.len());
+                        debug!("_req_param: Available params: {:?}", ctx.params);
+
+                        // Try exact match
+                        if let Some(v) = ctx.params.get(&param_name) {
+                            debug!("_req_param: FOUND param '{}' = '{}'", param_name, v);
+                        } else {
+                            debug!("_req_param: param '{}' NOT FOUND in {:?}", param_name, ctx.params.keys().collect::<Vec<_>>());
+                        }
+                    } else {
+                        error!("_req_param: No request context available! This is the bug.");
+                    }
+
                     state
                         .request_context
                         .as_ref()
@@ -197,7 +236,10 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                         .unwrap_or_default()
                 };
 
-                write_string_to_caller(&mut caller, &value)
+                debug!("_req_param: Returning value '{}' for param '{}'", value, param_name);
+                let result_ptr = write_string_to_caller(&mut caller, &value);
+                debug!("_req_param: Wrote result to ptr={}", result_ptr);
+                result_ptr
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_param: {}", e)))?;

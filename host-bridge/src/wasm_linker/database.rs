@@ -91,23 +91,50 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             // Convert result to JSON string and return
             let result_str = match result {
-                Ok(v) => v.to_string(),
+                Ok(v) => {
+                    let s = v.to_string();
+                    debug!("_db_query: Query succeeded, result JSON ({} bytes): {}",
+                           s.len(), if s.len() > 200 { format!("{}...", &s[..200]) } else { s.clone() });
+                    s
+                }
                 Err(e) => {
-                    json!({
+                    let err_json = json!({
                         "ok": false,
                         "err": {
                             "code": "DB_ERROR",
                             "message": e.to_string()
                         }
-                    })
-                    .to_string()
+                    });
+                    error!("_db_query: Query failed: {}", e);
+                    err_json.to_string()
                 }
             };
+
+            // Validate the JSON string is valid UTF-8 before writing
+            debug!("_db_query: Result string is {} bytes, UTF-8 valid: {}",
+                   result_str.len(), result_str.is_ascii() || std::str::from_utf8(result_str.as_bytes()).is_ok());
 
             // Call write_string_to_caller which uses WASM malloc
             // WASM malloc reads/writes Global[0] (heap_ptr), NOT memory[0]
             let ptr = write_string_to_caller(&mut caller, &result_str);
             debug!("_db_query: write_string_to_caller returned ptr={}, str_len={}", ptr, result_str.len());
+
+            // Verify what was written by reading it back
+            if ptr > 0 {
+                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    let data = memory.data(&caller);
+                    let ptr_usize = ptr as usize;
+                    if ptr_usize + 4 + result_str.len() <= data.len() {
+                        let written_len_bytes: [u8; 4] = data[ptr_usize..ptr_usize + 4].try_into().unwrap_or([0; 4]);
+                        let written_len = u32::from_le_bytes(written_len_bytes) as usize;
+                        debug!("_db_query: Verification - written length prefix: {}, expected: {}",
+                               written_len, result_str.len());
+                        if written_len != result_str.len() {
+                            error!("_db_query: LENGTH MISMATCH! Written: {}, Expected: {}", written_len, result_str.len());
+                        }
+                    }
+                }
+            }
 
             ptr
         },

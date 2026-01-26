@@ -90,8 +90,12 @@ pub fn read_string_from_memory<T>(
     memory: &Memory,
     ptr: u32,
 ) -> RuntimeResult<String> {
+    use tracing::{debug, error};
+
     let data = memory.data(store);
     let ptr = ptr as usize;
+
+    debug!("read_string_from_memory: ptr={}, memory_size={}", ptr, data.len());
 
     // Check bounds for length prefix
     if ptr + STRING_LENGTH_PREFIX_SIZE > data.len() {
@@ -108,6 +112,21 @@ pub fn read_string_from_memory<T>(
         .map_err(|_| RuntimeError::memory("Failed to read string length"))?;
     let len = u32::from_le_bytes(len_bytes) as usize;
 
+    debug!("read_string_from_memory: length prefix indicates {} bytes", len);
+
+    // Sanity check: length should not be unreasonably large
+    if len > 10_000_000 {
+        error!("read_string_from_memory: suspiciously large length {} at ptr={}", len, ptr);
+        // Log the raw bytes around the ptr for debugging
+        let start = if ptr >= 16 { ptr - 16 } else { 0 };
+        let end = (ptr + 32).min(data.len());
+        error!("read_string_from_memory: bytes around ptr: {:02x?}", &data[start..end]);
+        return Err(RuntimeError::memory(format!(
+            "String length {} is unreasonably large (possible memory corruption at ptr={})",
+            len, ptr
+        )));
+    }
+
     // Check bounds for string data
     let data_start = ptr + STRING_LENGTH_PREFIX_SIZE;
     let data_end = data_start + len;
@@ -122,9 +141,26 @@ pub fn read_string_from_memory<T>(
     }
 
     // Read and convert to string
-    std::str::from_utf8(&data[data_start..data_end])
-        .map(|s| s.to_string())
-        .map_err(|e| RuntimeError::memory(format!("Invalid UTF-8 in string: {}", e)))
+    match std::str::from_utf8(&data[data_start..data_end]) {
+        Ok(s) => {
+            debug!("read_string_from_memory: successfully read {} bytes: '{}'",
+                   len, if s.len() > 100 { format!("{}...", &s[..100]) } else { s.to_string() });
+            Ok(s.to_string())
+        }
+        Err(e) => {
+            // Log the problematic bytes for debugging
+            let error_index = e.valid_up_to();
+            let start = data_start + error_index.saturating_sub(8);
+            let end = (data_start + error_index + 16).min(data_end);
+            error!("read_string_from_memory: UTF-8 error at offset {} (absolute position {})",
+                   error_index, data_start + error_index);
+            error!("read_string_from_memory: valid prefix: '{}'",
+                   String::from_utf8_lossy(&data[data_start..data_start + error_index]));
+            error!("read_string_from_memory: bytes around error: {:02x?}", &data[start..end]);
+
+            Err(RuntimeError::memory(format!("Invalid UTF-8 in string: {}", e)))
+        }
+    }
 }
 
 /// Read a Clean Language string from WASM memory (caller version)

@@ -37,7 +37,9 @@ mod database;
 mod file_io;
 mod http_client;
 mod crypto_funcs;
-mod http_server;
+// NOTE: HTTP Server functions (Layer 3) are NOT in host-bridge.
+// They are server-specific and implemented in clean-server/src/bridge.rs.
+// See platform-architecture/EXECUTION_LAYERS.md for layer definitions.
 
 // Re-export core types
 pub use state::{WasmState, WasmStateCore, WasmMemory, RequestContext, AuthContext, SharedDbBridge, HttpResponseBuilder};
@@ -90,23 +92,12 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     http_client::register_functions(linker)?;
     crypto_funcs::register_functions(linker)?;
 
-    // NOTE: HTTP Server extensions (http_server module) are NOT auto-registered.
-    // These are server-specific and should be registered by the server runtime
-    // using register_http_server_functions() if needed, or the server can
-    // implement its own versions (as clean-server does in bridge.rs).
+    // NOTE: HTTP Server functions (Layer 3) are NOT provided by host-bridge.
+    // Server-specific functions like _req_param, _req_body, _http_route, etc.
+    // must be implemented by the server runtime (e.g., clean-server/src/bridge.rs).
+    // See platform-architecture/EXECUTION_LAYERS.md for layer definitions.
 
     Ok(())
-}
-
-/// Register HTTP server extension functions with a linker
-///
-/// These are server-specific extensions that require HTTP context.
-/// Call this separately if you want to use the reference implementation
-/// from host-bridge instead of implementing your own.
-///
-/// See platform-architecture/SERVER_EXTENSIONS.md for specification.
-pub fn register_http_server_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
-    http_server::register_functions(linker)
 }
 
 /// Create a fully configured linker with all host functions
