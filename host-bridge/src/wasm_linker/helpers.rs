@@ -107,7 +107,15 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_string_to_caller: Writing string ({} bytes)", len);
+    debug!("write_string_to_caller: Writing string ({} bytes, total_size={})", len, total_size);
+
+    // Read __heap_ptr BEFORE malloc to track heap state
+    let heap_ptr_before = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        heap_global.get(&mut *caller).i32().unwrap_or(-1)
+    } else {
+        -1
+    };
+    debug!("write_string_to_caller: __heap_ptr BEFORE malloc = {}", heap_ptr_before);
 
     // MUST use WASM's malloc to allocate - updating memory[0] doesn't work
     // because WASM's allocator uses a global variable, not linear memory.
@@ -140,6 +148,32 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
         return 0;
     };
 
+    // Read __heap_ptr AFTER malloc to verify it was updated
+    let heap_ptr_after = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        heap_global.get(&mut *caller).i32().unwrap_or(-1)
+    } else {
+        -1
+    };
+    debug!("write_string_to_caller: __heap_ptr AFTER malloc = {}", heap_ptr_after);
+
+    // Calculate expected heap pointer after allocation (with 8-byte alignment)
+    let expected_heap_ptr = ((ptr + total_size + 7) & !7) as i32;
+    if heap_ptr_after >= 0 && heap_ptr_after < expected_heap_ptr {
+        error!("write_string_to_caller: HEAP POINTER NOT PROPERLY UPDATED!");
+        error!("  malloc returned ptr={}, allocated {} bytes", ptr, total_size);
+        error!("  __heap_ptr is {} but should be at least {}", heap_ptr_after, expected_heap_ptr);
+        error!("  This will cause memory overlap with subsequent allocations!");
+
+        // FIX: Manually update __heap_ptr to prevent overlap
+        if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+            if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(expected_heap_ptr)) {
+                error!("write_string_to_caller: Failed to update __heap_ptr: {}", e);
+            } else {
+                debug!("write_string_to_caller: Manually updated __heap_ptr to {}", expected_heap_ptr);
+            }
+        }
+    }
+
     // Re-acquire memory reference after malloc call - malloc might have grown memory
     // and we need the updated memory view
     let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
@@ -163,11 +197,6 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
         return 0;
     }
 
-    // NOTE: WASM's malloc already updated __heap_ptr internally.
-    // We don't need to update it again - doing so was redundant and could
-    // cause subtle alignment issues. Single allocator ownership pattern:
-    // all allocations go through WASM's malloc which manages __heap_ptr.
-
     debug!("write_string_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32
 }
@@ -183,7 +212,15 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_bytes_to_caller: Writing {} bytes", len);
+    debug!("write_bytes_to_caller: Writing {} bytes (total_size={})", len, total_size);
+
+    // Read __heap_ptr BEFORE malloc to track heap state
+    let heap_ptr_before = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        heap_global.get(&mut *caller).i32().unwrap_or(-1)
+    } else {
+        -1
+    };
+    debug!("write_bytes_to_caller: __heap_ptr BEFORE malloc = {}", heap_ptr_before);
 
     // MUST use WASM's malloc to allocate - using State allocator causes memory overlap
     // because WASM's allocator uses a global variable that grows from ~1024 upward,
@@ -217,6 +254,32 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
         return 0;
     };
 
+    // Read __heap_ptr AFTER malloc to verify it was updated
+    let heap_ptr_after = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        heap_global.get(&mut *caller).i32().unwrap_or(-1)
+    } else {
+        -1
+    };
+    debug!("write_bytes_to_caller: __heap_ptr AFTER malloc = {}", heap_ptr_after);
+
+    // Calculate expected heap pointer after allocation (with 8-byte alignment)
+    let expected_heap_ptr = ((ptr + total_size + 7) & !7) as i32;
+    if heap_ptr_after >= 0 && heap_ptr_after < expected_heap_ptr {
+        error!("write_bytes_to_caller: HEAP POINTER NOT PROPERLY UPDATED!");
+        error!("  malloc returned ptr={}, allocated {} bytes", ptr, total_size);
+        error!("  __heap_ptr is {} but should be at least {}", heap_ptr_after, expected_heap_ptr);
+        error!("  This will cause memory overlap with subsequent allocations!");
+
+        // FIX: Manually update __heap_ptr to prevent overlap
+        if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+            if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(expected_heap_ptr)) {
+                error!("write_bytes_to_caller: Failed to update __heap_ptr: {}", e);
+            } else {
+                debug!("write_bytes_to_caller: Manually updated __heap_ptr to {}", expected_heap_ptr);
+            }
+        }
+    }
+
     // Re-acquire memory reference after malloc call - malloc might have grown memory
     let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
@@ -238,9 +301,6 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
         error!("write_bytes_to_caller: Failed to write data: {}", e);
         return 0;
     }
-
-    // NOTE: WASM's malloc already updated __heap_ptr internally.
-    // We don't need to update it again - single allocator ownership pattern.
 
     debug!("write_bytes_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
     ptr as i32

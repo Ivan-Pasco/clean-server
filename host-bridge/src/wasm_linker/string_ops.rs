@@ -41,15 +41,32 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         "env",
         "string.concat",
         |mut caller: Caller<'_, S>, ptr1: i32, ptr2: i32| -> i32 {
+            use tracing::debug;
+
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return 0,
             };
             let data = memory.data(&caller);
 
+            // Debug: Check input pointers and their length prefixes
+            debug!("string.concat: INPUT ptr1={}, ptr2={}, memory_size={}", ptr1, ptr2, data.len());
+
             // Read both strings
             let bytes1 = read_length_prefixed_bytes(data, ptr1 as usize);
             let bytes2 = read_length_prefixed_bytes(data, ptr2 as usize);
+
+            // Debug: Log raw length prefixes
+            if ptr1 as usize + 4 <= data.len() {
+                let len1_bytes: [u8; 4] = data[ptr1 as usize..ptr1 as usize + 4].try_into().unwrap_or([0; 4]);
+                let len1 = u32::from_le_bytes(len1_bytes);
+                debug!("string.concat: ptr1 length_prefix={} (bytes: {:02x?})", len1, len1_bytes);
+            }
+            if ptr2 as usize + 4 <= data.len() {
+                let len2_bytes: [u8; 4] = data[ptr2 as usize..ptr2 as usize + 4].try_into().unwrap_or([0; 4]);
+                let len2 = u32::from_le_bytes(len2_bytes);
+                debug!("string.concat: ptr2 length_prefix={} (bytes: {:02x?})", len2, len2_bytes);
+            }
 
             // Concatenate bytes
             let mut result = bytes1.clone();
@@ -58,20 +75,63 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             // Debug: Log the concat operation
             let s1_preview = std::str::from_utf8(&bytes1).unwrap_or("(invalid utf8)");
             let s2_preview = std::str::from_utf8(&bytes2).unwrap_or("(invalid utf8)");
-            error!("string.concat: ptr1={} ('{}'), ptr2={} ('{}'), result_len={}",
-                   ptr1,
-                   if s1_preview.len() > 50 { &s1_preview[..50] } else { s1_preview },
-                   ptr2,
-                   if s2_preview.len() > 50 { &s2_preview[..50] } else { s2_preview },
+            debug!("string.concat: str1='{}' ({}B), str2='{}' ({}B), result_len={}",
+                   if s1_preview.len() > 100 { format!("{}...", &s1_preview[..100]) } else { s1_preview.to_string() },
+                   bytes1.len(),
+                   if s2_preview.len() > 100 { format!("{}...", &s2_preview[..100]) } else { s2_preview.to_string() },
+                   bytes2.len(),
                    result.len());
 
             // Convert to string and use write_string_to_caller for WASM malloc consistency
             let output_ptr = match std::str::from_utf8(&result) {
                 Ok(s) => write_string_to_caller(&mut caller, s),
-                Err(_) => write_bytes_to_caller(&mut caller, &result),
+                Err(e) => {
+                    error!("string.concat: Result contains invalid UTF-8 at byte {}: {:?}",
+                           e.valid_up_to(), e);
+                    // Log bytes around the error point
+                    let error_pos = e.valid_up_to();
+                    if error_pos < result.len() {
+                        let start = error_pos.saturating_sub(10);
+                        let end = (error_pos + 10).min(result.len());
+                        error!("string.concat: Bytes around error [{}..{}]: {:02x?}",
+                               start, end, &result[start..end]);
+                    }
+                    write_bytes_to_caller(&mut caller, &result)
+                }
             };
 
-            error!("string.concat: output_ptr={}, total_size={}", output_ptr, result.len() + 4);
+            debug!("string.concat: output_ptr={}, total_size={}", output_ptr, result.len() + 4);
+
+            // Verification: Read back what was written to verify integrity
+            if output_ptr > 0 {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return output_ptr,
+                };
+                let data = memory.data(&caller);
+                let ptr = output_ptr as usize;
+
+                if ptr + 4 + result.len() <= data.len() {
+                    let written_len_bytes: [u8; 4] = data[ptr..ptr + 4].try_into().unwrap_or([0; 4]);
+                    let written_len = u32::from_le_bytes(written_len_bytes) as usize;
+
+                    if written_len != result.len() {
+                        error!("string.concat: VERIFICATION FAILED - written_len={}, expected={}",
+                               written_len, result.len());
+                    }
+
+                    // Verify first and last few bytes of content match
+                    let content_start = ptr + 4;
+                    if result.len() >= 4 {
+                        let first4_written = &data[content_start..content_start + 4];
+                        let first4_expected = &result[..4];
+                        if first4_written != first4_expected {
+                            error!("string.concat: CONTENT MISMATCH at start - written: {:02x?}, expected: {:02x?}",
+                                   first4_written, first4_expected);
+                        }
+                    }
+                }
+            }
 
             output_ptr
         },
