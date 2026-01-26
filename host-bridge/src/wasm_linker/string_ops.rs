@@ -142,7 +142,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // string.trimStart - Trim leading whitespace
+    // string_trim_start - Trim leading whitespace (underscore version)
+    linker.func_wrap(
+        "env",
+        "string_trim_start",
+        |mut caller: Caller<'_, S>, str_ptr: i32| -> i32 {
+            let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
+            write_string_to_caller(&mut caller, s.trim_start())
+        },
+    )?;
+
+    // string.trimStart - Trim leading whitespace (dot version)
     linker.func_wrap(
         "env",
         "string.trimStart",
@@ -152,7 +162,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // string.trimEnd - Trim trailing whitespace
+    // string_trim_end - Trim trailing whitespace (underscore version)
+    linker.func_wrap(
+        "env",
+        "string_trim_end",
+        |mut caller: Caller<'_, S>, str_ptr: i32| -> i32 {
+            let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
+            write_string_to_caller(&mut caller, s.trim_end())
+        },
+    )?;
+
+    // string.trimEnd - Trim trailing whitespace (dot version)
     linker.func_wrap(
         "env",
         "string.trimEnd",

@@ -14,6 +14,7 @@ use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use serde_json::json;
 use tracing::{debug, error, warn};
+use url::form_urlencoded;
 use wasmtime::{Caller, Linker};
 
 /// Register all HTTP server functions with the linker
@@ -259,6 +260,29 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // _req_headers - Get all request headers as JSON object
+    linker.func_wrap(
+        "env",
+        "_req_headers",
+        |mut caller: Caller<'_, S>| -> i32 {
+            let headers_json = caller
+                .data()
+                .request_context()
+                .map(|ctx| {
+                    let mut map = serde_json::Map::new();
+                    for (key, value) in &ctx.headers {
+                        map.insert(key.clone(), serde_json::Value::String(value.clone()));
+                    }
+                    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+                })
+                .unwrap_or_else(|| "{}".to_string());
+
+            debug!("_req_headers: {} headers",
+                   caller.data().request_context().map(|c| c.headers.len()).unwrap_or(0));
+            write_string_to_caller(&mut caller, &headers_json)
+        },
+    )?;
+
     // _req_method - Get the HTTP method
     linker.func_wrap(
         "env",
@@ -331,6 +355,59 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             debug!("_req_cookie({}): {}", name, value);
             write_string_to_caller(&mut caller, &value)
+        },
+    )?;
+
+    // _req_form - Parse form-urlencoded body as JSON
+    linker.func_wrap(
+        "env",
+        "_req_form",
+        |mut caller: Caller<'_, S>| -> i32 {
+            let form_json = caller
+                .data()
+                .request_context()
+                .map(|ctx| {
+                    // Parse application/x-www-form-urlencoded
+                    let params: std::collections::HashMap<String, String> =
+                        form_urlencoded::parse(ctx.body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string())
+                })
+                .unwrap_or_else(|| "{}".to_string());
+
+            debug!("_req_form: parsed form data");
+            write_string_to_caller(&mut caller, &form_json)
+        },
+    )?;
+
+    // _req_ip - Get client IP address
+    linker.func_wrap(
+        "env",
+        "_req_ip",
+        |mut caller: Caller<'_, S>| -> i32 {
+            // Check X-Forwarded-For, X-Real-IP headers first, then fall back to connection IP
+            let ip = caller
+                .data()
+                .request_context()
+                .and_then(|ctx| {
+                    // Try X-Forwarded-For first (can be comma-separated list)
+                    ctx.headers
+                        .iter()
+                        .find(|(k, _)| k.to_lowercase() == "x-forwarded-for")
+                        .and_then(|(_, v)| v.split(',').next().map(|s| s.trim().to_string()))
+                        .or_else(|| {
+                            // Try X-Real-IP
+                            ctx.headers
+                                .iter()
+                                .find(|(k, _)| k.to_lowercase() == "x-real-ip")
+                                .map(|(_, v)| v.clone())
+                        })
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+
+            debug!("_req_ip: {}", ip);
+            write_string_to_caller(&mut caller, &ip)
         },
     )?;
 
@@ -464,6 +541,116 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             }
 
             write_string_to_caller(&mut caller, &name)
+        },
+    )?;
+
+    // _http_set_cache - Set Cache-Control max-age header
+    linker.func_wrap(
+        "env",
+        "_http_set_cache",
+        |mut caller: Caller<'_, S>, max_age: i32| -> i32 {
+            debug!("_http_set_cache: max-age={}", max_age);
+
+            if let Some(response) = caller.data_mut().http_response_mut() {
+                let cache_value = if max_age > 0 {
+                    format!("public, max-age={}", max_age)
+                } else {
+                    "no-cache, no-store, must-revalidate".to_string()
+                };
+                response.set_header("Cache-Control".to_string(), cache_value);
+                1 // Success
+            } else {
+                0 // No response context
+            }
+        },
+    )?;
+
+    // _http_no_cache - Disable caching completely
+    linker.func_wrap(
+        "env",
+        "_http_no_cache",
+        |mut caller: Caller<'_, S>| -> i32 {
+            debug!("_http_no_cache: disabling cache");
+
+            if let Some(response) = caller.data_mut().http_response_mut() {
+                response.set_header(
+                    "Cache-Control".to_string(),
+                    "no-cache, no-store, must-revalidate".to_string(),
+                );
+                response.set_header("Pragma".to_string(), "no-cache".to_string());
+                response.set_header("Expires".to_string(), "0".to_string());
+                1 // Success
+            } else {
+                0 // No response context
+            }
+        },
+    )?;
+
+    // =========================================
+    // JSON OPERATIONS
+    // =========================================
+
+    // _json_encode - Serialize any value to JSON string
+    // Note: Since we receive a string ptr/len, the WASM code must pass pre-stringified data
+    linker.func_wrap(
+        "env",
+        "_json_encode",
+        |mut caller: Caller<'_, S>, value_ptr: i32, value_len: i32| -> i32 {
+            let value = match read_raw_string(&mut caller, value_ptr, value_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, "null"),
+            };
+
+            // Try to parse as JSON first to validate and re-serialize
+            match serde_json::from_str::<serde_json::Value>(&value) {
+                Ok(json_value) => {
+                    let encoded = serde_json::to_string(&json_value)
+                        .unwrap_or_else(|_| "null".to_string());
+                    debug!("_json_encode: encoded {} bytes", encoded.len());
+                    write_string_to_caller(&mut caller, &encoded)
+                }
+                Err(_) => {
+                    // If not valid JSON, treat as a string value and encode it
+                    let json_str = serde_json::Value::String(value);
+                    let encoded = serde_json::to_string(&json_str)
+                        .unwrap_or_else(|_| "\"\"".to_string());
+                    debug!("_json_encode: encoded string as JSON");
+                    write_string_to_caller(&mut caller, &encoded)
+                }
+            }
+        },
+    )?;
+
+    // _json_decode - Parse JSON string to value
+    // Returns the pretty-printed JSON or error message
+    linker.func_wrap(
+        "env",
+        "_json_decode",
+        |mut caller: Caller<'_, S>, json_ptr: i32, json_len: i32| -> i32 {
+            let json_str = match read_raw_string(&mut caller, json_ptr, json_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, "null"),
+            };
+
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(value) => {
+                    // Return the parsed value as a string
+                    let decoded = serde_json::to_string(&value)
+                        .unwrap_or_else(|_| "null".to_string());
+                    debug!("_json_decode: decoded {} bytes", json_str.len());
+                    write_string_to_caller(&mut caller, &decoded)
+                }
+                Err(e) => {
+                    error!("_json_decode: parse error: {}", e);
+                    // Return error as JSON object
+                    let error_json = json!({
+                        "error": "JSON parse error",
+                        "message": e.to_string()
+                    })
+                    .to_string();
+                    write_string_to_caller(&mut caller, &error_json)
+                }
+            }
         },
     )?;
 

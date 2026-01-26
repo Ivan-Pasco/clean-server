@@ -415,6 +415,95 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_cookie: {}", e)))?;
 
+    // _req_headers - Get all request headers as JSON
+    linker
+        .func_wrap(
+            "env",
+            "_req_headers",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                let headers_json = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .map(|ctx| {
+                            let mut map = serde_json::Map::new();
+                            for (key, value) in &ctx.headers {
+                                map.insert(key.clone(), serde_json::Value::String(value.clone()));
+                            }
+                            serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+                        })
+                        .unwrap_or_else(|| "{}".to_string())
+                };
+
+                debug!("_req_headers: Returning all headers");
+                write_string_to_caller(&mut caller, &headers_json)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_headers: {}", e)))?;
+
+    // _req_form - Parse form-urlencoded body as JSON
+    linker
+        .func_wrap(
+            "env",
+            "_req_form",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                let form_json = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .map(|ctx| {
+                            use url::form_urlencoded;
+                            let params: std::collections::HashMap<String, String> =
+                                form_urlencoded::parse(ctx.body.as_bytes())
+                                    .into_owned()
+                                    .collect();
+                            serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string())
+                        })
+                        .unwrap_or_else(|| "{}".to_string())
+                };
+
+                debug!("_req_form: Parsed form data");
+                write_string_to_caller(&mut caller, &form_json)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_form: {}", e)))?;
+
+    // _req_ip - Get client IP address
+    linker
+        .func_wrap(
+            "env",
+            "_req_ip",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                let ip = {
+                    let state = caller.data();
+                    state
+                        .request_context
+                        .as_ref()
+                        .and_then(|ctx| {
+                            // Try X-Forwarded-For first (can be comma-separated list)
+                            ctx.headers
+                                .iter()
+                                .find(|(k, _)| k.to_lowercase() == "x-forwarded-for")
+                                .and_then(|(_, v)| v.split(',').next().map(|s| s.trim().to_string()))
+                                .or_else(|| {
+                                    // Try X-Real-IP
+                                    ctx.headers
+                                        .iter()
+                                        .find(|(k, _)| k.to_lowercase() == "x-real-ip")
+                                        .map(|(_, v)| v.clone())
+                                })
+                        })
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+
+                debug!("_req_ip: {}", ip);
+                write_string_to_caller(&mut caller, &ip)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_ip: {}", e)))?;
+
     Ok(())
 }
 
@@ -931,6 +1020,107 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _res_redirect: {}", e)))?;
+
+    // _http_set_cache - Set Cache-Control max-age header
+    linker
+        .func_wrap(
+            "env",
+            "_http_set_cache",
+            |mut caller: Caller<'_, WasmState>, max_age: i32| -> i32 {
+                let cache_value = if max_age > 0 {
+                    format!("public, max-age={}", max_age)
+                } else {
+                    "no-cache, no-store, must-revalidate".to_string()
+                };
+
+                debug!("_http_set_cache: {}", cache_value);
+                caller.data_mut().add_header("Cache-Control".to_string(), cache_value);
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_set_cache: {}", e)))?;
+
+    // _http_no_cache - Disable caching completely
+    linker
+        .func_wrap(
+            "env",
+            "_http_no_cache",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                debug!("_http_no_cache: Disabling cache");
+                caller.data_mut().add_header(
+                    "Cache-Control".to_string(),
+                    "no-cache, no-store, must-revalidate".to_string(),
+                );
+                caller.data_mut().add_header("Pragma".to_string(), "no-cache".to_string());
+                caller.data_mut().add_header("Expires".to_string(), "0".to_string());
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_no_cache: {}", e)))?;
+
+    // _json_encode - Serialize value to JSON string
+    linker
+        .func_wrap(
+            "env",
+            "_json_encode",
+            |mut caller: Caller<'_, WasmState>, value_ptr: i32, value_len: i32| -> i32 {
+                let value = match read_raw_string(&mut caller, value_ptr, value_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, "null"),
+                };
+
+                // Try to parse as JSON first to validate and re-serialize
+                match serde_json::from_str::<serde_json::Value>(&value) {
+                    Ok(json_value) => {
+                        let encoded = serde_json::to_string(&json_value)
+                            .unwrap_or_else(|_| "null".to_string());
+                        debug!("_json_encode: encoded {} bytes", encoded.len());
+                        write_string_to_caller(&mut caller, &encoded)
+                    }
+                    Err(_) => {
+                        // If not valid JSON, treat as a string value and encode it
+                        let json_str = serde_json::Value::String(value);
+                        let encoded = serde_json::to_string(&json_str)
+                            .unwrap_or_else(|_| "\"\"".to_string());
+                        debug!("_json_encode: encoded string as JSON");
+                        write_string_to_caller(&mut caller, &encoded)
+                    }
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_encode: {}", e)))?;
+
+    // _json_decode - Parse JSON string to value
+    linker
+        .func_wrap(
+            "env",
+            "_json_decode",
+            |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32| -> i32 {
+                let json_str = match read_raw_string(&mut caller, json_ptr, json_len) {
+                    Some(s) => s,
+                    None => return write_string_to_caller(&mut caller, "null"),
+                };
+
+                match serde_json::from_str::<serde_json::Value>(&json_str) {
+                    Ok(value) => {
+                        let decoded = serde_json::to_string(&value)
+                            .unwrap_or_else(|_| "null".to_string());
+                        debug!("_json_decode: decoded {} bytes", json_str.len());
+                        write_string_to_caller(&mut caller, &decoded)
+                    }
+                    Err(e) => {
+                        error!("_json_decode: parse error: {}", e);
+                        let error_json = serde_json::json!({
+                            "error": "JSON parse error",
+                            "message": e.to_string()
+                        })
+                        .to_string();
+                        write_string_to_caller(&mut caller, &error_json)
+                    }
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_decode: {}", e)))?;
 
     Ok(())
 }
