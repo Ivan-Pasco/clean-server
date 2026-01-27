@@ -402,7 +402,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // string_compare - Compare two strings
+    // string_compare - Compare two strings for equality
+    // Returns 1 if equal, 0 if not equal
     linker.func_wrap(
         "env",
         "string_compare",
@@ -410,11 +411,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let s1 = read_string_from_caller(&mut caller, str1_ptr).unwrap_or_default();
             let s2 = read_string_from_caller(&mut caller, str2_ptr).unwrap_or_default();
 
-            match s1.cmp(&s2) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            }
+            if s1 == s2 { 1 } else { 0 }
         },
     )?;
 
