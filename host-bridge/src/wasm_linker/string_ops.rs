@@ -408,10 +408,54 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         "env",
         "string_compare",
         |mut caller: Caller<'_, S>, str1_ptr: i32, str2_ptr: i32| -> i32 {
-            let s1 = read_string_from_caller(&mut caller, str1_ptr).unwrap_or_default();
-            let s2 = read_string_from_caller(&mut caller, str2_ptr).unwrap_or_default();
+            error!("=== string_compare CALLED ===");
+            error!("  ptr1={}, ptr2={}", str1_ptr, str2_ptr);
 
-            if s1 == s2 { 1 } else { 0 }
+            // Log raw memory at both pointers
+            if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                let data = memory.data(&caller);
+                error!("  memory_size={}", data.len());
+
+                // Log raw bytes at ptr1
+                if (str1_ptr as usize) + 20 <= data.len() {
+                    let raw = &data[str1_ptr as usize..(str1_ptr as usize + 20).min(data.len())];
+                    error!("  ptr1 raw bytes: {:02x?}", raw);
+                    // Try to interpret as length-prefixed string
+                    if str1_ptr as usize + 4 <= data.len() {
+                        let len_bytes: [u8; 4] = data[str1_ptr as usize..str1_ptr as usize + 4].try_into().unwrap_or([0; 4]);
+                        let len = u32::from_le_bytes(len_bytes);
+                        error!("  ptr1 length_prefix={}", len);
+                    }
+                }
+
+                // Log raw bytes at ptr2
+                if (str2_ptr as usize) + 20 <= data.len() {
+                    let raw = &data[str2_ptr as usize..(str2_ptr as usize + 20).min(data.len())];
+                    error!("  ptr2 raw bytes: {:02x?}", raw);
+                    // Try to interpret as length-prefixed string
+                    if str2_ptr as usize + 4 <= data.len() {
+                        let len_bytes: [u8; 4] = data[str2_ptr as usize..str2_ptr as usize + 4].try_into().unwrap_or([0; 4]);
+                        let len = u32::from_le_bytes(len_bytes);
+                        error!("  ptr2 length_prefix={}", len);
+                    }
+                }
+            }
+
+            let s1 = read_string_from_caller(&mut caller, str1_ptr).unwrap_or_else(|| {
+                error!("  FAILED to read s1 from ptr1!");
+                String::new()
+            });
+            let s2 = read_string_from_caller(&mut caller, str2_ptr).unwrap_or_else(|| {
+                error!("  FAILED to read s2 from ptr2!");
+                String::new()
+            });
+
+            error!("  s1='{}' (len={})", s1, s1.len());
+            error!("  s2='{}' (len={})", s2, s2.len());
+
+            let result = if s1 == s2 { 1 } else { 0 };
+            error!("  RESULT={} ({})", result, if result == 1 { "EQUAL" } else { "NOT EQUAL" });
+            result
         },
     )?;
 
