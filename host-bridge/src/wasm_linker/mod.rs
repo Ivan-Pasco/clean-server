@@ -37,6 +37,7 @@ mod database;
 mod file_io;
 mod http_client;
 mod crypto_funcs;
+mod env_time;
 // NOTE: HTTP Server functions (Layer 3) are NOT in host-bridge.
 // They are server-specific and implemented in clean-server/src/bridge.rs.
 // See platform-architecture/EXECUTION_LAYERS.md for layer definitions.
@@ -91,6 +92,7 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     file_io::register_functions(linker)?;
     http_client::register_functions(linker)?;
     crypto_funcs::register_functions(linker)?;
+    env_time::register_functions(linker)?;
 
     // NOTE: HTTP Server functions (Layer 3) are NOT provided by host-bridge.
     // Server-specific functions like _req_param, _req_body, _http_route, etc.
@@ -113,11 +115,166 @@ pub fn create_linker(engine: &Engine) -> BridgeResult<Linker<WasmState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasmtime::{Module, Store};
 
     #[test]
     fn test_create_linker() {
         let engine = Engine::default();
         let linker = create_linker(&engine);
         assert!(linker.is_ok());
+    }
+
+    // --- Registry TOML types ---
+
+    #[derive(serde::Deserialize)]
+    struct Registry {
+        #[allow(dead_code)]
+        meta: RegistryMeta,
+        functions: Vec<FunctionEntry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RegistryMeta {
+        #[allow(dead_code)]
+        version: String,
+        #[allow(dead_code)]
+        generated_from: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FunctionEntry {
+        name: String,
+        layer: u32,
+        #[allow(dead_code)]
+        category: String,
+        module: String,
+        params: Vec<String>,
+        returns: String,
+        #[serde(default)]
+        aliases: Vec<String>,
+        #[allow(dead_code)]
+        description: String,
+    }
+
+    fn expand_param_type(t: &str) -> Vec<&str> {
+        match t {
+            "string" => vec!["i32", "i32"],
+            "integer" => vec!["i64"],
+            "number" => vec!["f64"],
+            "boolean" => vec!["i32"],
+            "i32" => vec!["i32"],
+            "i64" => vec!["i64"],
+            other => panic!("Unknown param type in registry: '{}'", other),
+        }
+    }
+
+    fn expand_return_type(t: &str) -> Option<&str> {
+        match t {
+            "void" => None,
+            "ptr" => Some("i32"),
+            "i32" => Some("i32"),
+            "i64" => Some("i64"),
+            "boolean" => Some("i32"),
+            "integer" => Some("i64"),
+            "number" => Some("f64"),
+            other => panic!("Unknown return type in registry: '{}'", other),
+        }
+    }
+
+    fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
+        let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
+
+        let wasm_params: Vec<&str> = params.iter()
+            .flat_map(|t| expand_param_type(t))
+            .collect();
+
+        if !wasm_params.is_empty() {
+            import.push_str(" (param");
+            for p in &wasm_params {
+                import.push_str(&format!(" {}", p));
+            }
+            import.push(')');
+        }
+
+        if let Some(ret) = expand_return_type(returns) {
+            import.push_str(&format!(" (result {})", ret));
+        }
+
+        import.push_str("))\n");
+        import
+    }
+
+    /// Spec compliance test: validates that ALL Layer 2 host function signatures
+    /// match the shared function registry (platform-architecture/function-registry.toml).
+    ///
+    /// The registry defines every function with high-level types that expand to
+    /// exact WASM signatures. This test dynamically generates a WAT module from
+    /// the registry and instantiates it against the linker. If any signature in
+    /// the implementation differs from the registry, instantiation fails.
+    ///
+    /// To update: modify function-registry.toml first, then the implementation.
+    /// Never change the registry just to pass tests.
+    #[test]
+    fn test_spec_compliance() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let registry_path = std::path::Path::new(manifest_dir)
+            .join("../../platform-architecture/function-registry.toml");
+        let toml_str = std::fs::read_to_string(&registry_path)
+            .unwrap_or_else(|e| panic!(
+                "Failed to read function-registry.toml at {:?}: {}",
+                registry_path, e
+            ));
+
+        let registry: Registry = toml::from_str(&toml_str)
+            .expect("Failed to parse function-registry.toml");
+
+        // Filter for Layer 2 functions only (host-bridge scope)
+        let layer2_funcs: Vec<&FunctionEntry> = registry.functions.iter()
+            .filter(|f| f.layer == 2)
+            .collect();
+
+        assert!(
+            layer2_funcs.len() >= 80,
+            "Expected at least 80 Layer 2 canonical functions in registry, found {}",
+            layer2_funcs.len()
+        );
+
+        // Generate WAT module with all Layer 2 imports
+        let mut wat = String::from("(module\n");
+        let mut import_count = 0;
+
+        for func in &layer2_funcs {
+            wat.push_str(&generate_wat_import(&func.module, &func.name, &func.params, &func.returns));
+            import_count += 1;
+
+            for alias in &func.aliases {
+                wat.push_str(&generate_wat_import(&func.module, alias, &func.params, &func.returns));
+                import_count += 1;
+            }
+        }
+
+        wat.push_str(")\n");
+
+        // Create linker and validate all signatures
+        let engine = Engine::default();
+        let linker = create_linker(&engine).expect("Failed to create linker");
+        let module = Module::new(&engine, &wat)
+            .unwrap_or_else(|e| panic!(
+                "Failed to parse generated WAT ({} imports): {}\n\nGenerated WAT:\n{}",
+                import_count, e, wat
+            ));
+
+        let mut store = Store::new(&engine, WasmState::default());
+
+        linker.instantiate(&mut store, &module).unwrap_or_else(|e| panic!(
+            "SPEC COMPLIANCE FAILURE ({} Layer 2 imports):\n{}\n\n\
+             Fix the implementation to match function-registry.toml, not the other way around.",
+            import_count, e
+        ));
+
+        eprintln!(
+            "Layer 2 spec compliance PASSED: {} canonical + aliases = {} total imports",
+            layer2_funcs.len(), import_count
+        );
     }
 }

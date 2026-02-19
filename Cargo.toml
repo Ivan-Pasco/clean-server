@@ -1,6 +1,6 @@
 [package]
 name = "clean-server"
-version = "1.7.11"
+version = "1.8.0"
 edition = "2024"
 authors = ["Ivan Pasco"]
 license = "MIT OR Apache-2.0"
@@ -58,6 +58,7 @@ tokio-test = "0.4"
 tempfile = "3.8"
 reqwest = { version = "0.12", features = ["json"] }
 portpicker = "0.1"
+toml = "0.8"
 
 [profile.release]
 opt-level = 3

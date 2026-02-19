@@ -146,7 +146,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
     // _db_execute - Execute an INSERT/UPDATE/DELETE
     // Args: sql_ptr, sql_len, params_ptr, params_len (JSON array of params)
-    // Returns: number of affected rows (or -1 on error)
+    // Returns: number of affected rows as i64 (or -1 on error)
     linker.func_wrap(
         "env",
         "_db_execute",
@@ -155,7 +155,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
          sql_len: i32,
          params_ptr: i32,
          params_len: i32|
-         -> i32 {
+         -> i64 {
             // Read SQL string from WASM memory
             let sql = match read_raw_string(&mut caller, sql_ptr, sql_len) {
                 Some(s) => s,
@@ -211,7 +211,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                             v.get("data")
                                 .and_then(|d| d.get("affected_rows"))
                                 .and_then(|r| r.as_i64())
-                                .unwrap_or(0) as i32
+                                .unwrap_or(0)
                         } else {
                             error!("_db_execute: Database execute failed: {:?}", v.get("err"));
                             -1
@@ -233,7 +233,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // _db_begin - Begin a transaction
-    // Returns: transaction ID as string pointer, or 0 on error
+    // Returns: 1 on success, 0 on error (stores tx_id internally)
     linker.func_wrap(
         "env",
         "_db_begin",
@@ -260,7 +260,9 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                         .and_then(|d| d.get("tx_id"))
                         .and_then(|t| t.as_str())
                     {
-                        write_string_to_caller(&mut caller, tx_id)
+                        debug!("_db_begin: Transaction started: {}", tx_id);
+                        caller.data_mut().set_current_tx_id(Some(tx_id.to_string()));
+                        1
                     } else {
                         0
                     }
@@ -273,21 +275,23 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // _db_commit - Commit a transaction
-    // Args: tx_id_ptr, tx_id_len
-    // Returns: 0 on success, -1 on error
+    // _db_commit - Commit the current transaction
+    // Returns: 1 on success, 0 on error
     linker.func_wrap(
         "env",
         "_db_commit",
-        |mut caller: Caller<'_, S>, tx_id_ptr: i32, tx_id_len: i32| -> i32 {
-            let tx_id = match read_raw_string(&mut caller, tx_id_ptr, tx_id_len) {
-                Some(s) => s,
-                None => return -1,
+        |mut caller: Caller<'_, S>| -> i32 {
+            let tx_id = match caller.data().current_tx_id() {
+                Some(id) => id.to_string(),
+                None => {
+                    error!("_db_commit: No active transaction");
+                    return 0;
+                }
             };
 
             let db_bridge = match caller.data().db_bridge() {
                 Some(db) => db,
-                None => return -1,
+                None => return 0,
             };
 
             let result = tokio::task::block_in_place(|| {
@@ -301,32 +305,38 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             match result {
                 Ok(v) => {
+                    caller.data_mut().set_current_tx_id(None);
                     if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
-                        0
+                        1
                     } else {
-                        -1
+                        0
                     }
                 }
-                Err(_) => -1,
+                Err(_) => {
+                    caller.data_mut().set_current_tx_id(None);
+                    0
+                }
             }
         },
     )?;
 
-    // _db_rollback - Rollback a transaction
-    // Args: tx_id_ptr, tx_id_len
-    // Returns: 0 on success, -1 on error
+    // _db_rollback - Rollback the current transaction
+    // Returns: 1 on success, 0 on error
     linker.func_wrap(
         "env",
         "_db_rollback",
-        |mut caller: Caller<'_, S>, tx_id_ptr: i32, tx_id_len: i32| -> i32 {
-            let tx_id = match read_raw_string(&mut caller, tx_id_ptr, tx_id_len) {
-                Some(s) => s,
-                None => return -1,
+        |mut caller: Caller<'_, S>| -> i32 {
+            let tx_id = match caller.data().current_tx_id() {
+                Some(id) => id.to_string(),
+                None => {
+                    error!("_db_rollback: No active transaction");
+                    return 0;
+                }
             };
 
             let db_bridge = match caller.data().db_bridge() {
                 Some(db) => db,
-                None => return -1,
+                None => return 0,
             };
 
             let result = tokio::task::block_in_place(|| {
@@ -340,13 +350,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             match result {
                 Ok(v) => {
+                    caller.data_mut().set_current_tx_id(None);
                     if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
-                        0
+                        1
                     } else {
-                        -1
+                        0
                     }
                 }
-                Err(_) => -1,
+                Err(_) => {
+                    caller.data_mut().set_current_tx_id(None);
+                    0
+                }
             }
         },
     )?;

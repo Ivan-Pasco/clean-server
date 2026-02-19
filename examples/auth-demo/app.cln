@@ -1,0 +1,134 @@
+// Auth Demo - Demonstrates session-based authentication in Clean Language
+// Shows: login, logout, protected routes, session management
+//
+// Compile: cargo run --bin cln compile examples/auth-demo/app.cln --output examples/auth-demo/app.wasm
+// Run: cargo run --bin clean-server -- examples/auth-demo/app.wasm
+//
+// Test endpoints:
+//   curl http://localhost:3000/health                   # Public - should work
+//   curl http://localhost:3000/protected                # Protected - should fail with 401
+//   curl http://localhost:3000/login/test               # Login as test user
+//   curl http://localhost:3000/protected -b cookies.txt # Protected - should work now
+//   curl http://localhost:3000/logout -b cookies.txt    # Logout
+
+// Build JSON response helper
+functions:
+	string json_ok(string message)
+		return "{\"ok\":true,\"message\":\"" + message + "\"}"
+
+	string json_error(string message)
+		return "{\"ok\":false,\"error\":\"" + message + "\"}"
+
+	// Handler 0: Health check (public)
+	string __route_handler_0()
+		return "{\"ok\":true,\"status\":\"healthy\"}"
+
+	// Handler 1: Login as test user
+	string __route_handler_1()
+		integer user_id = 1
+		string role = "user"
+		string email = "test@example.com"
+
+		// Create session claims
+		string claims = "{\"email\":\"" + email + "\"}"
+
+		// Create session - this sets the session cookie automatically
+		string session_id = _session_create(user_id, role, claims)
+
+		return "{\"ok\":true,\"message\":\"Logged in\",\"sessionId\":\"" + session_id + "\",\"role\":\"" + role + "\"}"
+
+	// Handler 6: Login as admin
+	string __route_handler_6()
+		integer user_id = 2
+		string role = "admin"
+		string email = "admin@example.com"
+
+		// Create session claims
+		string claims = "{\"email\":\"" + email + "\"}"
+
+		// Create session
+		string session_id = _session_create(user_id, role, claims)
+
+		return "{\"ok\":true,\"message\":\"Logged in as admin\",\"sessionId\":\"" + session_id + "\",\"role\":\"admin\"}"
+
+	// Handler 2: Logout
+	string __route_handler_2()
+		// Destroy session
+		integer destroyed = _session_destroy()
+
+		if destroyed == 1
+			return json_ok("Logged out")
+		return json_error("No session to destroy")
+
+	// Handler 3: Protected route (requires authentication)
+	string __route_handler_3()
+		// Get session info (also validates session from cookie)
+		string session = _session_get()
+
+		if session == ""
+			return json_error("Not authenticated")
+
+		// Session is valid - return session info
+		return "{\"ok\":true,\"message\":\"Welcome to protected area\",\"session\":" + session + "}"
+
+	// Handler 4: Admin-only route
+	string __route_handler_4()
+		// Get session info
+		string session = _session_get()
+
+		if session == ""
+			return json_error("Not authenticated")
+
+		// Check for admin role
+		integer is_admin = _auth_require_role("admin")
+		if is_admin == 0
+			return json_error("Admin access required")
+
+		return "{\"ok\":true,\"message\":\"Welcome admin!\",\"session\":" + session + "}"
+
+	// Handler 5: Get current user info
+	string __route_handler_5()
+		// Get session from auth context
+		string session = _auth_get_session()
+
+		if session == "null"
+			return json_error("Not authenticated")
+
+		return "{\"ok\":true,\"user\":" + session + "}"
+
+// Entry point - register routes
+start()
+	printl("Auth Demo starting...")
+
+	// Public routes
+	integer status = 0
+	status = _http_route("GET", "/health", 0)
+	printl("Registered: GET /health")
+
+	// Login routes
+	status = _http_route("GET", "/login", 1)
+	printl("Registered: GET /login (as user)")
+
+	status = _http_route("GET", "/login-admin", 6)
+	printl("Registered: GET /login-admin")
+
+	// Protected routes - using _http_route_protected for server-side auth checking
+	status = _http_route_protected("GET", "/logout", 2, "")
+	printl("Registered: GET /logout (protected)")
+
+	status = _http_route_protected("GET", "/protected", 3, "")
+	printl("Registered: GET /protected (protected)")
+
+	status = _http_route_protected("GET", "/admin", 4, "admin")
+	printl("Registered: GET /admin (admin only)")
+
+	status = _http_route_protected("GET", "/me", 5, "")
+	printl("Registered: GET /me (protected)")
+
+	printl("Auth Demo ready!")
+	printl("")
+	printl("Test with:")
+	printl("  curl http://localhost:3000/health")
+	printl("  curl http://localhost:3000/login -c cookies.txt")
+	printl("  curl http://localhost:3000/protected -b cookies.txt")
+	printl("  curl http://localhost:3000/logout -b cookies.txt")

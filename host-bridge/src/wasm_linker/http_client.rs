@@ -410,55 +410,99 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // http_encode_url
+    // http_encode_url - URL-encode a string
     linker.func_wrap(
         "env",
         "http_encode_url",
-        |_: Caller<'_, S>, url_ptr: i32, _url_len: i32| -> i32 {
-            url_ptr // Return as-is for now
+        |mut caller: Caller<'_, S>, url_ptr: i32, url_len: i32| -> i32 {
+            let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let encoded: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
+            write_string_to_caller(&mut caller, &encoded)
         },
     )?;
 
-    // http_decode_url
+    // http_decode_url - URL-decode a string
     linker.func_wrap(
         "env",
         "http_decode_url",
-        |_: Caller<'_, S>, url_ptr: i32, _url_len: i32| -> i32 {
-            url_ptr // Return as-is for now
+        |mut caller: Caller<'_, S>, url_ptr: i32, url_len: i32| -> i32 {
+            let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let decoded = url::form_urlencoded::parse(url.as_bytes())
+                .map(|(k, v)| if v.is_empty() { k.to_string() } else { format!("{}={}", k, v) })
+                .collect::<Vec<_>>()
+                .join("&");
+            write_string_to_caller(&mut caller, &decoded)
         },
     )?;
 
-    // http_build_query
+    // http_build_query - Build query string from JSON params
     linker.func_wrap(
         "env",
         "http_build_query",
-        |mut caller: Caller<'_, S>, _params_ptr: i32, _params_len: i32| -> i32 {
-            write_string_to_caller(&mut caller, "")
+        |mut caller: Caller<'_, S>, params_ptr: i32, params_len: i32| -> i32 {
+            let params_json = match read_raw_string(&mut caller, params_ptr, params_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+
+            let params: serde_json::Value =
+                serde_json::from_str(&params_json).unwrap_or_default();
+
+            let query = if let Some(obj) = params.as_object() {
+                let pairs: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        format!(
+                            "{}={}",
+                            url::form_urlencoded::byte_serialize(k.as_bytes())
+                                .collect::<String>(),
+                            url::form_urlencoded::byte_serialize(val.as_bytes())
+                                .collect::<String>()
+                        )
+                    })
+                    .collect();
+                pairs.join("&")
+            } else {
+                String::new()
+            };
+
+            write_string_to_caller(&mut caller, &query)
         },
     )?;
 
-    // http_get_with_headers
+    // http_get_with_headers - GET request with custom headers
     linker.func_wrap(
         "env",
         "http_get_with_headers",
         |mut caller: Caller<'_, S>,
          url_ptr: i32,
          url_len: i32,
-         _headers_ptr: i32,
-         _headers_len: i32|
+         headers_ptr: i32,
+         headers_len: i32|
          -> i32 {
-            // For now, just do a regular GET
             let url = match read_raw_string(&mut caller, url_ptr, url_len) {
                 Some(s) => s,
                 None => return write_string_to_caller(&mut caller, ""),
             };
+            let headers_json = read_raw_string(&mut caller, headers_ptr, headers_len)
+                .unwrap_or_else(|| "{}".to_string());
 
             let result = HTTP_BRIDGE.with(|bridge| {
                 let bridge = bridge.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("get", json!({ "url": url })).await
+                        b.call("get", json!({ "url": url, "headers": serde_json::from_str::<serde_json::Value>(&headers_json).unwrap_or_default() })).await
                     })
                 })
             });
@@ -476,7 +520,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // http_post_with_headers
+    // http_post_with_headers - POST request with custom headers
     linker.func_wrap(
         "env",
         "http_post_with_headers",
@@ -485,21 +529,23 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
          url_len: i32,
          body_ptr: i32,
          body_len: i32,
-         _headers_ptr: i32,
-         _headers_len: i32|
+         headers_ptr: i32,
+         headers_len: i32|
          -> i32 {
             let url = match read_raw_string(&mut caller, url_ptr, url_len) {
                 Some(s) => s,
                 None => return write_string_to_caller(&mut caller, ""),
             };
             let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
+            let headers_json = read_raw_string(&mut caller, headers_ptr, headers_len)
+                .unwrap_or_else(|| "{}".to_string());
 
             let result = HTTP_BRIDGE.with(|bridge| {
                 let bridge = bridge.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("post", json!({ "url": url, "body": body })).await
+                        b.call("post", json!({ "url": url, "body": body, "headers": serde_json::from_str::<serde_json::Value>(&headers_json).unwrap_or_default() })).await
                     })
                 })
             });

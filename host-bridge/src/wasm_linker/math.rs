@@ -9,6 +9,7 @@
 
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
+use rand::prelude::*;
 use wasmtime::{Caller, Linker};
 
 /// Register all math functions with the linker
@@ -269,6 +270,161 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         "env",
         "math.exp2",
         |_: Caller<'_, S>, x: f64| -> f64 { x.exp2() },
+    )?;
+
+    // =========================================
+    // ROUNDING FUNCTIONS
+    // =========================================
+
+    // math_floor - Floor (round toward negative infinity)
+    linker.func_wrap(
+        "env",
+        "math_floor",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.floor() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.floor",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.floor() },
+    )?;
+
+    // math_ceil - Ceiling (round toward positive infinity)
+    linker.func_wrap(
+        "env",
+        "math_ceil",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.ceil() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.ceil",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.ceil() },
+    )?;
+
+    // math_round - Round to nearest integer
+    linker.func_wrap(
+        "env",
+        "math_round",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.round() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.round",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.round() },
+    )?;
+
+    // math_trunc - Truncate (round toward zero)
+    linker.func_wrap(
+        "env",
+        "math_trunc",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.trunc() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.trunc",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.trunc() },
+    )?;
+
+    // =========================================
+    // UTILITY FUNCTIONS
+    // =========================================
+
+    // math_abs - Absolute value
+    linker.func_wrap(
+        "env",
+        "math_abs",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.abs() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.abs",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.abs() },
+    )?;
+
+    // math_min - Minimum of two values
+    linker.func_wrap(
+        "env",
+        "math_min",
+        |_: Caller<'_, S>, a: f64, b: f64| -> f64 { a.min(b) },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.min",
+        |_: Caller<'_, S>, a: f64, b: f64| -> f64 { a.min(b) },
+    )?;
+
+    // math_max - Maximum of two values
+    linker.func_wrap(
+        "env",
+        "math_max",
+        |_: Caller<'_, S>, a: f64, b: f64| -> f64 { a.max(b) },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.max",
+        |_: Caller<'_, S>, a: f64, b: f64| -> f64 { a.max(b) },
+    )?;
+
+    // math_sign - Sign of a number (-1.0, 0.0, or 1.0)
+    linker.func_wrap(
+        "env",
+        "math_sign",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.signum() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.sign",
+        |_: Caller<'_, S>, x: f64| -> f64 { x.signum() },
+    )?;
+
+    // =========================================
+    // CONSTANTS AND RANDOM
+    // =========================================
+
+    // math_pi - Return PI constant
+    linker.func_wrap(
+        "env",
+        "math_pi",
+        |_: Caller<'_, S>| -> f64 { std::f64::consts::PI },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.pi",
+        |_: Caller<'_, S>| -> f64 { std::f64::consts::PI },
+    )?;
+
+    // math_e - Return Euler's number
+    linker.func_wrap(
+        "env",
+        "math_e",
+        |_: Caller<'_, S>| -> f64 { std::f64::consts::E },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.e",
+        |_: Caller<'_, S>| -> f64 { std::f64::consts::E },
+    )?;
+
+    // math_random - Return random number between 0.0 and 1.0
+    linker.func_wrap(
+        "env",
+        "math_random",
+        |_: Caller<'_, S>| -> f64 { rand::thread_rng().gen::<f64>() },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "math.random",
+        |_: Caller<'_, S>| -> f64 { rand::thread_rng().gen::<f64>() },
     )?;
 
     Ok(())

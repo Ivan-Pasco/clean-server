@@ -55,6 +55,16 @@ pub trait WasmStateCore: Send + 'static {
         None
     }
 
+    /// Get the current transaction ID (for _db_commit/_db_rollback)
+    fn current_tx_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Set the current transaction ID (called by _db_begin)
+    fn set_current_tx_id(&mut self, _tx_id: Option<String>) {
+        // Default implementation does nothing
+    }
+
     // =========================================
     // HTTP SERVER METHODS (optional, for server runtimes)
     // =========================================
@@ -249,6 +259,8 @@ pub struct WasmState {
     pub db_bridge: SharedDbBridge,
     /// Router reference (set by server)
     pub router: Option<Arc<dyn RouterInterface + Send + Sync>>,
+    /// Current transaction ID (for implicit commit/rollback)
+    pub current_tx_id: Option<String>,
 }
 
 /// Router interface for HTTP server integration
@@ -277,6 +289,7 @@ impl WasmState {
             last_error: None,
             db_bridge: Arc::new(TokioRwLock::new(DbBridge::new())),
             router: None,
+            current_tx_id: None,
         }
     }
 
@@ -291,6 +304,7 @@ impl WasmState {
             last_error: None,
             db_bridge,
             router: None,
+            current_tx_id: None,
         }
     }
 
@@ -371,6 +385,14 @@ impl WasmStateCore for WasmState {
 
     fn http_response_mut(&mut self) -> Option<&mut HttpResponseBuilder> {
         Some(&mut self.http_response)
+    }
+
+    fn current_tx_id(&self) -> Option<&str> {
+        self.current_tx_id.as_deref()
+    }
+
+    fn set_current_tx_id(&mut self, tx_id: Option<String>) {
+        self.current_tx_id = tx_id;
     }
 }
 

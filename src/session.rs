@@ -95,8 +95,12 @@ impl Default for SessionConfig {
 
 /// In-memory session store
 pub struct SessionStore {
-    /// Sessions indexed by session ID
+    /// Sessions indexed by session ID (typed sessions for auth flow)
     sessions: HashMap<String, SessionData>,
+    /// Raw key-value session storage (for plugin API: _session_store/_session_get)
+    raw_data: HashMap<String, (String, Instant)>,
+    /// CSRF tokens indexed by session ID
+    csrf_tokens: HashMap<String, String>,
     /// Configuration
     config: SessionConfig,
 }
@@ -105,6 +109,8 @@ impl SessionStore {
     pub fn new(config: SessionConfig) -> Self {
         Self {
             sessions: HashMap::new(),
+            raw_data: HashMap::new(),
+            csrf_tokens: HashMap::new(),
             config,
         }
     }
@@ -176,14 +182,98 @@ impl SessionStore {
         )
     }
 
+    // =========================================
+    // RAW KEY-VALUE SESSION STORAGE
+    // =========================================
+
+    /// Store raw data by session ID (for plugin API)
+    pub fn store_raw(&mut self, session_id: &str, data: &str) -> bool {
+        debug!("Storing raw session data for {}", session_id);
+        self.raw_data
+            .insert(session_id.to_string(), (data.to_string(), Instant::now()));
+        true
+    }
+
+    /// Get raw session data by ID (with expiration check)
+    pub fn get_raw(&mut self, session_id: &str) -> Option<String> {
+        let timeout = Duration::from_secs(self.config.timeout_seconds);
+
+        if let Some((data, last_accessed)) = self.raw_data.get(session_id) {
+            if last_accessed.elapsed() > timeout {
+                debug!("Raw session {} expired, removing", session_id);
+                self.raw_data.remove(session_id);
+                return None;
+            }
+            let result = data.clone();
+            // Touch - update timestamp
+            if let Some(entry) = self.raw_data.get_mut(session_id) {
+                entry.1 = Instant::now();
+            }
+            return Some(result);
+        }
+
+        // Also check typed sessions for backward compatibility
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            if session.is_expired(timeout) {
+                self.sessions.remove(session_id);
+                return None;
+            }
+            session.touch();
+            let json = serde_json::json!({
+                "userId": session.user_id,
+                "role": session.role,
+                "sessionId": session.session_id,
+                "claims": session.claims
+            })
+            .to_string();
+            return Some(json);
+        }
+
+        None
+    }
+
+    /// Delete raw session data by ID
+    pub fn delete_raw(&mut self, session_id: &str) -> bool {
+        let raw_removed = self.raw_data.remove(session_id).is_some();
+        let typed_removed = self.sessions.remove(session_id).is_some();
+        // Also clean up CSRF token for this session
+        self.csrf_tokens.remove(session_id);
+        raw_removed || typed_removed
+    }
+
+    /// Check if a session exists (raw or typed)
+    pub fn exists_raw(&self, session_id: &str) -> bool {
+        self.raw_data.contains_key(session_id) || self.sessions.contains_key(session_id)
+    }
+
+    // =========================================
+    // CSRF TOKEN MANAGEMENT
+    // =========================================
+
+    /// Set CSRF token for a session
+    pub fn set_csrf(&mut self, session_id: &str, token: &str) {
+        debug!("Setting CSRF token for session {}", session_id);
+        self.csrf_tokens
+            .insert(session_id.to_string(), token.to_string());
+    }
+
+    /// Get CSRF token for a session
+    pub fn get_csrf(&self, session_id: &str) -> Option<String> {
+        self.csrf_tokens.get(session_id).cloned()
+    }
+
     /// Cleanup expired sessions (call periodically)
     pub fn cleanup_expired(&mut self) -> usize {
         let timeout = Duration::from_secs(self.config.timeout_seconds);
-        let before = self.sessions.len();
+        let before = self.sessions.len() + self.raw_data.len();
 
-        self.sessions.retain(|_, session| !session.is_expired(timeout));
+        self.sessions
+            .retain(|_, session| !session.is_expired(timeout));
+        self.raw_data
+            .retain(|_, (_, last_accessed)| last_accessed.elapsed() <= timeout);
 
-        let removed = before - self.sessions.len();
+        let after = self.sessions.len() + self.raw_data.len();
+        let removed = before - after;
         if removed > 0 {
             info!("Cleaned up {} expired sessions", removed);
         }

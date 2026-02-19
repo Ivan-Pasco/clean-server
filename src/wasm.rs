@@ -7,14 +7,57 @@ use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::SharedRouter;
 use crate::session::{SessionConfig, SharedSessionStore, create_session_store};
 use host_bridge::{DbBridge, WasmMemory, WasmStateCore};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, info, warn};
 use wasmtime::{Engine, Instance, Module, Store};
 
 /// Shared database bridge type
 pub type SharedDbBridge = Arc<TokioRwLock<DbBridge>>;
+
+/// Roles and permissions store
+pub struct RolesStore {
+    /// Map of role name -> list of permissions
+    pub roles: HashMap<String, Vec<String>>,
+}
+
+impl RolesStore {
+    pub fn new() -> Self {
+        Self {
+            roles: HashMap::new(),
+        }
+    }
+
+    /// Register roles from JSON config
+    /// Expects: {"admin": ["*"], "user": ["read", "write"], "guest": ["read"]}
+    pub fn register(&mut self, config: &str) -> bool {
+        match serde_json::from_str::<HashMap<String, Vec<String>>>(config) {
+            Ok(parsed) => {
+                self.roles = parsed;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Check if a role has a specific permission
+    pub fn has_permission(&self, role: &str, permission: &str) -> bool {
+        self.roles
+            .get(role)
+            .map(|perms| perms.contains(&"*".to_string()) || perms.contains(&permission.to_string()))
+            .unwrap_or(false)
+    }
+
+    /// Get all permissions for a role
+    pub fn get_permissions(&self, role: &str) -> Vec<String> {
+        self.roles.get(role).cloned().unwrap_or_default()
+    }
+}
+
+/// Shared roles store type
+pub type SharedRolesStore = Arc<RwLock<RolesStore>>;
 
 /// State held by each WASM store instance
 pub struct WasmState {
@@ -44,6 +87,10 @@ pub struct WasmState {
     pub pending_status: Option<u16>,
     /// Pending response body (for _http_respond)
     pub pending_body: Option<String>,
+    /// Current transaction ID (for implicit commit/rollback)
+    pub current_tx_id: Option<String>,
+    /// Roles and permissions store
+    pub roles_store: SharedRolesStore,
 }
 
 /// Request context passed to handlers
@@ -96,6 +143,8 @@ impl WasmState {
             pending_redirect: None,
             pending_status: None,
             pending_body: None,
+            current_tx_id: None,
+            roles_store: Arc::new(RwLock::new(RolesStore::new())),
         }
     }
 
@@ -114,6 +163,8 @@ impl WasmState {
             pending_redirect: None,
             pending_status: None,
             pending_body: None,
+            current_tx_id: None,
+            roles_store: Arc::new(RwLock::new(RolesStore::new())),
         }
     }
 
@@ -136,6 +187,8 @@ impl WasmState {
             pending_redirect: None,
             pending_status: None,
             pending_body: None,
+            current_tx_id: None,
+            roles_store: Arc::new(RwLock::new(RolesStore::new())),
         }
     }
 
@@ -228,6 +281,14 @@ impl WasmStateCore for WasmState {
 
     fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    fn current_tx_id(&self) -> Option<&str> {
+        self.current_tx_id.as_deref()
+    }
+
+    fn set_current_tx_id(&mut self, tx_id: Option<String>) {
+        self.current_tx_id = tx_id;
     }
 }
 
