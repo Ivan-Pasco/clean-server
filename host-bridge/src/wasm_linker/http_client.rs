@@ -47,7 +47,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("get", json!({ "url": url })).await
+                        b.call("request", json!({ "method": "GET", "url": url, "headers": {}, "timeout": 30000 })).await
                     })
                 })
             });
@@ -95,7 +95,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("post", json!({ "url": url, "body": body })).await
+                        b.call("request", json!({ "method": "POST", "url": url, "body": body, "headers": {}, "timeout": 30000 })).await
                     })
                 })
             });
@@ -143,7 +143,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("put", json!({ "url": url, "body": body })).await
+                        b.call("request", json!({ "method": "PUT", "url": url, "body": body, "headers": {}, "timeout": 30000 })).await
                     })
                 })
             });
@@ -188,7 +188,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("patch", json!({ "url": url, "body": body })).await
+                        b.call("request", json!({ "method": "PATCH", "url": url, "body": body, "headers": {}, "timeout": 30000 })).await
                     })
                 })
             });
@@ -226,7 +226,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("delete", json!({ "url": url })).await
+                        b.call("request", json!({ "method": "DELETE", "url": url, "headers": {}, "timeout": 30000 })).await
                     })
                 })
             });
@@ -264,7 +264,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("head", json!({ "url": url })).await
+                        b.call("request", json!({ "method": "HEAD", "url": url, "headers": {}, "timeout": 30000 })).await
                     })
                 })
             });
@@ -330,10 +330,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("post", json!({
+                        b.call("request", json!({
+                            "method": "POST",
                             "url": url,
                             "body": json_body,
-                            "headers": { "Content-Type": "application/json" }
+                            "headers": { "Content-Type": "application/json" },
+                            "timeout": 30000
                         })).await
                     })
                 })
@@ -502,7 +504,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("get", json!({ "url": url, "headers": serde_json::from_str::<serde_json::Value>(&headers_json).unwrap_or_default() })).await
+                        b.call("request", json!({ "method": "GET", "url": url, "headers": serde_json::from_str::<serde_json::Value>(&headers_json).unwrap_or_default(), "timeout": 30000 })).await
                     })
                 })
             });
@@ -545,7 +547,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("post", json!({ "url": url, "body": body, "headers": serde_json::from_str::<serde_json::Value>(&headers_json).unwrap_or_default() })).await
+                        b.call("request", json!({ "method": "POST", "url": url, "body": body, "headers": serde_json::from_str::<serde_json::Value>(&headers_json).unwrap_or_default(), "timeout": 30000 })).await
                     })
                 })
             });
@@ -584,10 +586,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("put", json!({
+                        b.call("request", json!({
+                            "method": "PUT",
                             "url": url,
                             "body": json_body,
-                            "headers": { "Content-Type": "application/json" }
+                            "headers": { "Content-Type": "application/json" },
+                            "timeout": 30000
                         })).await
                     })
                 })
@@ -627,10 +631,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("patch", json!({
+                        b.call("request", json!({
+                            "method": "PATCH",
                             "url": url,
                             "body": json_body,
-                            "headers": { "Content-Type": "application/json" }
+                            "headers": { "Content-Type": "application/json" },
+                            "timeout": 30000
                         })).await
                     })
                 })
@@ -670,10 +676,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("post", json!({
+                        b.call("request", json!({
+                            "method": "POST",
                             "url": url,
                             "body": form_body,
-                            "headers": { "Content-Type": "application/x-www-form-urlencoded" }
+                            "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+                            "timeout": 30000
                         })).await
                     })
                 })
