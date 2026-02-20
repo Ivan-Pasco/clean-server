@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::RwLock as TokioRwLock;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
@@ -141,7 +142,7 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     // Load WASM module with database bridge
     let wasm = crate::wasm::create_shared_instance_with_db(&wasm_path, router.clone(), db_bridge)?;
 
-    // Initialize WASM module (registers routes)
+    // Initialize WASM module (registers routes and static dirs)
     wasm.initialize()?;
 
     // Check if any routes were registered
@@ -158,11 +159,17 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         }
     }
 
+    // Collect static dirs registered during initialization
+    let static_dirs = wasm.static_dirs().read().unwrap().clone();
+    for (prefix, dir) in &static_dirs {
+        info!("Serving static files: {} -> {}", prefix, dir);
+    }
+
     // Create app state
     let state = AppState::new(wasm, router);
 
     // Build Axum router
-    let app = build_router(state, &config);
+    let app = build_router(state, &config, static_dirs);
 
     // Start server
     let addr = config.socket_addr();
@@ -182,11 +189,19 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
 }
 
 /// Build the Axum router with middleware
-fn build_router(state: AppState, config: &ServerConfig) -> Router {
+fn build_router(state: AppState, config: &ServerConfig, static_dirs: Vec<(String, String)>) -> Router {
     let mut app = Router::new()
         // Catch-all handler that routes to WASM
         .fallback(handle_request)
         .with_state(state);
+
+    // Mount static file directories (take priority over fallback)
+    for (prefix, dir) in &static_dirs {
+        app = app.nest_service(
+            prefix.as_str(),
+            ServeDir::new(dir).append_index_html_on_directories(true),
+        );
+    }
 
     // Add CORS if enabled
     if config.cors_enabled {

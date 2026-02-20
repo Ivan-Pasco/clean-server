@@ -13,7 +13,7 @@
 //! - Crypto (password hashing)
 //!
 //! ## Server-Specific Functions (defined here)
-//! - HTTP server (_http_listen, _http_route, _http_route_protected)
+//! - HTTP server (_http_listen, _http_route, _http_route_protected, _http_serve_static)
 //! - Request context (_req_param, _req_query, _req_body, _req_header, _req_method, _req_path, _req_cookie)
 //! - Response manipulation (_res_set_header, _res_redirect)
 //! - Session management (_session_store, _session_get, _session_delete, _session_exists, _session_set_csrf, _session_get_csrf, _http_set_cookie)
@@ -52,7 +52,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     Ok(linker)
 }
 
-/// Register HTTP server functions (_http_listen, _http_route, _http_route_protected)
+/// Register HTTP server functions (_http_listen, _http_route, _http_route_protected, _http_serve_static)
 fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _http_listen - Start listening on a port
     linker
@@ -170,6 +170,53 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         )
         .map_err(|e| {
             RuntimeError::wasm(format!("Failed to define _http_route_protected: {}", e))
+        })?;
+
+    // _http_serve_static - Mount filesystem directory as static file server
+    linker
+        .func_wrap(
+            "env",
+            "_http_serve_static",
+            |mut caller: Caller<'_, WasmState>,
+             prefix_ptr: i32,
+             prefix_len: i32,
+             dir_ptr: i32,
+             dir_len: i32|
+             -> i32 {
+                let prefix =
+                    match read_raw_string(&mut caller, prefix_ptr, prefix_len) {
+                        Some(s) => s,
+                        None => {
+                            error!("_http_serve_static: Failed to read prefix");
+                            return 0;
+                        }
+                    };
+                let dir =
+                    match read_raw_string(&mut caller, dir_ptr, dir_len) {
+                        Some(s) => s,
+                        None => {
+                            error!("_http_serve_static: Failed to read dir");
+                            return 0;
+                        }
+                    };
+
+                debug!("_http_serve_static: prefix={}, dir={}", prefix, dir);
+
+                let static_dirs = caller.data().static_dirs.clone();
+                match static_dirs.write() {
+                    Ok(mut dirs) => {
+                        dirs.push((prefix, dir));
+                        1 // success
+                    }
+                    Err(e) => {
+                        error!("_http_serve_static: Failed to acquire lock: {}", e);
+                        0
+                    }
+                }
+            },
+        )
+        .map_err(|e| {
+            RuntimeError::wasm(format!("Failed to define _http_serve_static: {}", e))
         })?;
 
     Ok(())

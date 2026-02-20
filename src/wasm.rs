@@ -59,6 +59,14 @@ impl RolesStore {
 /// Shared roles store type
 pub type SharedRolesStore = Arc<RwLock<RolesStore>>;
 
+/// Shared static file directories: list of (url_prefix, filesystem_dir) pairs
+pub type SharedStaticDirs = Arc<RwLock<Vec<(String, String)>>>;
+
+/// Create a new empty shared static dirs list
+pub fn create_shared_static_dirs() -> SharedStaticDirs {
+    Arc::new(RwLock::new(Vec::new()))
+}
+
 /// State held by each WASM store instance
 pub struct WasmState {
     /// Memory allocator
@@ -91,6 +99,8 @@ pub struct WasmState {
     pub current_tx_id: Option<String>,
     /// Roles and permissions store
     pub roles_store: SharedRolesStore,
+    /// Static file directories registered via _http_serve_static
+    pub static_dirs: SharedStaticDirs,
 }
 
 /// Request context passed to handlers
@@ -145,6 +155,7 @@ impl WasmState {
             pending_body: None,
             current_tx_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
+            static_dirs: create_shared_static_dirs(),
         }
     }
 
@@ -165,6 +176,7 @@ impl WasmState {
             pending_body: None,
             current_tx_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
+            static_dirs: create_shared_static_dirs(),
         }
     }
 
@@ -172,6 +184,7 @@ impl WasmState {
         router: SharedRouter,
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
+        static_dirs: SharedStaticDirs,
     ) -> Self {
         Self {
             memory: WasmMemory::new(),
@@ -189,6 +202,7 @@ impl WasmState {
             pending_body: None,
             current_tx_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
+            static_dirs,
         }
     }
 
@@ -306,6 +320,8 @@ pub struct WasmInstance {
     db_bridge: SharedDbBridge,
     /// Session store (shared across all instances)
     session_store: SharedSessionStore,
+    /// Static file directories registered during initialization
+    static_dirs: SharedStaticDirs,
 }
 
 impl WasmInstance {
@@ -380,6 +396,7 @@ impl WasmInstance {
             linker,
             db_bridge,
             session_store,
+            static_dirs: create_shared_static_dirs(),
         })
     }
 
@@ -389,6 +406,7 @@ impl WasmInstance {
             self.router.clone(),
             self.db_bridge.clone(),
             self.session_store.clone(),
+            self.static_dirs.clone(),
         );
         let mut store = Store::new(&self.engine, state);
 
@@ -408,6 +426,11 @@ impl WasmInstance {
     /// Get the database bridge for configuration
     pub fn db_bridge(&self) -> &SharedDbBridge {
         &self.db_bridge
+    }
+
+    /// Get the registered static file directories
+    pub fn static_dirs(&self) -> &SharedStaticDirs {
+        &self.static_dirs
     }
 
     /// Initialize the module (calls main/start function to register routes)
