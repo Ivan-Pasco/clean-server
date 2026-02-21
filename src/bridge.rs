@@ -1565,7 +1565,13 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
 
                 let mut current = &parsed;
                 for part in path.split('.') {
-                    match current.get(part) {
+                    // Support both numeric array indices (e.g. "rows.0.slug") and object keys
+                    let next = if let Ok(idx) = part.parse::<usize>() {
+                        current.get(idx)
+                    } else {
+                        current.get(part)
+                    };
+                    match next {
                         Some(v) => current = v,
                         None => return write_string_to_caller(&mut caller, ""),
                     }
@@ -1596,6 +1602,57 @@ mod tests {
         // This will fail because WasmState requires a router, but the linker creation should work
         let result = create_linker(&engine);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_json_get_path_logic() {
+        // Tests the path traversal logic used by _json_get, including numeric array indices
+        fn json_get_by_path<'a>(
+            parsed: &'a serde_json::Value,
+            path: &str,
+        ) -> Option<&'a serde_json::Value> {
+            let mut current = parsed;
+            for part in path.split('.') {
+                let next = if let Ok(idx) = part.parse::<usize>() {
+                    current.get(idx)
+                } else {
+                    current.get(part)
+                };
+                current = next?;
+            }
+            Some(current)
+        }
+
+        let parsed = serde_json::json!({
+            "ok": true,
+            "data": {
+                "count": 4,
+                "rows": [
+                    {"slug": "post-1", "read_time": 5},
+                    {"slug": "post-2", "read_time": 8}
+                ]
+            }
+        });
+
+        // Object access
+        assert_eq!(json_get_by_path(&parsed, "ok"), Some(&serde_json::json!(true)));
+        assert_eq!(json_get_by_path(&parsed, "data.count"), Some(&serde_json::json!(4)));
+
+        // Array indexing via numeric path segments
+        let slug0 = json_get_by_path(&parsed, "data.rows.0.slug").unwrap();
+        assert_eq!(slug0, &serde_json::json!("post-1"));
+
+        let slug1 = json_get_by_path(&parsed, "data.rows.1.slug").unwrap();
+        assert_eq!(slug1, &serde_json::json!("post-2"));
+
+        let rt0 = json_get_by_path(&parsed, "data.rows.0.read_time").unwrap();
+        assert_eq!(rt0, &serde_json::json!(5));
+
+        // Out-of-bounds returns None
+        assert!(json_get_by_path(&parsed, "data.rows.5.slug").is_none());
+
+        // Missing key returns None
+        assert!(json_get_by_path(&parsed, "data.missing").is_none());
     }
 
     // --- Registry TOML types ---

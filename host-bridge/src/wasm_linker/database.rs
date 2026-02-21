@@ -53,11 +53,6 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             debug!("_db_query: SQL='{}' (len={}), params={}", sql, sql.len(), params_json);
 
-            // Debug: Check if SQL contains WHERE clause
-            if !sql.to_uppercase().contains("WHERE") {
-                error!("_db_query: SQL appears to be missing WHERE clause! SQL='{}' (len={})", sql, sql.len());
-            }
-
             // Parse params
             let params: Vec<serde_json::Value> =
                 serde_json::from_str(&params_json).unwrap_or_default();
@@ -110,33 +105,9 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
-            // Validate the JSON string is valid UTF-8 before writing
-            debug!("_db_query: Result string is {} bytes, UTF-8 valid: {}",
-                   result_str.len(), result_str.is_ascii() || std::str::from_utf8(result_str.as_bytes()).is_ok());
+            debug!("_db_query: Result string is {} bytes", result_str.len());
 
-            // Call write_string_to_caller which uses WASM malloc
-            // WASM malloc reads/writes Global[0] (heap_ptr), NOT memory[0]
-            let ptr = write_string_to_caller(&mut caller, &result_str);
-            debug!("_db_query: write_string_to_caller returned ptr={}, str_len={}", ptr, result_str.len());
-
-            // Verify what was written by reading it back
-            if ptr > 0 {
-                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    let data = memory.data(&caller);
-                    let ptr_usize = ptr as usize;
-                    if ptr_usize + 4 + result_str.len() <= data.len() {
-                        let written_len_bytes: [u8; 4] = data[ptr_usize..ptr_usize + 4].try_into().unwrap_or([0; 4]);
-                        let written_len = u32::from_le_bytes(written_len_bytes) as usize;
-                        debug!("_db_query: Verification - written length prefix: {}, expected: {}",
-                               written_len, result_str.len());
-                        if written_len != result_str.len() {
-                            error!("_db_query: LENGTH MISMATCH! Written: {}, Expected: {}", written_len, result_str.len());
-                        }
-                    }
-                }
-            }
-
-            ptr
+            write_string_to_caller(&mut caller, &result_str)
         },
     )?;
 
