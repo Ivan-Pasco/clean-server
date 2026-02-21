@@ -120,69 +120,62 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // input - Read user input (returns length-prefixed string pointer)
-    // Signature: (prompt_ptr: i32, prompt_len: i32) -> i32
-    // In server context, returns empty string
+    // Signature: (prompt_ptr: i32) -> i32
+    // Prompt is a length-prefixed pointer; in server context, returns empty string
     linker.func_wrap(
         "env",
         "input",
-        |mut caller: Caller<'_, S>, _prompt_ptr: i32, _prompt_len: i32| -> i32 {
-            // In server context, return empty string
-            // In CLI context, this would read from stdin
+        |mut caller: Caller<'_, S>, _prompt_ptr: i32| -> i32 {
             write_string_to_caller(&mut caller, "")
         },
     )?;
 
     // console_input - Alias for input
-    // Signature: (prompt_ptr: i32, prompt_len: i32) -> i32
+    // Signature: (prompt_ptr: i32) -> i32
     linker.func_wrap(
         "env",
         "console_input",
-        |mut caller: Caller<'_, S>, _prompt_ptr: i32, _prompt_len: i32| -> i32 {
+        |mut caller: Caller<'_, S>, _prompt_ptr: i32| -> i32 {
             write_string_to_caller(&mut caller, "")
         },
     )?;
 
     // input_integer - Read integer from user
-    // Signature: (prompt_ptr: i32, prompt_len: i32) -> i64
+    // Signature: (prompt_ptr: i32) -> i32
     linker.func_wrap(
         "env",
         "input_integer",
-        |_: Caller<'_, S>, _prompt_ptr: i32, _prompt_len: i32| -> i64 {
-            // In server context, return 0
+        |_: Caller<'_, S>, _prompt_ptr: i32| -> i32 {
             0
         },
     )?;
 
     // input_float - Read float from user
-    // Signature: (prompt_ptr: i32, prompt_len: i32) -> f64
+    // Signature: (prompt_ptr: i32) -> f64
     linker.func_wrap(
         "env",
         "input_float",
-        |_: Caller<'_, S>, _prompt_ptr: i32, _prompt_len: i32| -> f64 {
-            // In server context, return 0.0
+        |_: Caller<'_, S>, _prompt_ptr: i32| -> f64 {
             0.0
         },
     )?;
 
     // input_yesno - Read yes/no from user
-    // Signature: (prompt_ptr: i32, prompt_len: i32) -> i32
+    // Signature: (prompt_ptr: i32) -> i32
     linker.func_wrap(
         "env",
         "input_yesno",
-        |_: Caller<'_, S>, _prompt_ptr: i32, _prompt_len: i32| -> i32 {
-            // In server context, return false (0)
+        |_: Caller<'_, S>, _prompt_ptr: i32| -> i32 {
             0
         },
     )?;
 
     // input_range - Read integer in range from user
-    // Signature: (prompt_ptr: i32, prompt_len: i32, min: i32, max: i32) -> i32
+    // Signature: (prompt_ptr: i32, min: i32, max: i32, step: i32) -> i32
     linker.func_wrap(
         "env",
         "input_range",
-        |_: Caller<'_, S>, _prompt_ptr: i32, _prompt_len: i32, min: i32, max: i32| -> i32 {
-            // In server context, return min
-            let _ = max;
+        |_: Caller<'_, S>, _prompt_ptr: i32, min: i32, _max: i32, _step: i32| -> i32 {
             min
         },
     )?;
