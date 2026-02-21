@@ -47,8 +47,7 @@ pub use state::{WasmState, WasmStateCore, WasmMemory, RequestContext, AuthContex
 pub use helpers::{
     read_string_from_caller, write_string_to_caller,
     read_raw_string, write_bytes_to_caller,
-    read_length_prefixed_bytes, allocate_at_memory_end,
-    allocate_in_fresh_memory, read_raw_bytes, STRING_LENGTH_PREFIX_SIZE
+    read_length_prefixed_bytes, read_raw_bytes, STRING_LENGTH_PREFIX_SIZE
 };
 
 use crate::error::BridgeResult;

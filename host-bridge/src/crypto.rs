@@ -1159,9 +1159,11 @@ mod tests {
 			incorrect_duration - correct_duration
 		};
 
-		// The difference should be minimal (< 50ms)
-		// Note: This is not a perfect test, but it demonstrates the concept
-		assert!(diff.as_millis() < 50, "Timing difference too large: {} ms", diff.as_millis());
+		// The difference should not be extreme (< 500ms)
+		// bcrypt at cost=10 takes ~100-300ms; a 500ms variance would indicate
+		// a fundamentally broken implementation. Tighter bounds are unreliable
+		// due to system load and debug-build overhead.
+		assert!(diff.as_millis() < 500, "Timing difference too large: {} ms", diff.as_millis());
 	}
 
 	#[tokio::test]

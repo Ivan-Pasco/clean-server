@@ -30,8 +30,7 @@ pub use wasm_linker::{
     // Helper functions
     read_string_from_caller, write_string_to_caller,
     read_raw_string, write_bytes_to_caller,
-    read_length_prefixed_bytes, allocate_at_memory_end,
-    allocate_in_fresh_memory, STRING_LENGTH_PREFIX_SIZE,
+    read_length_prefixed_bytes, STRING_LENGTH_PREFIX_SIZE,
 };
 
 /// Standard envelope for all bridge responses

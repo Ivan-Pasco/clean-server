@@ -996,6 +996,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_compression() {
 		let mut bridge = HttpBridge::new();
 

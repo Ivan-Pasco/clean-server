@@ -156,7 +156,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                         .unwrap_or("");
                     write_string_to_caller(&mut caller, resp_body)
                 }
-                Err(_) => write_string_to_caller(&mut caller, ""),
+                Err(e) => {
+                    error!("http_put: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
             }
         },
     )?;
@@ -201,7 +204,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                         .unwrap_or("");
                     write_string_to_caller(&mut caller, resp_body)
                 }
-                Err(_) => write_string_to_caller(&mut caller, ""),
+                Err(e) => {
+                    error!("http_patch: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
             }
         },
     )?;
@@ -239,7 +245,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                         .unwrap_or("");
                     write_string_to_caller(&mut caller, resp_body)
                 }
-                Err(_) => write_string_to_caller(&mut caller, ""),
+                Err(e) => {
+                    error!("http_delete: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
             }
         },
     )?;
@@ -298,8 +307,29 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             debug!("http_options: url={}", url);
 
-            // For now, return empty - OPTIONS is rarely used
-            write_string_to_caller(&mut caller, "")
+            let result = HTTP_BRIDGE.with(|bridge| {
+                let bridge = bridge.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut b = bridge.write().await;
+                        b.call("request", json!({ "method": "OPTIONS", "url": url, "headers": {}, "timeout": 30000 })).await
+                    })
+                })
+            });
+
+            match result {
+                Ok(v) => {
+                    let headers = v.get("data")
+                        .and_then(|d| d.get("headers"))
+                        .map(|h| h.to_string())
+                        .unwrap_or_else(|| "{}".to_string());
+                    write_string_to_caller(&mut caller, &headers)
+                }
+                Err(e) => {
+                    error!("http_options: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "{}")
+                }
+            }
         },
     )?;
 
@@ -349,7 +379,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                         .unwrap_or("");
                     write_string_to_caller(&mut caller, resp_body)
                 }
-                Err(_) => write_string_to_caller(&mut caller, ""),
+                Err(e) => {
+                    error!("http_post_json: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
             }
         },
     )?;
