@@ -38,6 +38,7 @@ mod file_io;
 mod http_client;
 mod crypto_funcs;
 mod env_time;
+mod list_funcs;
 // NOTE: HTTP Server functions (Layer 3) are NOT in host-bridge.
 // They are server-specific and implemented in clean-server/src/bridge.rs.
 // See platform-architecture/EXECUTION_LAYERS.md for layer definitions.
@@ -92,6 +93,7 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     http_client::register_functions(linker)?;
     crypto_funcs::register_functions(linker)?;
     env_time::register_functions(linker)?;
+    list_funcs::register_functions(linker)?;
 
     // NOTE: HTTP Server functions (Layer 3) are NOT provided by host-bridge.
     // Server-specific functions like _req_param, _req_body, _http_route, etc.
