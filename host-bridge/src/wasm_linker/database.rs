@@ -117,7 +117,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
     // _db_execute - Execute an INSERT/UPDATE/DELETE
     // Args: sql_ptr, sql_len, params_ptr, params_len (JSON array of params)
-    // Returns: number of affected rows as i64 (or -1 on error)
+    // Returns: number of affected rows as i32 (or -1 on error)
     linker.func_wrap(
         "env",
         "_db_execute",
@@ -126,7 +126,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
          sql_len: i32,
          params_ptr: i32,
          params_len: i32|
-         -> i64 {
+         -> i32 {
             // Read SQL string from WASM memory
             let sql = match read_raw_string(&mut caller, sql_ptr, sql_len) {
                 Some(s) => s,
@@ -182,7 +182,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                             v.get("data")
                                 .and_then(|d| d.get("affected_rows"))
                                 .and_then(|r| r.as_i64())
-                                .unwrap_or(0)
+                                .unwrap_or(0) as i32
                         } else {
                             error!("_db_execute: Database execute failed: {:?}", v.get("err"));
                             -1

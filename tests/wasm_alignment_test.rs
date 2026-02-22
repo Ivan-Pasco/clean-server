@@ -487,7 +487,7 @@ const FULL_CONTRACT_WAT: &str = r#"
   ;; Layer 2 — Database (module "env")
   ;; -----------------------------------------------------------------------
   (import "env" "_db_query"    (func (param i32 i32 i32 i32) (result i32)))
-  (import "env" "_db_execute"  (func (param i32 i32 i32 i32) (result i64)))
+  (import "env" "_db_execute"  (func (param i32 i32 i32 i32) (result i32)))
   (import "env" "_db_begin"    (func (result i32)))
   (import "env" "_db_commit"   (func (result i32)))
   (import "env" "_db_rollback" (func (result i32)))
