@@ -76,7 +76,7 @@ async fn main() {
         Level::INFO
     };
 
-    let _subscriber = FmtSubscriber::builder()
+    FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_target(false)
         .with_thread_ids(false)
@@ -102,10 +102,10 @@ async fn main() {
         std::process::exit(1);
     }
 
-    if !args
+    if args
         .wasm_path
         .extension()
-        .map_or(false, |ext| ext == "wasm")
+        .is_none_or(|ext| ext != "wasm")
     {
         error!("File must have .wasm extension: {:?}", args.wasm_path);
         std::process::exit(1);

@@ -410,41 +410,39 @@ fn extract_auth_from_headers(
     session_store: &SharedSessionStore,
 ) -> Option<AuthContext> {
     // Try to get session from cookie first
-    if let Some(cookie_header) = headers.get(header::COOKIE) {
-        if let Ok(cookie_str) = cookie_header.to_str() {
-            let cookies = parse_cookies(cookie_str);
+    if let Some(cookie_header) = headers.get(header::COOKIE)
+        && let Ok(cookie_str) = cookie_header.to_str()
+    {
+        let cookies = parse_cookies(cookie_str);
 
-            // Try common session cookie names
-            let session_id = cookies.get("session")
-                .or_else(|| cookies.get("todo.sid"))
-                .or_else(|| cookies.get("sid"));
+        // Try common session cookie names
+        let session_id = cookies.get("session")
+            .or_else(|| cookies.get("todo.sid"))
+            .or_else(|| cookies.get("sid"));
 
-            if let Some(session_id) = session_id {
-                // Look up session
-                let mut store = session_store.write().unwrap();
-                if let Some(session) = store.get(session_id) {
-                    debug!("Found valid session {} for user {}", session.session_id, session.user_id);
-                    return Some(AuthContext {
-                        user_id: session.user_id,
-                        role: session.role,
-                        session_id: Some(session.session_id),
-                    });
-                }
+        if let Some(session_id) = session_id {
+            // Look up session
+            let mut store = session_store.write().unwrap();
+            if let Some(session) = store.get(session_id) {
+                debug!("Found valid session {} for user {}", session.session_id, session.user_id);
+                return Some(AuthContext {
+                    user_id: session.user_id,
+                    role: session.role,
+                    session_id: Some(session.session_id),
+                });
             }
         }
     }
 
     // Try Bearer token from Authorization header
-    if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                // For now, just log that we received a token
-                // Full JWT validation would go here
-                debug!("Received Bearer token: {}...", &token[..token.len().min(10)]);
-                // JWT validation would return AuthContext here
-            }
-        }
+    if let Some(auth_header) = headers.get(header::AUTHORIZATION)
+        && let Ok(auth_str) = auth_header.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+    {
+        // For now, just log that we received a token
+        // Full JWT validation would go here
+        debug!("Received Bearer token: {}...", &token[..token.len().min(10)]);
+        // JWT validation would return AuthContext here
     }
 
     None
@@ -482,15 +480,14 @@ async fn shutdown_signal() {
 /// Mask password in database URL for logging
 fn mask_db_url(url: &str) -> String {
     // Pattern: protocol://user:password@host/db -> protocol://user:***@host/db
-    if let Some(at_pos) = url.rfind('@') {
-        if let Some(colon_pos) = url[..at_pos].rfind(':') {
-            // Check if this colon is part of password (after ://)
-            if colon_pos > 3 && &url[colon_pos - 1..colon_pos] != "/" {
-                let protocol_end = url.find("://").map(|p| p + 3).unwrap_or(0);
-                if colon_pos > protocol_end {
-                    return format!("{}***{}", &url[..colon_pos + 1], &url[at_pos..]);
-                }
-            }
+    if let Some(at_pos) = url.rfind('@')
+        && let Some(colon_pos) = url[..at_pos].rfind(':')
+        && colon_pos > 3
+        && &url[colon_pos - 1..colon_pos] != "/"
+    {
+        let protocol_end = url.find("://").map(|p| p + 3).unwrap_or(0);
+        if colon_pos > protocol_end {
+            return format!("{}***{}", &url[..colon_pos + 1], &url[at_pos..]);
         }
     }
     url.to_string()

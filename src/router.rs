@@ -48,7 +48,7 @@ pub enum HttpMethod {
 
 impl HttpMethod {
     /// Parse HTTP method from string
-    pub fn from_str(s: &str) -> RuntimeResult<Self> {
+    pub fn parse(s: &str) -> RuntimeResult<Self> {
         match s.to_uppercase().as_str() {
             "GET" => Ok(HttpMethod::GET),
             "POST" => Ok(HttpMethod::POST),
@@ -280,10 +280,10 @@ mod tests {
 
     #[test]
     fn test_method_parsing() {
-        assert_eq!(HttpMethod::from_str("GET").unwrap(), HttpMethod::GET);
-        assert_eq!(HttpMethod::from_str("post").unwrap(), HttpMethod::POST);
-        assert_eq!(HttpMethod::from_str("Delete").unwrap(), HttpMethod::DELETE);
-        assert!(HttpMethod::from_str("INVALID").is_err());
+        assert_eq!(HttpMethod::parse("GET").unwrap(), HttpMethod::GET);
+        assert_eq!(HttpMethod::parse("post").unwrap(), HttpMethod::POST);
+        assert_eq!(HttpMethod::parse("Delete").unwrap(), HttpMethod::DELETE);
+        assert!(HttpMethod::parse("INVALID").is_err());
     }
 
     #[test]

@@ -118,7 +118,7 @@ pub fn read_string_from_memory<T>(
     if len > 10_000_000 {
         error!("read_string_from_memory: suspiciously large length {} at ptr={}", len, ptr);
         // Log the raw bytes around the ptr for debugging
-        let start = if ptr >= 16 { ptr - 16 } else { 0 };
+        let start = ptr.saturating_sub(16);
         let end = (ptr + 32).min(data.len());
         error!("read_string_from_memory: bytes around ptr: {:02x?}", &data[start..end]);
         return Err(RuntimeError::memory(format!(
@@ -257,7 +257,7 @@ fn ensure_memory_size<T>(
 
     if required > current_size {
         // Calculate required pages (64KB per page)
-        let required_pages = ((required + 65535) / 65536) as u64;
+        let required_pages = required.div_ceil(65536) as u64;
         let current_pages = memory.size(&*store);
         let pages_to_grow = required_pages.saturating_sub(current_pages);
 

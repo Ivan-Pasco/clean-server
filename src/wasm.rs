@@ -18,6 +18,7 @@ use wasmtime::{Engine, Instance, Module, Store};
 pub type SharedDbBridge = Arc<TokioRwLock<DbBridge>>;
 
 /// Roles and permissions store
+#[derive(Default)]
 pub struct RolesStore {
     /// Map of role name -> list of permissions
     pub roles: HashMap<String, Vec<String>>,
@@ -25,9 +26,7 @@ pub struct RolesStore {
 
 impl RolesStore {
     pub fn new() -> Self {
-        Self {
-            roles: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register roles from JSON config
@@ -513,24 +512,23 @@ impl WasmInstance {
 
         // Try direct function table call
         // WASM function tables allow calling functions by index
-        if let Some(table) = instance.get_table(&mut store, "__indirect_function_table") {
-            if let Some(func_ref) = table.get(&mut store, handler_index as u64) {
-                if let Some(func) = func_ref.unwrap_func() {
-                    // Try to call as a function returning i32
-                    let result_ptr = func
-                        .typed::<(), i32>(&store)
-                        .map_err(|e| {
-                            RuntimeError::wasm(format!("Invalid handler signature: {}", e))
-                        })?
-                        .call(&mut store, ())
-                        .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
+        if let Some(table) = instance.get_table(&mut store, "__indirect_function_table")
+            && let Some(func_ref) = table.get(&mut store, handler_index as u64)
+            && let Some(func) = func_ref.unwrap_func()
+        {
+            // Try to call as a function returning i32
+            let result_ptr = func
+                .typed::<(), i32>(&store)
+                .map_err(|e| {
+                    RuntimeError::wasm(format!("Invalid handler signature: {}", e))
+                })?
+                .call(&mut store, ())
+                .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
 
-                    let result =
-                        crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
+            let result =
+                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
 
-                    return Ok(result);
-                }
-            }
+            return Ok(result);
         }
 
         // Fallback: try calling a generic handler function with the index

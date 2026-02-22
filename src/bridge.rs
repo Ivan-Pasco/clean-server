@@ -90,7 +90,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                     method_str, path, handler_idx
                 );
 
-                let method = match HttpMethod::from_str(&method_str) {
+                let method = match HttpMethod::parse(&method_str) {
                     Ok(m) => m,
                     Err(e) => {
                         error!("Invalid HTTP method '{}': {}", method_str, e);
@@ -138,7 +138,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                     method_str, path, handler_idx, required_role
                 );
 
-                let method = match HttpMethod::from_str(&method_str) {
+                let method = match HttpMethod::parse(&method_str) {
                     Ok(m) => m,
                     Err(e) => {
                         error!("Invalid HTTP method '{}': {}", method_str, e);
