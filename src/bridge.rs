@@ -24,7 +24,7 @@ use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
 use crate::session::parse_cookies;
 use crate::wasm::WasmState;
-use host_bridge::{read_raw_string, write_string_to_caller};
+use host_bridge::{read_string_from_caller, write_string_to_caller};
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
 
@@ -75,14 +75,12 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
             "_http_route",
             |mut caller: Caller<'_, WasmState>,
              method_ptr: i32,
-             method_len: i32,
              path_ptr: i32,
-             path_len: i32,
              handler_idx: i32|
              -> i32 {
-                let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                let method_str = read_string_from_caller(&mut caller, method_ptr)
                     .unwrap_or_else(|| "GET".to_string());
-                let path = read_raw_string(&mut caller, path_ptr, path_len)
+                let path = read_string_from_caller(&mut caller, path_ptr)
                     .unwrap_or_else(|| "/".to_string());
 
                 debug!(
@@ -119,22 +117,16 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
             "_http_route_protected",
             |mut caller: Caller<'_, WasmState>,
              method_ptr: i32,
-             method_len: i32,
              path_ptr: i32,
-             path_len: i32,
              handler_idx: i32,
-             role_ptr: i32,
-             role_len: i32|
+             role_ptr: i32|
              -> i32 {
-                let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                let method_str = read_string_from_caller(&mut caller, method_ptr)
                     .unwrap_or_else(|| "GET".to_string());
-                let path = read_raw_string(&mut caller, path_ptr, path_len)
+                let path = read_string_from_caller(&mut caller, path_ptr)
                     .unwrap_or_else(|| "/".to_string());
-                let required_role = if role_len > 0 {
-                    read_raw_string(&mut caller, role_ptr, role_len)
-                } else {
-                    None
-                };
+                let required_role = read_string_from_caller(&mut caller, role_ptr)
+                    .filter(|s| !s.is_empty());
 
                 debug!(
                     "_http_route_protected: method={}, path={}, handler={}, role={:?}",
@@ -179,12 +171,10 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
             "_http_serve_static",
             |mut caller: Caller<'_, WasmState>,
              prefix_ptr: i32,
-             prefix_len: i32,
-             dir_ptr: i32,
-             dir_len: i32|
+             dir_ptr: i32|
              -> i32 {
                 let prefix =
-                    match read_raw_string(&mut caller, prefix_ptr, prefix_len) {
+                    match read_string_from_caller(&mut caller, prefix_ptr) {
                         Some(s) => s,
                         None => {
                             error!("_http_serve_static: Failed to read prefix");
@@ -192,7 +182,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                         }
                     };
                 let dir =
-                    match read_raw_string(&mut caller, dir_ptr, dir_len) {
+                    match read_string_from_caller(&mut caller, dir_ptr) {
                         Some(s) => s,
                         None => {
                             error!("_http_serve_static: Failed to read dir");
@@ -229,28 +219,11 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         .func_wrap(
             "env",
             "_req_param",
-            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                debug!("_req_param: CALLED with ptr={}, len={}", name_ptr, name_len);
-
-                // First, dump raw bytes from WASM memory for debugging
-                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                    let data = memory.data(&caller);
-                    if (name_ptr as usize) + (name_len as usize) <= data.len() {
-                        let raw_bytes = &data[name_ptr as usize..(name_ptr + name_len) as usize];
-                        debug!("_req_param: Raw bytes at ptr: {:02x?}", raw_bytes);
-                        debug!("_req_param: As string (lossy): '{}'", String::from_utf8_lossy(raw_bytes));
-                    } else {
-                        error!("_req_param: ptr+len ({}) exceeds memory size ({})",
-                               name_ptr as usize + name_len as usize, data.len());
-                    }
-                } else {
-                    error!("_req_param: Could not get WASM memory export!");
-                }
-
-                let param_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32| -> i32 {
+                let param_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => {
-                        error!("_req_param: Failed to read param name from ptr={}, len={}", name_ptr, name_len);
+                        error!("_req_param: Failed to read param name");
                         return write_string_to_caller(&mut caller, "");
                     }
                 };
@@ -259,25 +232,6 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
 
                 let value = {
                     let state = caller.data();
-
-                    // Log all available params for debugging
-                    if let Some(ref ctx) = state.request_context {
-                        debug!("_req_param: Request context EXISTS");
-                        debug!("_req_param: Request method: {}", ctx.method);
-                        debug!("_req_param: Request path: {}", ctx.path);
-                        debug!("_req_param: Params count: {}", ctx.params.len());
-                        debug!("_req_param: Available params: {:?}", ctx.params);
-
-                        // Try exact match
-                        if let Some(v) = ctx.params.get(&param_name) {
-                            debug!("_req_param: FOUND param '{}' = '{}'", param_name, v);
-                        } else {
-                            debug!("_req_param: param '{}' NOT FOUND in {:?}", param_name, ctx.params.keys().collect::<Vec<_>>());
-                        }
-                    } else {
-                        error!("_req_param: No request context available! This is the bug.");
-                    }
-
                     state
                         .request_context
                         .as_ref()
@@ -286,9 +240,7 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                 };
 
                 debug!("_req_param: Returning value '{}' for param '{}'", value, param_name);
-                let result_ptr = write_string_to_caller(&mut caller, &value);
-                debug!("_req_param: Wrote result to ptr={}", result_ptr);
-                result_ptr
+                write_string_to_caller(&mut caller, &value)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_param: {}", e)))?;
@@ -298,8 +250,8 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         .func_wrap(
             "env",
             "_req_query",
-            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                let query_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32| -> i32 {
+                let query_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
@@ -343,8 +295,8 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         .func_wrap(
             "env",
             "_req_body_field",
-            |mut caller: Caller<'_, WasmState>, field_ptr: i32, field_len: i32| -> i32 {
-                let field_name = match read_raw_string(&mut caller, field_ptr, field_len) {
+            |mut caller: Caller<'_, WasmState>, field_ptr: i32| -> i32 {
+                let field_name = match read_string_from_caller(&mut caller, field_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
@@ -378,8 +330,8 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         .func_wrap(
             "env",
             "_req_param_int",
-            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                let param_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32| -> i32 {
+                let param_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -405,8 +357,8 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         .func_wrap(
             "env",
             "_req_header",
-            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32| -> i32 {
+                let header_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s.to_lowercase(),
                     None => return write_string_to_caller(&mut caller, ""),
                 };
@@ -475,8 +427,8 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
         .func_wrap(
             "env",
             "_req_cookie",
-            |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-                let cookie_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32| -> i32 {
+                let cookie_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
@@ -601,35 +553,64 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
 /// Register session management functions (_session_store, _session_get, _session_delete, etc.)
 /// These align with the frame.auth plugin API using key-value session storage.
 fn register_session_management_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
-    // _session_store - Store data by session ID (key-value storage)
-    // Args: id_ptr, id_len, data_ptr, data_len
+    // _session_store - Store data in session (key-value storage)
+    // Args: session_id_ptr, key_ptr, value_ptr, ttl, flags
     // Returns: 1 on success, 0 on error
     linker
         .func_wrap(
             "env",
             "_session_store",
             |mut caller: Caller<'_, WasmState>,
-             id_ptr: i32,
-             id_len: i32,
-             data_ptr: i32,
-             data_len: i32|
+             session_id_ptr: i32,
+             key_ptr: i32,
+             value_ptr: i32,
+             _ttl: i32,
+             _flags: i32|
              -> i32 {
-                let session_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+                let session_id = match read_string_from_caller(&mut caller, session_id_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_session_store: Failed to read session ID");
                         return 0;
                     }
                 };
-                let data = match read_raw_string(&mut caller, data_ptr, data_len) {
+                let key = match read_string_from_caller(&mut caller, key_ptr) {
                     Some(s) => s,
                     None => {
-                        error!("_session_store: Failed to read data");
+                        error!("_session_store: Failed to read key");
+                        return 0;
+                    }
+                };
+                let value = match read_string_from_caller(&mut caller, value_ptr) {
+                    Some(s) => s,
+                    None => {
+                        error!("_session_store: Failed to read value");
                         return 0;
                     }
                 };
 
-                debug!("_session_store: id={}, data_len={}", session_id, data.len());
+                debug!("_session_store: id={}, key={}, value_len={}", session_id, key, value.len());
+
+                // Store as key=value under the session ID
+                let data = if key.is_empty() {
+                    value
+                } else {
+                    // Build JSON object with key-value pair
+                    let session_store = caller.data().session_store.clone();
+                    let existing = {
+                        let mut store = session_store.write().unwrap();
+                        store.get_raw(&session_id)
+                    };
+
+                    let mut obj: serde_json::Value = existing
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert(key, serde_json::Value::String(value));
+                    }
+                    serde_json::to_string(&obj).unwrap_or_default()
+                };
 
                 let session_store = caller.data().session_store.clone();
                 let mut store = session_store.write().unwrap();
@@ -638,18 +619,39 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_store: {}", e)))?;
 
-    // _session_get - Get session data by ID (returns stored data or empty string)
-    // Args: id_ptr, id_len
+    // _session_get - Get current session data (returns stored data or empty string)
+    // Args: none (session ID comes from request context)
     // Returns: pointer to data string (length-prefixed)
     linker
         .func_wrap(
             "env",
             "_session_get",
-            |mut caller: Caller<'_, WasmState>, id_ptr: i32, id_len: i32| -> i32 {
-                let session_id = match read_raw_string(&mut caller, id_ptr, id_len) {
-                    Some(s) => s,
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                // Get session ID from auth context or cookie
+                let session_id = {
+                    let state = caller.data();
+                    state
+                        .auth_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.session_id.clone())
+                        .or_else(|| {
+                            state.request_context.as_ref().and_then(|ctx| {
+                                ctx.headers
+                                    .iter()
+                                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                                    .and_then(|(_, cookie_header)| {
+                                        let cookies = parse_cookies(cookie_header);
+                                        cookies.get("session").cloned()
+                                            .or_else(|| cookies.get("sid").cloned())
+                                    })
+                            })
+                        })
+                };
+
+                let session_id = match session_id {
+                    Some(id) => id,
                     None => {
-                        error!("_session_get: Failed to read session ID");
+                        debug!("_session_get: No active session");
                         return write_string_to_caller(&mut caller, "");
                     }
                 };
@@ -676,18 +678,39 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_get: {}", e)))?;
 
-    // _session_delete - Delete session data by ID
-    // Args: id_ptr, id_len
+    // _session_delete - Delete current session data
+    // Args: none (session ID comes from request context)
     // Returns: 1 if deleted, 0 if not found
     linker
         .func_wrap(
             "env",
             "_session_delete",
-            |mut caller: Caller<'_, WasmState>, id_ptr: i32, id_len: i32| -> i32 {
-                let session_id = match read_raw_string(&mut caller, id_ptr, id_len) {
-                    Some(s) => s,
+            |caller: Caller<'_, WasmState>| -> i32 {
+                // Get session ID from auth context or cookie
+                let session_id = {
+                    let state = caller.data();
+                    state
+                        .auth_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.session_id.clone())
+                        .or_else(|| {
+                            state.request_context.as_ref().and_then(|ctx| {
+                                ctx.headers
+                                    .iter()
+                                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                                    .and_then(|(_, cookie_header)| {
+                                        let cookies = parse_cookies(cookie_header);
+                                        cookies.get("session").cloned()
+                                            .or_else(|| cookies.get("sid").cloned())
+                                    })
+                            })
+                        })
+                };
+
+                let session_id = match session_id {
+                    Some(id) => id,
                     None => {
-                        error!("_session_delete: Failed to read session ID");
+                        debug!("_session_delete: No active session");
                         return 0;
                     }
                 };
@@ -712,8 +735,8 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
         .func_wrap(
             "env",
             "_session_exists",
-            |mut caller: Caller<'_, WasmState>, id_ptr: i32, id_len: i32| -> i32 {
-                let session_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+            |mut caller: Caller<'_, WasmState>, id_ptr: i32| -> i32 {
+                let session_id = match read_string_from_caller(&mut caller, id_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -732,8 +755,8 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
         .func_wrap(
             "env",
             "_session_set_csrf",
-            |mut caller: Caller<'_, WasmState>, token_ptr: i32, token_len: i32| -> i32 {
-                let token = match read_raw_string(&mut caller, token_ptr, token_len) {
+            |mut caller: Caller<'_, WasmState>, token_ptr: i32| -> i32 {
+                let token = match read_string_from_caller(&mut caller, token_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_session_set_csrf: Failed to read token");
@@ -823,9 +846,8 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_get_csrf: {}", e)))?;
 
-    // _http_set_cookie - Set a cookie with name, value, and options
-    // Args: name_ptr, name_len, value_ptr, value_len, opts_ptr, opts_len
-    //   opts is a semicolon-separated string of cookie attributes (e.g., "Path=/; HttpOnly; Secure; Max-Age=3600")
+    // _http_set_cookie - Set a cookie with name and value
+    // Args: name_ptr, value_ptr (length-prefixed string pointers)
     // Returns: 1 on success, 0 on error
     linker
         .func_wrap(
@@ -833,35 +855,25 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
             "_http_set_cookie",
             |mut caller: Caller<'_, WasmState>,
              name_ptr: i32,
-             name_len: i32,
-             value_ptr: i32,
-             value_len: i32,
-             opts_ptr: i32,
-             opts_len: i32|
+             value_ptr: i32|
              -> i32 {
-                let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                let name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_http_set_cookie: Failed to read cookie name");
                         return 0;
                     }
                 };
-                let value = match read_raw_string(&mut caller, value_ptr, value_len) {
+                let value = match read_string_from_caller(&mut caller, value_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_http_set_cookie: Failed to read cookie value");
                         return 0;
                     }
                 };
-                let opts = read_raw_string(&mut caller, opts_ptr, opts_len)
-                    .unwrap_or_default();
 
-                // Build cookie string: name=value; opts
-                let cookie = if opts.is_empty() {
-                    format!("{}={}", name, value)
-                } else {
-                    format!("{}={}; {}", name, value, opts)
-                };
+                // Build cookie string: name=value with sensible defaults
+                let cookie = format!("{}={}; Path=/; HttpOnly", name, value);
 
                 debug!("_http_set_cookie: {}", cookie);
                 caller.data_mut().pending_set_cookie = Some(cookie);
@@ -882,8 +894,8 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
         .func_wrap(
             "env",
             "_roles_register",
-            |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32| -> i32 {
-                let config_json = match read_raw_string(&mut caller, json_ptr, json_len) {
+            |mut caller: Caller<'_, WasmState>, json_ptr: i32| -> i32 {
+                let config_json = match read_string_from_caller(&mut caller, json_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_roles_register: Failed to read JSON");
@@ -909,15 +921,13 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
             "_role_has_permission",
             |mut caller: Caller<'_, WasmState>,
              role_ptr: i32,
-             role_len: i32,
-             perm_ptr: i32,
-             perm_len: i32|
+             perm_ptr: i32|
              -> i32 {
-                let role = match read_raw_string(&mut caller, role_ptr, role_len) {
+                let role = match read_string_from_caller(&mut caller, role_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
-                let permission = match read_raw_string(&mut caller, perm_ptr, perm_len) {
+                let permission = match read_string_from_caller(&mut caller, perm_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -938,8 +948,8 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
         .func_wrap(
             "env",
             "_role_get_permissions",
-            |mut caller: Caller<'_, WasmState>, role_ptr: i32, role_len: i32| -> i32 {
-                let role = match read_raw_string(&mut caller, role_ptr, role_len) {
+            |mut caller: Caller<'_, WasmState>, role_ptr: i32| -> i32 {
+                let role = match read_string_from_caller(&mut caller, role_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, "[]"),
                 };
@@ -1004,8 +1014,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         .func_wrap(
             "env",
             "_auth_require_role",
-            |mut caller: Caller<'_, WasmState>, role_ptr: i32, role_len: i32| -> i32 {
-                let required_role = match read_raw_string(&mut caller, role_ptr, role_len) {
+            |mut caller: Caller<'_, WasmState>, role_ptr: i32| -> i32 {
+                let required_role = match read_string_from_caller(&mut caller, role_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -1025,9 +1035,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         .func_wrap(
             "env",
             "_auth_can",
-            |mut caller: Caller<'_, WasmState>, permission_ptr: i32, permission_len: i32| -> i32 {
-                let permission = match read_raw_string(&mut caller, permission_ptr, permission_len)
-                {
+            |mut caller: Caller<'_, WasmState>, permission_ptr: i32| -> i32 {
+                let permission = match read_string_from_caller(&mut caller, permission_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -1052,8 +1061,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         .func_wrap(
             "env",
             "_auth_has_any_role",
-            |mut caller: Caller<'_, WasmState>, roles_ptr: i32, roles_len: i32| -> i32 {
-                let roles_json = match read_raw_string(&mut caller, roles_ptr, roles_len) {
+            |mut caller: Caller<'_, WasmState>, roles_ptr: i32| -> i32 {
+                let roles_json = match read_string_from_caller(&mut caller, roles_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -1077,8 +1086,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         .func_wrap(
             "env",
             "_auth_set_session",
-            |mut caller: Caller<'_, WasmState>, data_ptr: i32, data_len: i32| -> i32 {
-                let data_json = match read_raw_string(&mut caller, data_ptr, data_len) {
+            |mut caller: Caller<'_, WasmState>, data_ptr: i32| -> i32 {
+                let data_json = match read_string_from_caller(&mut caller, data_ptr) {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -1240,13 +1249,11 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             |mut caller: Caller<'_, WasmState>,
              status: i32,
              content_type_ptr: i32,
-             content_type_len: i32,
-             body_ptr: i32,
-             body_len: i32|
+             body_ptr: i32|
              -> i32 {
-                let content_type = read_raw_string(&mut caller, content_type_ptr, content_type_len)
+                let content_type = read_string_from_caller(&mut caller, content_type_ptr)
                     .unwrap_or_else(|| "text/plain".to_string());
-                let body = read_raw_string(&mut caller, body_ptr, body_len)
+                let body = read_string_from_caller(&mut caller, body_ptr)
                     .unwrap_or_default();
 
                 debug!(
@@ -1275,8 +1282,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .func_wrap(
             "env",
             "_http_redirect",
-            |mut caller: Caller<'_, WasmState>, status: i32, url_ptr: i32, url_len: i32| -> i32 {
-                let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+            |mut caller: Caller<'_, WasmState>, status: i32, url_ptr: i32| -> i32 {
+                let url = match read_string_from_caller(&mut caller, url_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
@@ -1291,7 +1298,7 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_redirect: {}", e)))?;
 
     // _http_set_header - Alias for _res_set_header
-    // Args: name_ptr, name_len, value_ptr, value_len
+    // Args: name_ptr, value_ptr (length-prefixed string pointers)
     // Returns: pointer to header name
     linker
         .func_wrap(
@@ -1299,15 +1306,13 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             "_http_set_header",
             |mut caller: Caller<'_, WasmState>,
              name_ptr: i32,
-             name_len: i32,
-             value_ptr: i32,
-             value_len: i32|
+             value_ptr: i32|
              -> i32 {
-                let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                let header_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
-                let header_value = read_raw_string(&mut caller, value_ptr, value_len)
+                let header_value = read_string_from_caller(&mut caller, value_ptr)
                     .unwrap_or_default();
 
                 debug!("_http_set_header: {}={}", header_name, header_value);
@@ -1319,7 +1324,7 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_set_header: {}", e)))?;
 
     // _res_set_header - Set a custom response header
-    // Args: name_ptr, name_len, value_ptr, value_len
+    // Args: name_ptr, value_ptr (length-prefixed string pointers)
     // Returns: 1 on success, 0 on error
     linker
         .func_wrap(
@@ -1327,11 +1332,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             "_res_set_header",
             |mut caller: Caller<'_, WasmState>,
              name_ptr: i32,
-             name_len: i32,
-             value_ptr: i32,
-             value_len: i32|
+             value_ptr: i32|
              -> i32 {
-                let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                let header_name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_res_set_header: Failed to read header name");
@@ -1339,7 +1342,7 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
                     }
                 };
 
-                let header_value = match read_raw_string(&mut caller, value_ptr, value_len) {
+                let header_value = match read_string_from_caller(&mut caller, value_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_res_set_header: Failed to read header value");
@@ -1368,10 +1371,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             "_res_redirect",
             |mut caller: Caller<'_, WasmState>,
              url_ptr: i32,
-             url_len: i32,
              status_code: i32|
              -> i32 {
-                let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                let url = match read_string_from_caller(&mut caller, url_ptr) {
                     Some(s) => s,
                     None => {
                         error!("_res_redirect: Failed to read URL");
@@ -1417,8 +1419,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .func_wrap(
             "env",
             "_res_body",
-            |mut caller: Caller<'_, WasmState>, body_ptr: i32, body_len: i32| {
-                let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
+            |mut caller: Caller<'_, WasmState>, body_ptr: i32| {
+                let body = read_string_from_caller(&mut caller, body_ptr).unwrap_or_default();
                 debug!("_res_body: {} bytes", body.len());
                 caller.data_mut().set_body(body);
             },
@@ -1431,8 +1433,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .func_wrap(
             "env",
             "_res_json",
-            |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32| {
-                let json_body = read_raw_string(&mut caller, json_ptr, json_len).unwrap_or_default();
+            |mut caller: Caller<'_, WasmState>, json_ptr: i32| {
+                let json_body = read_string_from_caller(&mut caller, json_ptr).unwrap_or_default();
                 debug!("_res_json: {} bytes", json_body.len());
                 caller
                     .data_mut()
@@ -1484,8 +1486,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .func_wrap(
             "env",
             "_json_encode",
-            |mut caller: Caller<'_, WasmState>, value_ptr: i32, value_len: i32| -> i32 {
-                let value = match read_raw_string(&mut caller, value_ptr, value_len) {
+            |mut caller: Caller<'_, WasmState>, value_ptr: i32| -> i32 {
+                let value = match read_string_from_caller(&mut caller, value_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, "null"),
                 };
@@ -1516,8 +1518,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .func_wrap(
             "env",
             "_json_decode",
-            |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32| -> i32 {
-                let json_str = match read_raw_string(&mut caller, json_ptr, json_len) {
+            |mut caller: Caller<'_, WasmState>, json_ptr: i32| -> i32 {
+                let json_str = match read_string_from_caller(&mut caller, json_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, "null"),
                 };
@@ -1548,12 +1550,12 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         .func_wrap(
             "env",
             "_json_get",
-            |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32, path_ptr: i32, path_len: i32| -> i32 {
-                let json_str = match read_raw_string(&mut caller, json_ptr, json_len) {
+            |mut caller: Caller<'_, WasmState>, json_ptr: i32, path_ptr: i32| -> i32 {
+                let json_str = match read_string_from_caller(&mut caller, json_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
-                let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                let path = match read_string_from_caller(&mut caller, path_ptr) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, ""),
                 };
