@@ -7,10 +7,10 @@
 //! - file_delete: Delete a file
 //! - file_append: Append to a file
 //!
-//! All string parameters use length-prefixed pointers (single i32).
+//! String parameters use raw (ptr, len) pairs via expand_strings convention.
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
-use super::helpers::{read_string_from_caller, write_string_to_caller};
+use super::helpers::{read_raw_string, write_string_to_caller};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use std::fs;
@@ -25,13 +25,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_read - Read file contents
-    // Signature: (path_ptr: i32) -> i32
+    // Signature: (path_ptr: i32, path_len: i32, _mode: i32) -> i32
     // Returns: pointer to file contents as length-prefixed string
     linker.func_wrap(
         "env",
         "file_read",
-        |mut caller: Caller<'_, S>, path_ptr: i32| -> i32 {
-            let path = match read_string_from_caller(&mut caller, path_ptr) {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, _mode: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {
                     error!("file_read: Failed to read path");
@@ -56,13 +56,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_write - Write to a file (overwrites if exists)
-    // Signature: (path_ptr: i32, content_ptr: i32) -> i32
+    // Signature: (path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32) -> i32
     // Returns: 0 on success, -1 on error
     linker.func_wrap(
         "env",
         "file_write",
-        |mut caller: Caller<'_, S>, path_ptr: i32, content_ptr: i32| -> i32 {
-            let path = match read_string_from_caller(&mut caller, path_ptr) {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {
                     error!("file_write: Failed to read path");
@@ -70,7 +70,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
-            let content = match read_string_from_caller(&mut caller, content_ptr) {
+            let content = match read_raw_string(&mut caller, content_ptr, content_len) {
                 Some(s) => s,
                 None => {
                     error!("file_write: Failed to read content");
@@ -95,13 +95,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_exists - Check if file exists
-    // Signature: (path_ptr: i32) -> i32
+    // Signature: (path_ptr: i32, path_len: i32) -> i32
     // Returns: 1 if exists, 0 if not
     linker.func_wrap(
         "env",
         "file_exists",
-        |mut caller: Caller<'_, S>, path_ptr: i32| -> i32 {
-            let path = match read_string_from_caller(&mut caller, path_ptr) {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {
                     error!("file_exists: Failed to read path");
@@ -120,13 +120,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_delete - Delete a file
-    // Signature: (path_ptr: i32) -> i32
+    // Signature: (path_ptr: i32, path_len: i32) -> i32
     // Returns: 0 on success, -1 on error
     linker.func_wrap(
         "env",
         "file_delete",
-        |mut caller: Caller<'_, S>, path_ptr: i32| -> i32 {
-            let path = match read_string_from_caller(&mut caller, path_ptr) {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {
                     error!("file_delete: Failed to read path");
@@ -151,13 +151,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_append - Append to a file
-    // Signature: (path_ptr: i32, content_ptr: i32) -> i32
+    // Signature: (path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32) -> i32
     // Returns: 0 on success, -1 on error
     linker.func_wrap(
         "env",
         "file_append",
-        |mut caller: Caller<'_, S>, path_ptr: i32, content_ptr: i32| -> i32 {
-            let path = match read_string_from_caller(&mut caller, path_ptr) {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {
                     error!("file_append: Failed to read path");
@@ -165,7 +165,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
-            let content = match read_string_from_caller(&mut caller, content_ptr) {
+            let content = match read_raw_string(&mut caller, content_ptr, content_len) {
                 Some(s) => s,
                 None => {
                     error!("file_append: Failed to read content");
