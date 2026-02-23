@@ -209,7 +209,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // string_replace - Replace first occurrence
+    // string_replace - Replace all occurrences
     // Signature: (ptr: i32, find_ptr: i32, replace_ptr: i32) -> i32
     linker.func_wrap(
         "env",
@@ -219,7 +219,11 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let search = read_string_from_caller(&mut caller, find_ptr).unwrap_or_default();
             let replace = read_string_from_caller(&mut caller, replace_ptr).unwrap_or_default();
 
-            let result = s.replacen(&search, &replace, 1);
+            if search.is_empty() {
+                return write_string_to_caller(&mut caller, &s);
+            }
+
+            let result = s.replace(&search, &replace);
             write_string_to_caller(&mut caller, &result)
         },
     )?;
@@ -232,7 +236,11 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let search = read_string_from_caller(&mut caller, find_ptr).unwrap_or_default();
             let replace = read_string_from_caller(&mut caller, replace_ptr).unwrap_or_default();
 
-            let result = s.replacen(&search, &replace, 1);
+            if search.is_empty() {
+                return write_string_to_caller(&mut caller, &s);
+            }
+
+            let result = s.replace(&search, &replace);
             write_string_to_caller(&mut caller, &result)
         },
     )?;
