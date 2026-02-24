@@ -59,6 +59,7 @@ tempfile = "3.8"
 reqwest = { version = "0.12", features = ["json"] }
 portpicker = "0.1"
 toml = "0.8"
+wat = "1.243"
 
 [profile.release]
 opt-level = 3

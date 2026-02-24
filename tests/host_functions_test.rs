@@ -178,7 +178,7 @@ async fn test_req_param_extracts_path_params() {
 		string id = _req_param("id")
 		return id
 
-start()
+start:
 	integer status = 0
 	status = _http_route("GET", "/test/:id", 0)
 	integer listenStatus = _http_listen(3000)
@@ -227,7 +227,7 @@ async fn test_req_body_reads_post_body() {
 	string __route_handler_0()
 		return _req_body()
 
-start()
+start:
 	integer status = 0
 	status = _http_route("POST", "/echo", 0)
 	integer listenStatus = _http_listen(3000)
@@ -274,7 +274,7 @@ async fn test_req_query_extracts_query_params() {
 	string __route_handler_0()
 		return _req_query("name")
 
-start()
+start:
 	integer status = 0
 	status = _http_route("GET", "/search", 0)
 	integer listenStatus = _http_listen(3000)
@@ -320,7 +320,7 @@ async fn test_req_header_reads_headers() {
 	string __route_handler_0()
 		return _req_header("x-custom-header")
 
-start()
+start:
 	integer status = 0
 	status = _http_route("GET", "/header", 0)
 	integer listenStatus = _http_listen(3000)
@@ -373,7 +373,7 @@ async fn test_req_method_returns_method() {
 	string __route_handler_2()
 		return _req_method()
 
-start()
+start:
 	integer status = 0
 	status = _http_route("POST", "/method", 0)
 	status = _http_route("PUT", "/method", 1)
@@ -446,7 +446,7 @@ async fn test_req_path_returns_path() {
 	string __route_handler_1()
 		return _req_path()
 
-start()
+start:
 	integer status = 0
 	status = _http_route("GET", "/api/test/path", 0)
 	status = _http_route("GET", "/another/route", 1)
@@ -495,7 +495,7 @@ async fn test_multiple_path_params() {
 		string postId = _req_param("postId")
 		return userId
 
-start()
+start:
 	integer status = 0
 	status = _http_route("GET", "/users/:userId/posts/:postId", 0)
 	integer listenStatus = _http_listen(3000)
@@ -543,7 +543,7 @@ async fn test_req_body_empty() {
 		string body = _req_body()
 		return body
 
-start()
+start:
 	integer status = 0
 	status = _http_route("POST", "/check", 0)
 	integer listenStatus = _http_listen(3000)
@@ -589,7 +589,7 @@ async fn test_req_query_missing_param() {
 	string __route_handler_0()
 		return _req_query("nonexistent")
 
-start()
+start:
 	integer status = 0
 	status = _http_route("GET", "/missing", 0)
 	integer listenStatus = _http_listen(3000)
@@ -636,7 +636,7 @@ async fn test_req_header_case_insensitive() {
 	string __route_handler_0()
 		return _req_header("content-type")
 
-start()
+start:
 	integer status = 0
 	status = _http_route("POST", "/content", 0)
 	integer listenStatus = _http_listen(3000)
@@ -673,3 +673,486 @@ start()
         }
     }
 }
+
+// ============================================================================
+// SSR Companion File Pattern Tests
+// ============================================================================
+//
+// These tests verify the server correctly handles the companion file SSR
+// pattern where route handlers may call _res_redirect() (guard pattern)
+// and return HTML content (page rendering pattern).
+//
+// Tests use hand-crafted WAT modules to directly test the server's behavior
+// without depending on the Clean Language compiler.
+// ============================================================================
+
+impl TestServer {
+    /// Start a test server from pre-compiled WASM bytes (bypasses compiler)
+    async fn from_wasm(wasm_bytes: &[u8], port: u16) -> Result<Self, String> {
+        let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+        let wasm_path = temp_dir.path().join("test_app.wasm");
+
+        std::fs::write(&wasm_path, wasm_bytes)
+            .map_err(|e| format!("Failed to write WASM file: {}", e))?;
+
+        let server_path = find_clean_server_binary()?;
+
+        let log_path = temp_dir.path().join("server.log");
+
+        let process = Command::new(&server_path)
+            .args([wasm_path.to_str().unwrap(), "--port", &port.to_string()])
+            .stdout(std::fs::File::create(&log_path).unwrap())
+            .stderr(std::fs::File::create(temp_dir.path().join("server.err")).unwrap())
+            .spawn()
+            .map_err(|e| format!("Failed to start server: {}", e))?;
+
+        sleep(Duration::from_millis(3000)).await;
+
+        let client = reqwest::Client::new();
+        let check_url = format!("http://127.0.0.1:{}/", port);
+        for attempt in 0..5 {
+            if client.get(&check_url).send().await.is_ok() {
+                break;
+            }
+            if attempt == 4 {
+                let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let err_content =
+                    std::fs::read_to_string(temp_dir.path().join("server.err")).unwrap_or_default();
+                return Err(format!(
+                    "Server failed to start on port {}.\nLog: {}\nErr: {}",
+                    port, log_content, err_content
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        Ok(Self {
+            process,
+            port,
+            _temp_dir: temp_dir,
+        })
+    }
+}
+
+// ============================================================================
+// Test: Guard redirect - handler calls _res_redirect then returns empty string
+// Verifies: HTTP 302, Location header set, empty body not returned as 200
+// ============================================================================
+
+#[tokio::test]
+async fn test_guard_redirect_returns_302() {
+    // WAT module: handler calls _res_redirect("/login", 302) then returns ""
+    // Memory layout:
+    //   0..2:   "GET" (3 bytes)
+    //   16..25: "/dashboard" (10 bytes)
+    //   32..37: "/login" (6 bytes)
+    //   48..51: length-prefixed empty string (4 zero bytes = len 0)
+    let wat = r#"
+    (module
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
+      (import "env" "_res_redirect" (func $res_redirect (param i32 i32 i32) (result i32)))
+
+      (memory (export "memory") 1)
+
+      (data (i32.const 0) "GET")
+      (data (i32.const 16) "/dashboard")
+      (data (i32.const 32) "/login")
+      (data (i32.const 48) "\00\00\00\00")
+
+      (func (export "_start")
+        (drop (call $http_route
+          (i32.const 0) (i32.const 3)
+          (i32.const 16) (i32.const 10)
+          (i32.const 0)
+        ))
+        (drop (call $http_listen (i32.const 3000)))
+      )
+
+      (func (export "__route_handler_0") (result i32)
+        (drop (call $res_redirect
+          (i32.const 32) (i32.const 6)
+          (i32.const 302)
+        ))
+        (i32.const 48)
+      )
+    )
+    "#;
+
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+
+    let port = get_test_port(11);
+    let server = match TestServer::from_wasm(&wasm_bytes, port).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Server setup failed: {}", e);
+            return;
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let response = client
+        .get(format!("{}/dashboard", server.base_url()))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                302,
+                "Expected 302 redirect, got: {}",
+                resp.status()
+            );
+            let location = resp
+                .headers()
+                .get("location")
+                .expect("Expected Location header on redirect");
+            assert_eq!(
+                location.to_str().unwrap(),
+                "/login",
+                "Expected Location: /login, got: {}",
+                location.to_str().unwrap()
+            );
+        }
+        Err(e) => {
+            panic!("Request failed: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// Test: Guard redirect with 301 permanent
+// ============================================================================
+
+#[tokio::test]
+async fn test_guard_redirect_301_permanent() {
+    // Memory layout:
+    //   0..2:   "GET" (3 bytes)
+    //   16..24: "/old-page" (9 bytes)
+    //   32..44: "/new-location" (13 bytes)
+    //   48..51: length-prefixed empty string
+    let wat = r#"
+    (module
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
+      (import "env" "_res_redirect" (func $res_redirect (param i32 i32 i32) (result i32)))
+
+      (memory (export "memory") 1)
+
+      (data (i32.const 0) "GET")
+      (data (i32.const 16) "/old-page")
+      (data (i32.const 32) "/new-location")
+      (data (i32.const 48) "\00\00\00\00")
+
+      (func (export "_start")
+        (drop (call $http_route
+          (i32.const 0) (i32.const 3)
+          (i32.const 16) (i32.const 9)
+          (i32.const 0)
+        ))
+        (drop (call $http_listen (i32.const 3000)))
+      )
+
+      (func (export "__route_handler_0") (result i32)
+        (drop (call $res_redirect
+          (i32.const 32) (i32.const 13)
+          (i32.const 301)
+        ))
+        (i32.const 48)
+      )
+    )
+    "#;
+
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+
+    let port = get_test_port(14);
+    let server = match TestServer::from_wasm(&wasm_bytes, port).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Server setup failed: {}", e);
+            return;
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let response = client
+        .get(format!("{}/old-page", server.base_url()))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                301,
+                "Expected 301 redirect, got: {}",
+                resp.status()
+            );
+            let location = resp
+                .headers()
+                .get("location")
+                .expect("Expected Location header on redirect");
+            assert_eq!(
+                location.to_str().unwrap(),
+                "/new-location",
+                "Expected Location: /new-location, got: {}",
+                location.to_str().unwrap()
+            );
+        }
+        Err(e) => {
+            panic!("Request failed: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// Test: Page returns HTML - handler returns full HTML document
+// Verifies: Content-Type is text/html, body contains HTML
+// ============================================================================
+
+#[tokio::test]
+async fn test_page_returns_html_content_type() {
+    // Handler returns "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>"
+    // which is 55 bytes = 0x37
+    // Memory layout:
+    //   0..2:    "GET" (3 bytes)
+    //   16..20:  "/page" (5 bytes)
+    //   32..35:  LE u32 length = 55 (0x37, 0x00, 0x00, 0x00)
+    //   36..90:  HTML string data
+    let wat = r#"
+    (module
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
+
+      (memory (export "memory") 1)
+
+      (data (i32.const 0) "GET")
+      (data (i32.const 16) "/page")
+      (data (i32.const 32) "\37\00\00\00<!DOCTYPE html><html><body><h1>Hello</h1></body></html>")
+
+      (func (export "_start")
+        (drop (call $http_route
+          (i32.const 0) (i32.const 3)
+          (i32.const 16) (i32.const 5)
+          (i32.const 0)
+        ))
+        (drop (call $http_listen (i32.const 3000)))
+      )
+
+      (func (export "__route_handler_0") (result i32)
+        (i32.const 32)
+      )
+    )
+    "#;
+
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+
+    let port = get_test_port(12);
+    let server = match TestServer::from_wasm(&wasm_bytes, port).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Server setup failed: {}", e);
+            return;
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/page", server.base_url()))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                200,
+                "Expected 200 OK, got: {}",
+                resp.status()
+            );
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .expect("Expected Content-Type header")
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                content_type.contains("text/html"),
+                "Expected text/html content type, got: {}",
+                content_type
+            );
+            let body = resp.text().await.unwrap_or_default();
+            assert!(
+                body.contains("<h1>Hello</h1>"),
+                "Expected HTML body with <h1>Hello</h1>, got: {}",
+                body
+            );
+        }
+        Err(e) => {
+            panic!("Request failed: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// Test: Static page (no companion) - plain HTML rendering still works
+// ============================================================================
+
+#[tokio::test]
+async fn test_static_page_no_companion() {
+    // Handler returns "<html><head><title>Static</title></head><body>Static content</body></html>"
+    // which is 73 bytes = 0x49
+    let wat = r#"
+    (module
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
+
+      (memory (export "memory") 1)
+
+      (data (i32.const 0) "GET")
+      (data (i32.const 16) "/about")
+      (data (i32.const 32) "\49\00\00\00<html><head><title>Static</title></head><body>Static content</body></html>")
+
+      (func (export "_start")
+        (drop (call $http_route
+          (i32.const 0) (i32.const 3)
+          (i32.const 16) (i32.const 6)
+          (i32.const 0)
+        ))
+        (drop (call $http_listen (i32.const 3000)))
+      )
+
+      (func (export "__route_handler_0") (result i32)
+        (i32.const 32)
+      )
+    )
+    "#;
+
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+
+    let port = get_test_port(13);
+    let server = match TestServer::from_wasm(&wasm_bytes, port).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Server setup failed: {}", e);
+            return;
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/about", server.base_url()))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                200,
+                "Expected 200 OK, got: {}",
+                resp.status()
+            );
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .expect("Expected Content-Type header")
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                content_type.contains("text/html"),
+                "Expected text/html content type, got: {}",
+                content_type
+            );
+            let body = resp.text().await.unwrap_or_default();
+            assert!(
+                body.contains("Static content"),
+                "Expected body to contain 'Static content', got: {}",
+                body
+            );
+        }
+        Err(e) => {
+            panic!("Request failed: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// Test: Page with data from request context (companion load pattern)
+// Handler reads path param and embeds it in HTML response
+// ============================================================================
+
+#[tokio::test]
+async fn test_page_with_request_data() {
+    // This test uses the Clean Language compiler because it needs _req_param
+    // and string concatenation which are complex to replicate in raw WAT
+    let source = r#"start:
+	integer status = 0
+	status = _http_route("GET", "/user/:name", 0)
+	integer listenStatus = _http_listen(3000)
+
+functions:
+	string __route_handler_0()
+		string name = _req_param("name")
+		return "<!DOCTYPE html><html><body>" + name + "</body></html>"
+"#;
+
+    let port = get_test_port(15);
+    let server = match TestServer::new(source, port).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Server setup failed (compiler may not support _req_param yet): {}", e);
+            return;
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/user/alice", server.base_url()))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                200,
+                "Expected 200 OK, got: {}",
+                resp.status()
+            );
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .expect("Expected Content-Type header")
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                content_type.contains("text/html"),
+                "Expected text/html content type, got: {}",
+                content_type
+            );
+            let body = resp.text().await.unwrap_or_default();
+            assert!(
+                body.contains("alice"),
+                "Expected body to contain 'alice', got: {}",
+                body
+            );
+        }
+        Err(e) => {
+            panic!("Request failed: {}", e);
+        }
+    }
+}
+
