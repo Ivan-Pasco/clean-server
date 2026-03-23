@@ -4,6 +4,7 @@
 
 use crate::bridge::create_linker;
 use crate::error::{RuntimeError, RuntimeResult};
+use crate::permissions::{PermissionGate, parse_permissions};
 use crate::router::SharedRouter;
 use crate::session::{SessionConfig, SharedSessionStore, create_session_store};
 use host_bridge::{DbBridge, WasmMemory, WasmStateCore};
@@ -66,6 +67,37 @@ pub fn create_shared_static_dirs() -> SharedStaticDirs {
     Arc::new(RwLock::new(Vec::new()))
 }
 
+/// A single registered island component for client-side hydration
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IslandEntry {
+    /// The component name used as identifier (e.g. "Counter", "SearchBar")
+    pub component: String,
+    /// URL path to the compiled WASM module for this island (e.g. "/islands/counter.wasm")
+    pub module: String,
+    /// Hydration strategy: "on" | "visible" | "idle" | "only"
+    pub hydration: String,
+}
+
+/// Store of all island components registered during WASM module initialization
+#[derive(Default, Clone)]
+pub struct IslandsStore {
+    pub islands: Vec<IslandEntry>,
+}
+
+impl IslandsStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Shared islands store type — Arc<RwLock<...>> so it is accessible after initialization
+pub type SharedIslandsStore = Arc<RwLock<IslandsStore>>;
+
+/// Create a new empty shared islands store
+pub fn create_shared_islands_store() -> SharedIslandsStore {
+    Arc::new(RwLock::new(IslandsStore::new()))
+}
+
 /// State held by each WASM store instance
 pub struct WasmState {
     /// Memory allocator
@@ -100,6 +132,11 @@ pub struct WasmState {
     pub roles_store: SharedRolesStore,
     /// Static file directories registered via _http_serve_static
     pub static_dirs: SharedStaticDirs,
+    /// Island components registered for client-side hydration
+    pub islands_store: SharedIslandsStore,
+    /// Bridge function permission gate derived from the `clean:permissions`
+    /// custom section of the loaded WASM module.
+    pub permission_gate: PermissionGate,
 }
 
 /// Request context passed to handlers
@@ -155,6 +192,8 @@ impl WasmState {
             current_tx_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs: create_shared_static_dirs(),
+            islands_store: create_shared_islands_store(),
+            permission_gate: PermissionGate::allow_all(),
         }
     }
 
@@ -176,6 +215,8 @@ impl WasmState {
             current_tx_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs: create_shared_static_dirs(),
+            islands_store: create_shared_islands_store(),
+            permission_gate: PermissionGate::allow_all(),
         }
     }
 
@@ -184,6 +225,8 @@ impl WasmState {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
         static_dirs: SharedStaticDirs,
+        islands_store: SharedIslandsStore,
+        permission_gate: PermissionGate,
     ) -> Self {
         Self {
             memory: WasmMemory::new(),
@@ -202,6 +245,8 @@ impl WasmState {
             current_tx_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs,
+            islands_store,
+            permission_gate,
         }
     }
 
@@ -321,6 +366,10 @@ pub struct WasmInstance {
     session_store: SharedSessionStore,
     /// Static file directories registered during initialization
     static_dirs: SharedStaticDirs,
+    /// Island components registered for client-side hydration
+    islands_store: SharedIslandsStore,
+    /// Bridge function permission gate parsed from the loaded WASM binary
+    permission_gate: PermissionGate,
 }
 
 impl WasmInstance {
@@ -374,6 +423,19 @@ impl WasmInstance {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
     ) -> RuntimeResult<Self> {
+        // Parse the clean:permissions custom section before compiling so we
+        // have the gate available before any bridge function can be called.
+        let permission_gate = parse_permissions(wasm_bytes, "main");
+
+        if permission_gate.is_enforcing() {
+            info!(
+                "Module loaded with permission enforcement: {} allowed bridge functions",
+                permission_gate.allowed_count().unwrap_or(0)
+            );
+        } else {
+            debug!("Module loaded without permission enforcement (no clean:permissions section)");
+        }
+
         // Create engine
         let engine = Engine::default();
 
@@ -396,6 +458,8 @@ impl WasmInstance {
             db_bridge,
             session_store,
             static_dirs: create_shared_static_dirs(),
+            islands_store: create_shared_islands_store(),
+            permission_gate,
         })
     }
 
@@ -406,6 +470,8 @@ impl WasmInstance {
             self.db_bridge.clone(),
             self.session_store.clone(),
             self.static_dirs.clone(),
+            self.islands_store.clone(),
+            self.permission_gate.clone(),
         );
         let mut store = Store::new(&self.engine, state);
 
@@ -430,6 +496,11 @@ impl WasmInstance {
     /// Get the registered static file directories
     pub fn static_dirs(&self) -> &SharedStaticDirs {
         &self.static_dirs
+    }
+
+    /// Get the registered island components for client-side hydration
+    pub fn islands_store(&self) -> &SharedIslandsStore {
+        &self.islands_store
     }
 
     /// Initialize the module (calls main/start function to register routes)

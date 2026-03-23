@@ -76,6 +76,7 @@
 pub mod bridge;
 pub mod error;
 pub mod memory;
+pub mod permissions;
 pub mod router;
 pub mod server;
 pub mod session;

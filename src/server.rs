@@ -5,7 +5,7 @@
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
 use crate::session::{SharedSessionStore, parse_cookies};
-use crate::wasm::{AuthContext, RequestContext, SharedDbBridge, SharedWasmInstance};
+use crate::wasm::{AuthContext, RequestContext, SharedDbBridge, SharedIslandsStore, SharedWasmInstance};
 use axum::{
     Router,
     body::Body,
@@ -94,13 +94,139 @@ pub struct AppState {
     wasm: SharedWasmInstance,
     /// Router with registered routes
     router: SharedRouter,
+    /// Island components registered for client-side hydration
+    islands_store: SharedIslandsStore,
 }
 
 impl AppState {
-    pub fn new(wasm: SharedWasmInstance, router: SharedRouter) -> Self {
-        Self { wasm, router }
+    pub fn new(
+        wasm: SharedWasmInstance,
+        router: SharedRouter,
+        islands_store: SharedIslandsStore,
+    ) -> Self {
+        Self {
+            wasm,
+            router,
+            islands_store,
+        }
     }
 }
+
+/// Complete JavaScript hydration runtime, ES5-compatible for maximum browser support.
+///
+/// The loader fetches `/islands-manifest.json` on page load, then schedules
+/// hydration of every `[data-island][data-client]` element according to its
+/// `data-client` strategy ("on", "visible", "idle", or "only").
+const LOADER_JS: &str = r#"(function() {
+  'use strict';
+
+  var manifest = null;
+
+  function fetchManifest() {
+    return fetch('/islands-manifest.json')
+      .then(function(r) { return r.json(); })
+      .then(function(data) { manifest = data; return data; });
+  }
+
+  function loadIsland(el) {
+    var componentName = el.getAttribute('data-island');
+    if (!componentName || !manifest) return;
+
+    var entry = null;
+    for (var i = 0; i < manifest.islands.length; i++) {
+      if (manifest.islands[i].component === componentName) {
+        entry = manifest.islands[i];
+        break;
+      }
+    }
+    if (!entry) return;
+
+    var propsAttr = el.getAttribute('data-props');
+    var props = propsAttr ? JSON.parse(propsAttr) : {};
+
+    fetch(entry.module)
+      .then(function(r) { return r.arrayBuffer(); })
+      .then(function(bytes) { return WebAssembly.instantiate(bytes, buildImports(el, props)); })
+      .then(function(result) {
+        var instance = result.instance;
+        if (instance.exports.hydrate) {
+          instance.exports.hydrate();
+        } else if (instance.exports.render) {
+          instance.exports.render();
+        }
+        el.setAttribute('data-hydrated', 'true');
+      })
+      .catch(function(err) {
+        console.error('[islands] Failed to load island "' + componentName + '":', err);
+      });
+  }
+
+  function buildImports(el, props) {
+    return {
+      env: {
+        _dom_set_text: function(ptr, len) {},
+        _dom_set_attr: function(namePtr, nameLen, valPtr, valLen) {},
+        _dom_add_event: function(evtPtr, evtLen, handlerIdx) {},
+        _dom_get_prop: function(keyPtr, keyLen) { return 0; }
+      }
+    };
+  }
+
+  function hydrateAll() {
+    var elements = document.querySelectorAll('[data-island][data-client]');
+    if (elements.length === 0) return;
+
+    fetchManifest().then(function() {
+      for (var i = 0; i < elements.length; i++) {
+        var el = elements[i];
+        var strategy = el.getAttribute('data-client');
+        scheduleHydration(el, strategy);
+      }
+    });
+  }
+
+  function scheduleHydration(el, strategy) {
+    switch (strategy) {
+      case 'on':
+        loadIsland(el);
+        break;
+      case 'visible':
+        if ('IntersectionObserver' in window) {
+          var observer = new IntersectionObserver(function(entries) {
+            for (var i = 0; i < entries.length; i++) {
+              if (entries[i].isIntersecting) {
+                loadIsland(entries[i].target);
+                observer.unobserve(entries[i].target);
+              }
+            }
+          });
+          observer.observe(el);
+        } else {
+          loadIsland(el);
+        }
+        break;
+      case 'idle':
+        if ('requestIdleCallback' in window) {
+          requestIdleCallback(function() { loadIsland(el); });
+        } else {
+          setTimeout(function() { loadIsland(el); }, 200);
+        }
+        break;
+      case 'only':
+        loadIsland(el);
+        break;
+      default:
+        loadIsland(el);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', hydrateAll);
+  } else {
+    hydrateAll();
+  }
+})();
+"#;
 
 /// Start the HTTP server with the given WASM module
 pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeResult<()> {
@@ -165,8 +291,25 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         info!("Serving static files: {} -> {}", prefix, dir);
     }
 
+    // Collect islands registered during initialization
+    let islands_store = wasm.islands_store().clone();
+    {
+        let store = islands_store.read().unwrap();
+        if store.islands.is_empty() {
+            info!("No island components registered");
+        } else {
+            info!("Registered {} island component(s):", store.islands.len());
+            for island in &store.islands {
+                info!(
+                    "  {} -> {} (hydration: {})",
+                    island.component, island.module, island.hydration
+                );
+            }
+        }
+    }
+
     // Create app state
-    let state = AppState::new(wasm, router);
+    let state = AppState::new(wasm, router, islands_store);
 
     // Build Axum router
     let app = build_router(state, &config, static_dirs);
@@ -191,6 +334,9 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
 /// Build the Axum router with middleware
 fn build_router(state: AppState, config: &ServerConfig, static_dirs: Vec<(String, String)>) -> Router {
     let mut app = Router::new()
+        // Built-in islands routes — registered before the fallback so they always take priority
+        .route("/islands-manifest.json", axum::routing::get(serve_islands_manifest))
+        .route("/loader.js", axum::routing::get(serve_loader_js))
         // Catch-all handler that routes to WASM
         .fallback(handle_request)
         .with_state(state);
@@ -224,6 +370,56 @@ fn build_router(state: AppState, config: &ServerConfig, static_dirs: Vec<(String
     app = app.layer(TraceLayer::new_for_http());
 
     app
+}
+
+/// Serve the islands manifest as JSON.
+///
+/// Returns the list of registered island components so the client-side loader
+/// knows which WASM module to fetch for each `[data-island]` element.
+/// Cache-Control is set to `no-cache` because the manifest is regenerated on
+/// every server start and may change between deployments.
+async fn serve_islands_manifest(State(state): State<AppState>) -> Response {
+    #[derive(serde::Serialize)]
+    struct Manifest<'a> {
+        islands: &'a Vec<crate::wasm::IslandEntry>,
+    }
+
+    let store = state.islands_store.read().unwrap();
+    let manifest = Manifest {
+        islands: &store.islands,
+    };
+
+    match serde_json::to_string(&manifest) {
+        Ok(json) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(json))
+            .unwrap(),
+        Err(e) => {
+            error!("Failed to serialize islands manifest: {}", e);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"error":"Failed to generate islands manifest"}"#))
+                .unwrap()
+        }
+    }
+}
+
+/// Serve the client-side hydration loader JavaScript.
+///
+/// The script automatically hydrates `[data-island][data-client]` elements
+/// after the page loads by fetching `/islands-manifest.json` and then
+/// downloading and instantiating each island's WASM module according to
+/// the element's `data-client` strategy ("on", "visible", "idle", or "only").
+async fn serve_loader_js() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/javascript")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(Body::from(LOADER_JS))
+        .unwrap()
 }
 
 /// Handle all incoming requests

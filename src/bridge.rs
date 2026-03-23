@@ -23,7 +23,7 @@
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
 use crate::session::parse_cookies;
-use crate::wasm::WasmState;
+use crate::wasm::{IslandEntry, WasmState};
 use host_bridge::{read_string_from_caller, read_raw_string, write_string_to_caller};
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
@@ -48,8 +48,20 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_session_auth_functions(&mut linker)?;
     register_roles_functions(&mut linker)?;
     register_response_functions(&mut linker)?;
+    register_islands_functions(&mut linker)?;
 
     Ok(linker)
+}
+
+/// Check whether the calling WASM module has permission to invoke the named
+/// bridge function.
+///
+/// Returns `true` when the call is permitted. Returns `false` and emits a
+/// `WARN`-level log entry when it is denied. Bridge function closures should
+/// early-return their zero/error sentinel when this returns `false`.
+#[inline]
+fn check_bridge_permission(caller: &Caller<'_, WasmState>, func_name: &str) -> bool {
+    caller.data().permission_gate.check(func_name)
 }
 
 /// Register HTTP server functions (_http_listen, _http_route, _http_route_protected, _http_serve_static)
@@ -574,6 +586,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
              _ttl: i32,
              _flags: i32|
              -> i32 {
+                if !check_bridge_permission(&caller, "_session_store") {
+                    return 0;
+                }
                 let session_id = match read_string_from_caller(&mut caller, session_id_ptr) {
                     Some(s) => s,
                     None => {
@@ -634,6 +649,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
             "env",
             "_session_get",
             |mut caller: Caller<'_, WasmState>| -> i32 {
+                if !check_bridge_permission(&caller, "_session_get") {
+                    return write_string_to_caller(&mut caller, "");
+                }
                 // Get session ID from auth context or cookie
                 let session_id = {
                     let state = caller.data();
@@ -693,6 +711,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
             "env",
             "_session_delete",
             |caller: Caller<'_, WasmState>| -> i32 {
+                if !check_bridge_permission(&caller, "_session_delete") {
+                    return 0;
+                }
                 // Get session ID from auth context or cookie
                 let session_id = {
                     let state = caller.data();
@@ -743,6 +764,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
             "env",
             "_session_exists",
             |mut caller: Caller<'_, WasmState>, id_ptr: i32, id_len: i32| -> i32 {
+                if !check_bridge_permission(&caller, "_session_exists") {
+                    return 0;
+                }
                 let session_id = match read_raw_string(&mut caller, id_ptr, id_len) {
                     Some(s) => s,
                     None => return 0,
@@ -864,6 +888,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
              name_ptr: i32,
              value_ptr: i32|
              -> i32 {
+                if !check_bridge_permission(&caller, "_http_set_cookie") {
+                    return 0;
+                }
                 let name = match read_string_from_caller(&mut caller, name_ptr) {
                     Some(s) => s,
                     None => {
@@ -902,6 +929,9 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
             "env",
             "_roles_register",
             |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32| -> i32 {
+                if !check_bridge_permission(&caller, "_roles_register") {
+                    return 0;
+                }
                 let config_json = match read_raw_string(&mut caller, json_ptr, json_len) {
                     Some(s) => s,
                     None => {
@@ -932,6 +962,9 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
              perm_ptr: i32,
              perm_len: i32|
              -> i32 {
+                if !check_bridge_permission(&caller, "_role_has_permission") {
+                    return 0;
+                }
                 let role = match read_raw_string(&mut caller, role_ptr, role_len) {
                     Some(s) => s,
                     None => return 0,
@@ -958,6 +991,9 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
             "env",
             "_role_get_permissions",
             |mut caller: Caller<'_, WasmState>, role_ptr: i32, role_len: i32| -> i32 {
+                if !check_bridge_permission(&caller, "_role_get_permissions") {
+                    return write_string_to_caller(&mut caller, "[]");
+                }
                 let role = match read_raw_string(&mut caller, role_ptr, role_len) {
                     Some(s) => s,
                     None => return write_string_to_caller(&mut caller, "[]"),
@@ -987,6 +1023,9 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             "env",
             "_auth_get_session",
             |mut caller: Caller<'_, WasmState>| -> i32 {
+                if !check_bridge_permission(&caller, "_auth_get_session") {
+                    return write_string_to_caller(&mut caller, "null");
+                }
                 let session_json = {
                     let state = caller.data();
                     if let Some(auth) = &state.auth_context {
@@ -1096,6 +1135,9 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             "env",
             "_auth_set_session",
             |mut caller: Caller<'_, WasmState>, data_ptr: i32, data_len: i32| -> i32 {
+                if !check_bridge_permission(&caller, "_auth_set_session") {
+                    return 0;
+                }
                 let data_json = match read_raw_string(&mut caller, data_ptr, data_len) {
                     Some(s) => s,
                     None => return 0,
@@ -1158,6 +1200,9 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             "env",
             "_auth_clear_session",
             |mut caller: Caller<'_, WasmState>| -> i32 {
+                if !check_bridge_permission(&caller, "_auth_clear_session") {
+                    return 0;
+                }
                 let session_id = {
                     let state = caller.data();
                     state
@@ -1349,6 +1394,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
              value_ptr: i32,
              value_len: i32|
              -> i32 {
+                if !check_bridge_permission(&caller, "_res_set_header") {
+                    return 0;
+                }
                 let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
                     None => {
@@ -1389,6 +1437,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
              url_len: i32,
              status_code: i32|
              -> i32 {
+                if !check_bridge_permission(&caller, "_res_redirect") {
+                    return 0;
+                }
                 let url = match read_raw_string(&mut caller, url_ptr, url_len) {
                     Some(s) => s,
                     None => {
@@ -1611,6 +1662,94 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_get: {}", e)))?;
+
+    Ok(())
+}
+
+/// Register island component functions (_island_register)
+fn register_islands_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _island_register - Register an island component for client-side hydration
+    //
+    // Parameters:
+    //   component_ptr/len - Component name identifier (e.g. "Counter")
+    //   module_ptr/len    - URL path to the island's WASM module (e.g. "/islands/counter.wasm")
+    //   hydration_ptr/len - Hydration strategy: "on" | "visible" | "idle" | "only"
+    //
+    // Returns: 0 on success, -1 if the hydration mode is invalid
+    linker
+        .func_wrap(
+            "env",
+            "_island_register",
+            |mut caller: Caller<'_, WasmState>,
+             component_ptr: i32,
+             component_len: i32,
+             module_ptr: i32,
+             module_len: i32,
+             hydration_ptr: i32,
+             hydration_len: i32|
+             -> i32 {
+                let component = match read_raw_string(&mut caller, component_ptr, component_len) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => {
+                        error!("_island_register: Failed to read component name or component name is empty");
+                        return -1;
+                    }
+                };
+
+                let module_path = match read_raw_string(&mut caller, module_ptr, module_len) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => {
+                        error!("_island_register: Failed to read module path or module path is empty");
+                        return -1;
+                    }
+                };
+
+                let hydration = match read_raw_string(&mut caller, hydration_ptr, hydration_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_island_register: Failed to read hydration mode");
+                        return -1;
+                    }
+                };
+
+                // Validate hydration strategy — only recognised modes are permitted
+                match hydration.as_str() {
+                    "on" | "visible" | "idle" | "only" => {}
+                    other => {
+                        error!(
+                            "_island_register: Invalid hydration mode '{}' for component '{}'. \
+                             Must be one of: on, visible, idle, only",
+                            other, component
+                        );
+                        return -1;
+                    }
+                }
+
+                info!(
+                    "_island_register: component='{}', module='{}', hydration='{}'",
+                    component, module_path, hydration
+                );
+
+                let entry = IslandEntry {
+                    component,
+                    module: module_path,
+                    hydration,
+                };
+
+                let islands_store = caller.data().islands_store.clone();
+                match islands_store.write() {
+                    Ok(mut store) => {
+                        store.islands.push(entry);
+                        0 // success
+                    }
+                    Err(e) => {
+                        error!("_island_register: Failed to acquire islands store lock: {}", e);
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _island_register: {}", e)))?;
 
     Ok(())
 }

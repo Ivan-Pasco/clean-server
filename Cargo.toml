@@ -1,6 +1,6 @@
 [package]
 name = "clean-server"
-version = "1.8.11"
+version = "1.9.0"
 edition = "2024"
 authors = ["Ivan Pasco"]
 license = "MIT OR Apache-2.0"
@@ -49,6 +49,9 @@ parking_lot = "0.12"
 dashmap = "6.0"
 url = "2.5"
 futures = "0.3"
+
+# WASM binary parsing (for custom section extraction)
+wasmparser = "0.218"
 
 # Local dependencies
 host-bridge = { path = "./host-bridge" }
