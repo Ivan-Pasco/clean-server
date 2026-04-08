@@ -81,20 +81,20 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_listen: {}", e)))?;
 
     // _http_route - Register a route handler
+    // Signature: (method_ptr: i32, path_ptr: i32, handler_idx: i32) -> i32
+    // Strings are length-prefixed pointers (compiler expand_strings with handler type)
     linker
         .func_wrap(
             "env",
             "_http_route",
             |mut caller: Caller<'_, WasmState>,
              method_ptr: i32,
-             method_len: i32,
              path_ptr: i32,
-             path_len: i32,
              handler_idx: i32|
              -> i32 {
-                let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                let method_str = read_string_from_caller(&mut caller, method_ptr)
                     .unwrap_or_else(|| "GET".to_string());
-                let path = read_raw_string(&mut caller, path_ptr, path_len)
+                let path = read_string_from_caller(&mut caller, path_ptr)
                     .unwrap_or_else(|| "/".to_string());
 
                 debug!(
@@ -125,24 +125,23 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_route: {}", e)))?;
 
     // _http_route_protected - Register a protected route requiring authentication
+    // Signature: (method_ptr: i32, path_ptr: i32, handler_idx: i32, role_ptr: i32) -> i32
+    // Strings are length-prefixed pointers (compiler expand_strings with handler type)
     linker
         .func_wrap(
             "env",
             "_http_route_protected",
             |mut caller: Caller<'_, WasmState>,
              method_ptr: i32,
-             method_len: i32,
              path_ptr: i32,
-             path_len: i32,
              handler_idx: i32,
-             role_ptr: i32,
-             role_len: i32|
+             role_ptr: i32|
              -> i32 {
-                let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                let method_str = read_string_from_caller(&mut caller, method_ptr)
                     .unwrap_or_else(|| "GET".to_string());
-                let path = read_raw_string(&mut caller, path_ptr, path_len)
+                let path = read_string_from_caller(&mut caller, path_ptr)
                     .unwrap_or_else(|| "/".to_string());
-                let required_role = read_raw_string(&mut caller, role_ptr, role_len)
+                let required_role = read_string_from_caller(&mut caller, role_ptr)
                     .filter(|s| !s.is_empty());
 
                 debug!(

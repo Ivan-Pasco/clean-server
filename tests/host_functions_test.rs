@@ -742,28 +742,28 @@ impl TestServer {
 #[tokio::test]
 async fn test_guard_redirect_returns_302() {
     // WAT module: handler calls _res_redirect("/login", 302) then returns ""
-    // Memory layout:
-    //   0..2:   "GET" (3 bytes)
-    //   16..25: "/dashboard" (10 bytes)
-    //   32..37: "/login" (6 bytes)
+    // Memory layout (length-prefixed strings for _http_route):
+    //   0..6:   len-prefixed "GET" (\03\00\00\00 + "GET")
+    //   16..29: len-prefixed "/dashboard" (\0a\00\00\00 + "/dashboard")
+    //   32..37: "/login" (6 bytes, raw for _res_redirect)
     //   48..51: length-prefixed empty string (4 zero bytes = len 0)
     let wat = r#"
     (module
-      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32) (result i32)))
       (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
       (import "env" "_res_redirect" (func $res_redirect (param i32 i32 i32) (result i32)))
 
       (memory (export "memory") 1)
 
-      (data (i32.const 0) "GET")
-      (data (i32.const 16) "/dashboard")
+      (data (i32.const 0) "\03\00\00\00GET")
+      (data (i32.const 16) "\0a\00\00\00/dashboard")
       (data (i32.const 32) "/login")
       (data (i32.const 48) "\00\00\00\00")
 
       (func (export "_start")
         (drop (call $http_route
-          (i32.const 0) (i32.const 3)
-          (i32.const 16) (i32.const 10)
+          (i32.const 0)
+          (i32.const 16)
           (i32.const 0)
         ))
         (drop (call $http_listen (i32.const 3000)))
@@ -831,28 +831,28 @@ async fn test_guard_redirect_returns_302() {
 
 #[tokio::test]
 async fn test_guard_redirect_301_permanent() {
-    // Memory layout:
-    //   0..2:   "GET" (3 bytes)
-    //   16..24: "/old-page" (9 bytes)
-    //   32..44: "/new-location" (13 bytes)
+    // Memory layout (length-prefixed strings for _http_route):
+    //   0..6:   len-prefixed "GET" (\03\00\00\00 + "GET")
+    //   16..28: len-prefixed "/old-page" (\09\00\00\00 + "/old-page")
+    //   32..44: "/new-location" (13 bytes, raw for _res_redirect)
     //   48..51: length-prefixed empty string
     let wat = r#"
     (module
-      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32) (result i32)))
       (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
       (import "env" "_res_redirect" (func $res_redirect (param i32 i32 i32) (result i32)))
 
       (memory (export "memory") 1)
 
-      (data (i32.const 0) "GET")
-      (data (i32.const 16) "/old-page")
+      (data (i32.const 0) "\03\00\00\00GET")
+      (data (i32.const 16) "\09\00\00\00/old-page")
       (data (i32.const 32) "/new-location")
       (data (i32.const 48) "\00\00\00\00")
 
       (func (export "_start")
         (drop (call $http_route
-          (i32.const 0) (i32.const 3)
-          (i32.const 16) (i32.const 9)
+          (i32.const 0)
+          (i32.const 16)
           (i32.const 0)
         ))
         (drop (call $http_listen (i32.const 3000)))
@@ -923,26 +923,26 @@ async fn test_guard_redirect_301_permanent() {
 async fn test_page_returns_html_content_type() {
     // Handler returns "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>"
     // which is 55 bytes = 0x37
-    // Memory layout:
-    //   0..2:    "GET" (3 bytes)
-    //   16..20:  "/page" (5 bytes)
+    // Memory layout (length-prefixed strings for _http_route):
+    //   0..6:    len-prefixed "GET" (\03\00\00\00 + "GET")
+    //   16..24:  len-prefixed "/page" (\05\00\00\00 + "/page")
     //   32..35:  LE u32 length = 55 (0x37, 0x00, 0x00, 0x00)
     //   36..90:  HTML string data
     let wat = r#"
     (module
-      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32) (result i32)))
       (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
 
       (memory (export "memory") 1)
 
-      (data (i32.const 0) "GET")
-      (data (i32.const 16) "/page")
+      (data (i32.const 0) "\03\00\00\00GET")
+      (data (i32.const 16) "\05\00\00\00/page")
       (data (i32.const 32) "\37\00\00\00<!DOCTYPE html><html><body><h1>Hello</h1></body></html>")
 
       (func (export "_start")
         (drop (call $http_route
-          (i32.const 0) (i32.const 3)
-          (i32.const 16) (i32.const 5)
+          (i32.const 0)
+          (i32.const 16)
           (i32.const 0)
         ))
         (drop (call $http_listen (i32.const 3000)))
@@ -1014,19 +1014,19 @@ async fn test_static_page_no_companion() {
     // which is 73 bytes = 0x49
     let wat = r#"
     (module
-      (import "env" "_http_route" (func $http_route (param i32 i32 i32 i32 i32) (result i32)))
+      (import "env" "_http_route" (func $http_route (param i32 i32 i32) (result i32)))
       (import "env" "_http_listen" (func $http_listen (param i32) (result i32)))
 
       (memory (export "memory") 1)
 
-      (data (i32.const 0) "GET")
-      (data (i32.const 16) "/about")
+      (data (i32.const 0) "\03\00\00\00GET")
+      (data (i32.const 16) "\06\00\00\00/about")
       (data (i32.const 32) "\49\00\00\00<html><head><title>Static</title></head><body>Static content</body></html>")
 
       (func (export "_start")
         (drop (call $http_route
-          (i32.const 0) (i32.const 3)
-          (i32.const 16) (i32.const 6)
+          (i32.const 0)
+          (i32.const 16)
           (i32.const 0)
         ))
         (drop (call $http_listen (i32.const 3000)))

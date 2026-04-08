@@ -181,25 +181,14 @@ fn test_compile_and_instantiate() {
     //   - Newer versions use `start:` (colon, no parentheses)
     // We try both to remain robust across installed compiler versions.
     let candidates: &[&str] = &[
-        // Newer compiler syntax (start:)
-        r#"start:
-	integer status = 0
-	status = _http_route("GET", "/test", 0)
-	integer listenStatus = _http_listen(3000)
+        // Production syntax: endpoints: DSL generates _http_route with handler signature
+        r#"plugins:
+	frame.server
 
-functions:
-	string __route_handler_0()
-		return _req_body()
-"#,
-        // Older compiler syntax (start())
-        r#"functions:
-	string __route_handler_0()
-		return _req_body()
-
-start()
-	integer status = 0
-	status = _http_route("GET", "/test", 0)
-	integer listenStatus = _http_listen(3000)
+endpoints server:
+	GET "/test" :
+		handle :
+			return _req_body()
 "#,
     ];
 
@@ -219,6 +208,7 @@ start()
         let compile_output = Command::new(&cln_path)
             .args([
                 "compile",
+                "--plugins",
                 source_path.to_str().unwrap(),
                 "-o",
                 wasm_path.to_str().unwrap(),
@@ -229,9 +219,8 @@ start()
         if compile_output.status.success() && wasm_path.exists() {
             eprintln!(
                 "test_compile_and_instantiate: Compiled successfully using \
-                 candidate syntax {} ({})",
+                 candidate syntax {} (endpoints:)",
                 attempt + 1,
-                if attempt == 0 { "start:" } else { "start()" }
             );
 
             let engine = Engine::default();
@@ -500,11 +489,12 @@ const FULL_CONTRACT_WAT: &str = r#"
   ;; _http_listen: (port: i32) -> i32
   (import "env" "_http_listen" (func (param i32) (result i32)))
 
-  ;; _http_route: (method_ptr, method_len, path_ptr, path_len, handler_idx) -> i32
-  (import "env" "_http_route" (func (param i32 i32 i32 i32 i32) (result i32)))
+  ;; _http_route: (method_ptr, path_ptr, handler_idx) -> i32
+  ;; Strings are length-prefixed pointers (compiler expand_strings with handler type)
+  (import "env" "_http_route" (func (param i32 i32 i32) (result i32)))
 
-  ;; _http_route_protected: (..., handler_idx, role_ptr, role_len) -> i32
-  (import "env" "_http_route_protected" (func (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  ;; _http_route_protected: (method_ptr, path_ptr, handler_idx, role_ptr) -> i32
+  (import "env" "_http_route_protected" (func (param i32 i32 i32 i32) (result i32)))
 
   ;; _http_serve_static: (prefix_ptr, prefix_len, dir_ptr, dir_len) -> i32
   (import "env" "_http_serve_static" (func (param i32 i32 i32 i32) (result i32)))
