@@ -10,7 +10,7 @@
 //!
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
-use super::helpers::{read_string_from_caller, write_string_to_caller};
+use super::helpers::{read_raw_string, read_string_from_caller, write_string_to_caller};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use wasmtime::{Caller, Linker};
@@ -437,6 +437,46 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let s = read_string_from_caller(&mut caller, ptr).unwrap_or_default();
             let lower = s.trim().to_lowercase();
             if lower == "true" || lower == "1" || lower == "yes" { 1 } else { 0 }
+        },
+    )?;
+
+    // =========================================
+    // HTML Escape / Raw (plugin: frame.ui)
+    // =========================================
+
+    // _html_escape - Escape HTML special characters for safe interpolation
+    // Signature: (ptr: i32, len: i32) -> i32
+    // Used by {var} interpolation in html: blocks
+    linker.func_wrap(
+        "env",
+        "_html_escape",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| -> i32 {
+            let s = match read_raw_string(&mut caller, ptr, len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let escaped = s
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&#039;");
+            write_string_to_caller(&mut caller, &escaped)
+        },
+    )?;
+
+    // _html_raw - Pass-through string for raw HTML insertion
+    // Signature: (ptr: i32, len: i32) -> i32
+    // Used by {!var} interpolation in html: blocks
+    linker.func_wrap(
+        "env",
+        "_html_raw",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| -> i32 {
+            let s = match read_raw_string(&mut caller, ptr, len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            write_string_to_caller(&mut caller, &s)
         },
     )?;
 
