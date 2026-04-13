@@ -21,7 +21,7 @@ Instead:
 
 1. **Document the issue** by creating a prompt/task description
 2. **Save the prompt** in a file that can be executed by the AI instance working in the correct folder
-3. **Location for cross-component prompts**: Save prompts in `../system-documents/cross-component-prompts/` at the project root
+3. **Location for cross-component prompts**: Save prompts in `../management/cross-component-prompts/` at the project root
 
 ### Prompt Format for Cross-Component Issues
 

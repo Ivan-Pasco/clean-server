@@ -624,7 +624,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                     // Build JSON object with key-value pair
                     let session_store = caller.data().session_store.clone();
                     let existing = {
-                        let mut store = session_store.write().unwrap();
+                        let mut store = session_store.write().expect("session store lock poisoned");
                         store.get_raw(&session_id)
                     };
 
@@ -639,7 +639,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                 };
 
                 let session_store = caller.data().session_store.clone();
-                let mut store = session_store.write().unwrap();
+                let mut store = session_store.write().expect("session store lock poisoned");
                 if store.store_raw(&session_id, &data) { 1 } else { 0 }
             },
         )
@@ -689,7 +689,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
 
                 let session_store = caller.data().session_store.clone();
                 let data = {
-                    let mut store = session_store.write().unwrap();
+                    let mut store = session_store.write().expect("session store lock poisoned");
                     store.get_raw(&session_id)
                 };
 
@@ -751,7 +751,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
 
                 let session_store = caller.data().session_store.clone();
                 let deleted = {
-                    let mut store = session_store.write().unwrap();
+                    let mut store = session_store.write().expect("session store lock poisoned");
                     store.delete_raw(&session_id)
                 };
 
@@ -777,7 +777,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                 };
 
                 let session_store = caller.data().session_store.clone();
-                let store = session_store.read().unwrap();
+                let store = session_store.read().expect("session store lock poisoned");
                 if store.exists_raw(&session_id) { 1 } else { 0 }
             },
         )
@@ -830,7 +830,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
 
                 debug!("_session_set_csrf: Setting CSRF for session {}", session_id);
                 let session_store = caller.data().session_store.clone();
-                let mut store = session_store.write().unwrap();
+                let mut store = session_store.write().expect("session store lock poisoned");
                 store.set_csrf(&session_id, &token);
                 1
             },
@@ -874,7 +874,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                 };
 
                 let session_store = caller.data().session_store.clone();
-                let store = session_store.read().unwrap();
+                let store = session_store.read().expect("session store lock poisoned");
                 let token = store.get_csrf(&session_id).unwrap_or_default();
                 write_string_to_caller(&mut caller, &token)
             },
@@ -947,7 +947,7 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
                 debug!("_roles_register: {}", config_json);
 
                 let roles_store = caller.data().roles_store.clone();
-                let mut store = roles_store.write().unwrap();
+                let mut store = roles_store.write().expect("roles store lock poisoned");
                 if store.register(&config_json) { 1 } else { 0 }
             },
         )
@@ -979,7 +979,7 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
                 };
 
                 let roles_store = caller.data().roles_store.clone();
-                let store = roles_store.read().unwrap();
+                let store = roles_store.read().expect("roles store lock poisoned");
                 if store.has_permission(&role, &permission) { 1 } else { 0 }
             },
         )
@@ -1004,7 +1004,7 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
                 };
 
                 let roles_store = caller.data().roles_store.clone();
-                let store = roles_store.read().unwrap();
+                let store = roles_store.read().expect("roles store lock poisoned");
                 let permissions = store.get_permissions(&role);
                 let json = serde_json::to_string(&permissions).unwrap_or_else(|_| "[]".to_string());
 
@@ -1176,14 +1176,14 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
                 let session_store = caller.data().session_store.clone();
 
                 let session = {
-                    let mut store = session_store.write().unwrap();
+                    let mut store = session_store.write().expect("session store lock poisoned");
                     store.create(user_id, &role, &claims)
                 };
 
                 let session_id = session.session_id.clone();
 
                 let set_cookie = {
-                    let store = session_store.read().unwrap();
+                    let store = session_store.read().expect("session store lock poisoned");
                     store.format_cookie(&session_id)
                 };
 
@@ -1242,12 +1242,12 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
                 let session_store = caller.data().session_store.clone();
 
                 {
-                    let mut store = session_store.write().unwrap();
+                    let mut store = session_store.write().expect("session store lock poisoned");
                     store.delete(&session_id);
                 }
 
                 let clear_cookie = {
-                    let store = session_store.read().unwrap();
+                    let store = session_store.read().expect("session store lock poisoned");
                     store.format_clear_cookie()
                 };
 

@@ -286,7 +286,7 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     }
 
     // Collect static dirs registered during initialization
-    let static_dirs = wasm.static_dirs().read().unwrap().clone();
+    let static_dirs = wasm.static_dirs().read().expect("store lock poisoned").clone();
     for (prefix, dir) in &static_dirs {
         info!("Serving static files: {} -> {}", prefix, dir);
     }
@@ -294,7 +294,7 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     // Collect islands registered during initialization
     let islands_store = wasm.islands_store().clone();
     {
-        let store = islands_store.read().unwrap();
+        let store = islands_store.read().expect("store lock poisoned");
         if store.islands.is_empty() {
             info!("No island components registered");
         } else {
@@ -384,7 +384,7 @@ async fn serve_islands_manifest(State(state): State<AppState>) -> Response {
         islands: &'a Vec<crate::wasm::IslandEntry>,
     }
 
-    let store = state.islands_store.read().unwrap();
+    let store = state.islands_store.read().expect("store lock poisoned");
     let manifest = Manifest {
         islands: &store.islands,
     };
@@ -395,14 +395,14 @@ async fn serve_islands_manifest(State(state): State<AppState>) -> Response {
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::CACHE_CONTROL, "no-cache")
             .body(Body::from(json))
-            .unwrap(),
+            .expect("response builder"),
         Err(e) => {
             error!("Failed to serialize islands manifest: {}", e);
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"error":"Failed to generate islands manifest"}"#))
-                .unwrap()
+                .expect("response builder")
         }
     }
 }
@@ -419,7 +419,7 @@ async fn serve_loader_js() -> Response {
         .header(header::CONTENT_TYPE, "application/javascript")
         .header(header::CACHE_CONTROL, "public, max-age=3600")
         .body(Body::from(LOADER_JS))
-        .unwrap()
+        .expect("response builder")
 }
 
 /// Handle all incoming requests
@@ -476,7 +476,7 @@ async fn handle_request(
                 .status(StatusCode::UNAUTHORIZED)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"ok":false,"error":"Unauthorized"}"#))
-                .unwrap();
+                .expect("response builder");
         }
 
         // Check role if required
@@ -496,7 +496,7 @@ async fn handle_request(
                     .status(StatusCode::FORBIDDEN)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"ok":false,"error":"Forbidden"}"#))
-                    .unwrap();
+                    .expect("response builder");
             }
         }
     }
@@ -554,7 +554,7 @@ async fn handle_request(
                     builder = builder.header(name.as_str(), value.as_str());
                 }
 
-                return builder.body(Body::empty()).unwrap();
+                return builder.body(Body::empty()).expect("response builder");
             }
 
             // Determine content type based on response
@@ -582,7 +582,7 @@ async fn handle_request(
                 builder = builder.header(name.as_str(), value.as_str());
             }
 
-            builder.body(Body::from(handler_response.body)).unwrap()
+            builder.body(Body::from(handler_response.body)).expect("response builder")
         }
         Err(e) => {
             error!("Handler error: {}", e);
@@ -595,7 +595,7 @@ async fn handle_request(
                 )
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(http_err.to_json().to_string()))
-                .unwrap()
+                .expect("response builder")
         }
     }
 }
@@ -618,7 +618,7 @@ fn extract_auth_from_headers(
 
         if let Some(session_id) = session_id {
             // Look up session
-            let mut store = session_store.write().unwrap();
+            let mut store = session_store.write().expect("store lock poisoned");
             if let Some(session) = store.get(session_id) {
                 debug!("Found valid session {} for user {}", session.session_id, session.user_id);
                 return Some(AuthContext {
