@@ -7,10 +7,55 @@
 
 use super::state::WasmStateCore;
 use tracing::{debug, error};
-use wasmtime::Caller;
+use wasmtime::{Caller, Memory};
 
 /// Clean string format: [4-byte little-endian length][UTF-8 bytes]
 pub const STRING_LENGTH_PREFIX_SIZE: usize = 4;
+
+/// Ensure WASM memory is large enough for a write at the given offset + size.
+/// Grows memory if needed. Returns true on success, false if growth fails.
+fn ensure_memory_capacity<T>(
+    store: &mut T,
+    memory: &Memory,
+    offset: usize,
+    size: usize,
+) -> bool
+where
+    T: wasmtime::AsContextMut,
+{
+    let required = offset + size;
+    let current_size = memory.data_size(&*store);
+
+    if required > current_size {
+        let required_pages = ((required + 65535) / 65536) as u64;
+        let current_pages = memory.size(&*store);
+        let pages_to_grow = required_pages.saturating_sub(current_pages);
+
+        if pages_to_grow > 0 {
+            debug!(
+                "ensure_memory_capacity: growing memory from {} to {} pages (required {} bytes)",
+                current_pages, required_pages, required
+            );
+            match memory.grow(&mut *store, pages_to_grow) {
+                Ok(prev) => {
+                    debug!(
+                        "ensure_memory_capacity: grew from {} to {} pages",
+                        prev,
+                        prev + pages_to_grow
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "ensure_memory_capacity: failed to grow memory by {} pages: {}",
+                        pages_to_grow, e
+                    );
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
 
 /// Read a Clean Language string from WASM memory
 ///
@@ -184,6 +229,12 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
         }
     };
 
+    // Ensure memory is large enough for the write (WASM malloc doesn't grow memory)
+    if !ensure_memory_capacity(caller, &memory, ptr, total_size) {
+        error!("write_string_to_caller: Failed to ensure memory capacity for {} bytes at ptr={}", total_size, ptr);
+        return 0;
+    }
+
     // Write length prefix (4 bytes, little-endian)
     let len_bytes = (len as u32).to_le_bytes();
     if let Err(e) = memory.write(&mut *caller, ptr, &len_bytes) {
@@ -288,6 +339,12 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
             return 0;
         }
     };
+
+    // Ensure memory is large enough for the write (WASM malloc doesn't grow memory)
+    if !ensure_memory_capacity(caller, &memory, ptr, total_size) {
+        error!("write_bytes_to_caller: Failed to ensure memory capacity for {} bytes at ptr={}", total_size, ptr);
+        return 0;
+    }
 
     // Write length prefix
     let len_bytes = (len as u32).to_le_bytes();
