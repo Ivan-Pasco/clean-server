@@ -4,6 +4,7 @@
 
 use crate::bridge::create_linker;
 use crate::error::{RuntimeError, RuntimeResult};
+use crate::error_reporting::{self, WasmParseReport};
 use crate::permissions::{PermissionGate, parse_permissions};
 use crate::router::SharedRouter;
 use crate::session::{SessionConfig, SharedSessionStore, create_session_store};
@@ -382,7 +383,9 @@ impl WasmInstance {
             RuntimeError::wasm(format!("Failed to read WASM file {:?}: {}", wasm_path, e))
         })?;
 
-        Self::from_bytes(&wasm_bytes, router)
+        let db_bridge = Arc::new(TokioRwLock::new(DbBridge::new()));
+        let session_store = create_session_store(SessionConfig::default());
+        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path))
     }
 
     /// Load a WASM module from a file with a custom database bridge
@@ -397,7 +400,8 @@ impl WasmInstance {
             RuntimeError::wasm(format!("Failed to read WASM file {:?}: {}", wasm_path, e))
         })?;
 
-        Self::from_bytes_with_db(&wasm_bytes, router, db_bridge)
+        let session_store = create_session_store(SessionConfig::default());
+        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path))
     }
 
     /// Load a WASM module from bytes
@@ -423,6 +427,21 @@ impl WasmInstance {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
     ) -> RuntimeResult<Self> {
+        Self::from_bytes_inner(wasm_bytes, router, db_bridge, session_store, None)
+    }
+
+    /// Internal loader that carries the optional source path for error reporting.
+    ///
+    /// Public `from_bytes_*` entry points have no path to report; the
+    /// file-based `load*` entry points pass `Some(path)` so that
+    /// `RUNTIME_WASM_PARSE` diagnostics include the originating file.
+    fn from_bytes_inner(
+        wasm_bytes: &[u8],
+        router: SharedRouter,
+        db_bridge: SharedDbBridge,
+        session_store: SharedSessionStore,
+        module_path: Option<&Path>,
+    ) -> RuntimeResult<Self> {
         // Parse the clean:permissions custom section before compiling so we
         // have the gate available before any bridge function can be called.
         let permission_gate = parse_permissions(wasm_bytes, "main");
@@ -439,9 +458,31 @@ impl WasmInstance {
         // Create engine
         let engine = Engine::default();
 
-        // Compile module
-        let module = Module::new(&engine, wasm_bytes)
-            .map_err(|e| RuntimeError::wasm(format!("Failed to compile WASM module: {}", e)))?;
+        // Compile module. When wasmtime rejects the bytes, assemble a
+        // structured diagnostic bundle (see `error_reporting`) before
+        // surfacing the error so the compiler team can reproduce the
+        // bug from the on-disk report.
+        let module = Module::new(&engine, wasm_bytes).map_err(|e| {
+            let report = WasmParseReport::new(wasm_bytes, &e, module_path);
+            let diag_root = error_reporting::diag_dir();
+            match report.emit(wasm_bytes, &diag_root) {
+                Ok(path) => warn!(
+                    "Wrote RUNTIME_WASM_PARSE diagnostic to {:?} (sha={})",
+                    path,
+                    report.short_fingerprint()
+                ),
+                Err(io_err) => warn!(
+                    "Failed to persist RUNTIME_WASM_PARSE diagnostic: {}",
+                    io_err
+                ),
+            }
+            RuntimeError::wasm(format!(
+                "Failed to compile WASM module [diag: {}]: {}. Run `clean-server errors show {}` for details.",
+                report.short_fingerprint(),
+                e,
+                report.short_fingerprint()
+            ))
+        })?;
 
         debug!("WASM module compiled successfully");
 
