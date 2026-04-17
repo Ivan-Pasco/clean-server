@@ -306,7 +306,7 @@ fn ensure_memory_size<T>(
         let target = required
             .max(current_size * 3 / 2)
             .max(current_size + 4 * PAGE_SIZE);
-        let target_pages = ((target + PAGE_SIZE - 1) / PAGE_SIZE) as u64;
+        let target_pages = target.div_ceil(PAGE_SIZE) as u64;
         let pages_to_grow = target_pages.saturating_sub(current_pages);
 
         if pages_to_grow > 0 {
