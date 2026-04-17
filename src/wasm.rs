@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, info, warn};
-use wasmtime::{Engine, Instance, Module, Store};
+use wasmtime::{Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 /// Shared database bridge type
 pub type SharedDbBridge = Arc<TokioRwLock<DbBridge>>;
@@ -138,6 +138,8 @@ pub struct WasmState {
     /// Bridge function permission gate derived from the `clean:permissions`
     /// custom section of the loaded WASM module.
     pub permission_gate: PermissionGate,
+    /// Resource limits for this Store (memory, tables, instances)
+    pub limits: StoreLimits,
 }
 
 /// Request context passed to handlers
@@ -174,6 +176,20 @@ pub struct HandlerResponse {
     pub status: Option<u16>,
 }
 
+/// Build StoreLimits from a memory limit in bytes
+fn build_store_limits(memory_limit: usize) -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(memory_limit)
+        .trap_on_grow_failure(true)
+        .instances(1)
+        .tables(10)
+        .memories(1)
+        .build()
+}
+
+/// Default memory limit: 32 MB (standard tier)
+const DEFAULT_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
+
 impl WasmState {
     pub fn new(router: SharedRouter) -> Self {
         Self {
@@ -195,6 +211,7 @@ impl WasmState {
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
             permission_gate: PermissionGate::allow_all(),
+            limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
         }
     }
 
@@ -218,6 +235,7 @@ impl WasmState {
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
             permission_gate: PermissionGate::allow_all(),
+            limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
         }
     }
 
@@ -228,6 +246,7 @@ impl WasmState {
         static_dirs: SharedStaticDirs,
         islands_store: SharedIslandsStore,
         permission_gate: PermissionGate,
+        memory_limit: usize,
     ) -> Self {
         Self {
             memory: WasmMemory::new(),
@@ -248,6 +267,7 @@ impl WasmState {
             static_dirs,
             islands_store,
             permission_gate,
+            limits: build_store_limits(memory_limit),
         }
     }
 
@@ -371,6 +391,8 @@ pub struct WasmInstance {
     islands_store: SharedIslandsStore,
     /// Bridge function permission gate parsed from the loaded WASM binary
     permission_gate: PermissionGate,
+    /// Memory limit in bytes for each Store
+    memory_limit: usize,
 }
 
 impl WasmInstance {
@@ -385,7 +407,7 @@ impl WasmInstance {
 
         let db_bridge = Arc::new(TokioRwLock::new(DbBridge::new()));
         let session_store = create_session_store(SessionConfig::default());
-        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path))
+        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path), DEFAULT_MEMORY_LIMIT)
     }
 
     /// Load a WASM module from a file with a custom database bridge
@@ -394,6 +416,16 @@ impl WasmInstance {
         router: SharedRouter,
         db_bridge: SharedDbBridge,
     ) -> RuntimeResult<Self> {
+        Self::load_with_db_and_limit(wasm_path, router, db_bridge, DEFAULT_MEMORY_LIMIT)
+    }
+
+    /// Load a WASM module from a file with a custom database bridge and memory limit
+    pub fn load_with_db_and_limit(
+        wasm_path: &Path,
+        router: SharedRouter,
+        db_bridge: SharedDbBridge,
+        memory_limit: usize,
+    ) -> RuntimeResult<Self> {
         info!("Loading WASM module from {:?}", wasm_path);
 
         let wasm_bytes = std::fs::read(wasm_path).map_err(|e| {
@@ -401,7 +433,7 @@ impl WasmInstance {
         })?;
 
         let session_store = create_session_store(SessionConfig::default());
-        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path))
+        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path), memory_limit)
     }
 
     /// Load a WASM module from bytes
@@ -427,7 +459,7 @@ impl WasmInstance {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
     ) -> RuntimeResult<Self> {
-        Self::from_bytes_inner(wasm_bytes, router, db_bridge, session_store, None)
+        Self::from_bytes_inner(wasm_bytes, router, db_bridge, session_store, None, DEFAULT_MEMORY_LIMIT)
     }
 
     /// Internal loader that carries the optional source path for error reporting.
@@ -441,6 +473,7 @@ impl WasmInstance {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
         module_path: Option<&Path>,
+        memory_limit: usize,
     ) -> RuntimeResult<Self> {
         // Parse the clean:permissions custom section before compiling so we
         // have the gate available before any bridge function can be called.
@@ -501,6 +534,7 @@ impl WasmInstance {
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
             permission_gate,
+            memory_limit,
         })
     }
 
@@ -513,8 +547,10 @@ impl WasmInstance {
             self.static_dirs.clone(),
             self.islands_store.clone(),
             self.permission_gate.clone(),
+            self.memory_limit,
         );
         let mut store = Store::new(&self.engine, state);
+        store.limiter(|state| &mut state.limits);
 
         let instance = self
             .linker
@@ -549,15 +585,15 @@ impl WasmInstance {
         // Create an instance specifically for initialization
         let (mut store, instance) = self.create_instance()?;
 
-        // Read the heap pointer from WASM Global[0], NOT from memory[0]
-        // Clean Language native malloc stores heap_ptr in Global index 0, initialized to 65536
-        if let Some(heap_global) = instance.get_global(&mut store, "__heap_ptr") {
-            let heap_ptr = heap_global.get(&mut store).i32().unwrap_or(-1);
-            info!("Initial heap pointer from __heap_ptr global: {}", heap_ptr);
-        } else {
-            // Fallback: try to read from exported global or log that it's not available
-            info!("No __heap_ptr global exported - heap pointer tracking unavailable");
-        }
+        // Read __heap_ptr from WASM exports and use it as the authoritative heap start.
+        // This avoids hardcoding 65536 and respects the compiler's actual data layout.
+        let heap_ptr = instance
+            .get_global(&mut store, "__heap_ptr")
+            .and_then(|g| g.get(&mut store).i32())
+            .unwrap_or(65536) as usize; // fallback for old modules
+
+        info!("Initial heap pointer from __heap_ptr: {} (0x{:x})", heap_ptr, heap_ptr);
+        store.data_mut().memory.set_offset(heap_ptr);
 
         // Try different entry point names
         let entry_names = ["main", "_start", "start", "init"];
@@ -793,6 +829,17 @@ pub fn create_shared_instance_with_db(
     db_bridge: SharedDbBridge,
 ) -> RuntimeResult<SharedWasmInstance> {
     let instance = WasmInstance::load_with_db(wasm_path, router, db_bridge)?;
+    Ok(Arc::new(instance))
+}
+
+/// Create a shared WASM instance with a database bridge and memory limit
+pub fn create_shared_instance_with_config(
+    wasm_path: &Path,
+    router: SharedRouter,
+    db_bridge: SharedDbBridge,
+    memory_limit: usize,
+) -> RuntimeResult<SharedWasmInstance> {
+    let instance = WasmInstance::load_with_db_and_limit(wasm_path, router, db_bridge, memory_limit)?;
     Ok(Arc::new(instance))
 }
 

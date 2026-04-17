@@ -4,6 +4,7 @@
 //! Clean Language uses length-prefixed strings: [4-byte length][UTF-8 data]
 
 use crate::error::{RuntimeError, RuntimeResult};
+use tracing::{debug, warn};
 use wasmtime::{Caller, Memory, Store};
 
 /// Clean string format: [4-byte little-endian length][UTF-8 bytes]
@@ -12,19 +13,31 @@ pub const STRING_LENGTH_PREFIX_SIZE: usize = 4;
 /// Minimum allocation alignment (8 bytes)
 pub const ALIGNMENT: usize = 8;
 
-/// Memory manager for WASM instance
+/// Memory manager for WASM instance (bump allocator)
 pub struct WasmMemory {
-    /// Current allocation offset (bump allocator)
+    /// Current allocation offset
     offset: usize,
+    /// Initial offset (read from __heap_ptr or default 65536)
+    initial_offset: usize,
+    /// Number of memory.grow() calls during this allocation cycle
+    grow_count: u32,
+    /// Peak allocation offset seen during this cycle
+    peak_offset: usize,
 }
 
 impl WasmMemory {
-    /// Create a new memory manager
+    /// Create a new memory manager with default 64KB initial offset
     pub fn new() -> Self {
+        Self::with_initial_offset(65536)
+    }
+
+    /// Create a new memory manager with a specific initial offset
+    pub fn with_initial_offset(initial_offset: usize) -> Self {
         Self {
-            // Start allocation after initial memory region to avoid
-            // overwriting WASM's own data structures
-            offset: 65536, // Start at 64KB
+            offset: initial_offset,
+            initial_offset,
+            grow_count: 0,
+            peak_offset: initial_offset,
         }
     }
 
@@ -33,17 +46,44 @@ impl WasmMemory {
         let ptr = self.offset;
         // Align to 8 bytes for safety
         self.offset = (self.offset + size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
+        if self.offset > self.peak_offset {
+            self.peak_offset = self.offset;
+        }
         ptr
     }
 
     /// Reset allocator (for between requests)
     pub fn reset(&mut self) {
-        self.offset = 65536;
+        self.offset = self.initial_offset;
+        self.grow_count = 0;
+        self.peak_offset = self.initial_offset;
+    }
+
+    /// Set the initial offset (e.g., from __heap_ptr)
+    pub fn set_offset(&mut self, offset: usize) {
+        self.initial_offset = offset;
+        self.offset = offset;
+        self.peak_offset = offset;
     }
 
     /// Get current allocation offset
     pub fn current_offset(&self) -> usize {
         self.offset
+    }
+
+    /// Record a memory.grow() event
+    pub fn record_grow(&mut self) {
+        self.grow_count += 1;
+    }
+
+    /// Get the number of memory.grow() calls this cycle
+    pub fn grow_count(&self) -> u32 {
+        self.grow_count
+    }
+
+    /// Get the peak allocation offset this cycle
+    pub fn peak_offset(&self) -> usize {
+        self.peak_offset
     }
 }
 
@@ -247,7 +287,11 @@ pub fn read_bytes_from_memory<T>(
     Ok(data[start..end].to_vec())
 }
 
-/// Ensure WASM memory is at least the specified size
+/// WASM page size in bytes (64KB)
+const PAGE_SIZE: usize = 65536;
+
+/// Ensure WASM memory is at least the specified size.
+/// Uses 1.5x amortized growth to reduce the number of memory.grow() calls.
 fn ensure_memory_size<T>(
     store: &mut Store<T>,
     memory: &Memory,
@@ -256,13 +300,31 @@ fn ensure_memory_size<T>(
     let current_size = memory.data_size(&*store);
 
     if required > current_size {
-        // Calculate required pages (64KB per page)
-        let required_pages = required.div_ceil(65536) as u64;
         let current_pages = memory.size(&*store);
-        let pages_to_grow = required_pages.saturating_sub(current_pages);
+
+        // 1.5x amortized growth with 4-page floor
+        let target = required
+            .max(current_size * 3 / 2)
+            .max(current_size + 4 * PAGE_SIZE);
+        let target_pages = ((target + PAGE_SIZE - 1) / PAGE_SIZE) as u64;
+        let pages_to_grow = target_pages.saturating_sub(current_pages);
 
         if pages_to_grow > 0 {
+            debug!(
+                event = "wasm_memory_grow",
+                current_pages = current_pages,
+                requested_pages = pages_to_grow,
+                new_total_pages = current_pages + pages_to_grow,
+                "ensure_memory_size: growing memory (required {} bytes)", required
+            );
+
             memory.grow(&mut *store, pages_to_grow).map_err(|e| {
+                warn!(
+                    event = "wasm_memory_oom",
+                    current_pages = current_pages,
+                    requested_pages = pages_to_grow,
+                    "Failed to grow memory: {}", e
+                );
                 RuntimeError::memory(format!(
                     "Failed to grow memory by {} pages: {}",
                     pages_to_grow, e
@@ -357,5 +419,31 @@ mod tests {
         // Next allocation should be aligned
         let ptr2 = mem.allocate(1);
         assert_eq!(ptr2, 65544); // 65536 + 8 (aligned)
+    }
+
+    #[test]
+    fn test_with_initial_offset() {
+        let mut mem = WasmMemory::with_initial_offset(131072);
+        let ptr1 = mem.allocate(100);
+        assert_eq!(ptr1, 131072);
+
+        mem.reset();
+        assert_eq!(mem.current_offset(), 131072);
+    }
+
+    #[test]
+    fn test_metrics() {
+        let mut mem = WasmMemory::new();
+        assert_eq!(mem.grow_count(), 0);
+        assert_eq!(mem.peak_offset(), 65536);
+
+        mem.allocate(1000);
+        assert!(mem.peak_offset() > 65536);
+
+        mem.record_grow();
+        assert_eq!(mem.grow_count(), 1);
+
+        mem.reset();
+        assert_eq!(mem.grow_count(), 0);
     }
 }

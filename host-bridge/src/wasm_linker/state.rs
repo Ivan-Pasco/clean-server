@@ -109,15 +109,28 @@ pub trait WasmStateCore: Send + 'static {
 pub struct WasmMemory {
     /// Current allocation offset
     offset: usize,
+    /// Initial offset (read from __heap_ptr or default 65536)
+    initial_offset: usize,
+    /// Number of memory.grow() calls during this allocation cycle
+    grow_count: u32,
+    /// Peak allocation offset seen during this cycle
+    peak_offset: usize,
 }
 
 impl WasmMemory {
-    /// Create a new memory manager
+    /// Create a new memory manager with default 64KB initial offset
     pub fn new() -> Self {
+        Self::with_initial_offset(65536)
+    }
+
+    /// Create a new memory manager with a specific initial offset
+    /// (typically read from the WASM module's __heap_ptr export)
+    pub fn with_initial_offset(initial_offset: usize) -> Self {
         Self {
-            // Start allocation after initial memory region (64KB)
-            // to avoid overwriting WASM's own data structures
-            offset: 65536,
+            offset: initial_offset,
+            initial_offset,
+            grow_count: 0,
+            peak_offset: initial_offset,
         }
     }
 
@@ -126,17 +139,49 @@ impl WasmMemory {
         let ptr = self.offset;
         // Align to 8 bytes for safety
         self.offset = (self.offset + size + 7) & !7;
+        if self.offset > self.peak_offset {
+            self.peak_offset = self.offset;
+        }
         ptr
     }
 
     /// Reset allocator (for between requests)
     pub fn reset(&mut self) {
-        self.offset = 65536;
+        self.offset = self.initial_offset;
+        self.grow_count = 0;
+        self.peak_offset = self.initial_offset;
+    }
+
+    /// Set the initial offset (e.g., from __heap_ptr)
+    pub fn set_offset(&mut self, offset: usize) {
+        self.initial_offset = offset;
+        self.offset = offset;
+        self.peak_offset = offset;
     }
 
     /// Get current allocation offset
     pub fn current_offset(&self) -> usize {
         self.offset
+    }
+
+    /// Get the initial offset
+    pub fn initial_offset(&self) -> usize {
+        self.initial_offset
+    }
+
+    /// Record a memory.grow() event
+    pub fn record_grow(&mut self) {
+        self.grow_count += 1;
+    }
+
+    /// Get the number of memory.grow() calls this cycle
+    pub fn grow_count(&self) -> u32 {
+        self.grow_count
+    }
+
+    /// Get the peak allocation offset this cycle
+    pub fn peak_offset(&self) -> usize {
+        self.peak_offset
     }
 }
 
@@ -414,6 +459,36 @@ mod tests {
         mem.reset();
         let ptr3 = mem.allocate(50);
         assert_eq!(ptr3, 65536);
+    }
+
+    #[test]
+    fn test_wasm_memory_with_initial_offset() {
+        let mut mem = WasmMemory::with_initial_offset(131072);
+        assert_eq!(mem.initial_offset(), 131072);
+
+        let ptr1 = mem.allocate(100);
+        assert_eq!(ptr1, 131072);
+
+        mem.reset();
+        assert_eq!(mem.current_offset(), 131072);
+    }
+
+    #[test]
+    fn test_wasm_memory_metrics() {
+        let mut mem = WasmMemory::new();
+        assert_eq!(mem.grow_count(), 0);
+        assert_eq!(mem.peak_offset(), 65536);
+
+        mem.allocate(1000);
+        assert!(mem.peak_offset() > 65536);
+
+        mem.record_grow();
+        mem.record_grow();
+        assert_eq!(mem.grow_count(), 2);
+
+        mem.reset();
+        assert_eq!(mem.grow_count(), 0);
+        assert_eq!(mem.peak_offset(), 65536);
     }
 
     #[test]

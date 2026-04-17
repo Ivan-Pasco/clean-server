@@ -86,7 +86,7 @@ pub mod wasm;
 // Re-exports for convenience
 pub use error::{HttpError, RuntimeError, RuntimeResult};
 pub use router::{HttpMethod, RouteHandler, Router, SharedRouter};
-pub use server::{ServerConfig, start_server};
+pub use server::{MemoryTier, ServerConfig, start_server};
 pub use session::{
     SessionConfig, SessionData, SessionStore, SharedSessionStore, create_session_store,
     parse_cookies,

@@ -27,6 +27,7 @@ use clap::{Parser, Subcommand};
 use clean_server::error_reporting::{
     self, ReportStatus, ReportSummary, WasmParseReport,
 };
+use clean_server::server::MemoryTier;
 use clean_server::{ServerConfig, start_server};
 use std::path::PathBuf;
 use tracing::{Level, error, info};
@@ -72,6 +73,14 @@ struct Args {
     /// Database connection pool size
     #[arg(long, default_value = "10")]
     db_pool_size: u32,
+
+    /// Max WASM memory per instance in MB (overrides --memory-tier)
+    #[arg(long, env = "CLEAN_MEMORY_LIMIT_MB")]
+    memory_limit: Option<usize>,
+
+    /// Memory budget tier: minimal (8MB), standard (32MB), large (128MB), xlarge (512MB)
+    #[arg(long, env = "CLEAN_MEMORY_TIER", default_value = "standard")]
+    memory_tier: String,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -184,10 +193,20 @@ async fn run_server_command(args: Args) -> Result<(), i32> {
         return Err(1);
     }
 
+    let memory_tier: MemoryTier = args.memory_tier.parse().unwrap_or_else(|e| {
+        error!("{}", e);
+        std::process::exit(1);
+    });
+
     let mut config = ServerConfig::default()
         .with_host(args.host)
         .with_port(args.port)
-        .with_database_pool_size(args.db_pool_size);
+        .with_database_pool_size(args.db_pool_size)
+        .with_memory_tier(memory_tier);
+
+    if let Some(mb) = args.memory_limit {
+        config = config.with_memory_limit_mb(mb);
+    }
 
     config.cors_enabled = !args.no_cors;
     config.body_limit = args.body_limit * 1024 * 1024;
@@ -208,6 +227,11 @@ async fn run_server_command(args: Args) -> Result<(), i32> {
         }
     );
     info!("  Body limit: {} MB", args.body_limit);
+    info!(
+        "  Memory: {} tier ({} MB limit)",
+        config.memory_tier,
+        config.effective_memory_limit() / (1024 * 1024)
+    );
     if config.database_url.is_some() {
         info!("  Database: configured");
     } else {

@@ -25,6 +25,58 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
+/// Memory budget tier for WASM instances
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryTier {
+    /// 8 MB — lightweight utilities, CLI tools
+    Minimal,
+    /// 32 MB — standard web applications (default)
+    Standard,
+    /// 128 MB — data-heavy workloads
+    Large,
+    /// 512 MB — maximum for special cases
+    XLarge,
+}
+
+impl MemoryTier {
+    /// Maximum bytes allowed for this tier
+    pub fn max_bytes(self) -> usize {
+        match self {
+            MemoryTier::Minimal => 8 * 1024 * 1024,
+            MemoryTier::Standard => 32 * 1024 * 1024,
+            MemoryTier::Large => 128 * 1024 * 1024,
+            MemoryTier::XLarge => 512 * 1024 * 1024,
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryTier {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "minimal" => Ok(MemoryTier::Minimal),
+            "standard" => Ok(MemoryTier::Standard),
+            "large" => Ok(MemoryTier::Large),
+            "xlarge" => Ok(MemoryTier::XLarge),
+            _ => Err(format!(
+                "Unknown memory tier '{}'. Valid tiers: minimal, standard, large, xlarge",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryTier::Minimal => write!(f, "minimal"),
+            MemoryTier::Standard => write!(f, "standard"),
+            MemoryTier::Large => write!(f, "large"),
+            MemoryTier::XLarge => write!(f, "xlarge"),
+        }
+    }
+}
+
 /// Server configuration
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -43,10 +95,24 @@ pub struct ServerConfig {
     pub database_url: Option<String>,
     /// Database pool max connections (default: 10)
     pub database_max_connections: u32,
+    /// Memory budget tier for WASM instances
+    pub memory_tier: MemoryTier,
+    /// Explicit memory limit in bytes (overrides tier if set)
+    pub memory_limit: Option<usize>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let memory_tier = std::env::var("CLEAN_MEMORY_TIER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(MemoryTier::Standard);
+
+        let memory_limit = std::env::var("CLEAN_MEMORY_LIMIT_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|mb| mb * 1024 * 1024);
+
         Self {
             host: "0.0.0.0".to_string(),
             port: 3000,
@@ -55,11 +121,18 @@ impl Default for ServerConfig {
             body_limit: 10 * 1024 * 1024, // 10MB
             database_url: std::env::var("DATABASE_URL").ok(),
             database_max_connections: 10,
+            memory_tier,
+            memory_limit,
         }
     }
 }
 
 impl ServerConfig {
+    /// Effective memory limit in bytes: explicit limit if set, otherwise tier default
+    pub fn effective_memory_limit(&self) -> usize {
+        self.memory_limit.unwrap_or_else(|| self.memory_tier.max_bytes())
+    }
+
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
         self
@@ -77,6 +150,16 @@ impl ServerConfig {
 
     pub fn with_database_pool_size(mut self, max_connections: u32) -> Self {
         self.database_max_connections = max_connections;
+        self
+    }
+
+    pub fn with_memory_tier(mut self, tier: MemoryTier) -> Self {
+        self.memory_tier = tier;
+        self
+    }
+
+    pub fn with_memory_limit_mb(mut self, mb: usize) -> Self {
+        self.memory_limit = Some(mb * 1024 * 1024);
         self
     }
 
@@ -265,8 +348,13 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         info!("No DATABASE_URL configured. Database features disabled.");
     }
 
-    // Load WASM module with database bridge
-    let wasm = crate::wasm::create_shared_instance_with_db(&wasm_path, router.clone(), db_bridge)?;
+    // Load WASM module with database bridge and memory limit
+    let wasm = crate::wasm::create_shared_instance_with_config(
+        &wasm_path,
+        router.clone(),
+        db_bridge,
+        config.effective_memory_limit(),
+    )?;
 
     // Initialize WASM module (registers routes and static dirs)
     wasm.initialize()?;

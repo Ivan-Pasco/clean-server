@@ -10,8 +10,11 @@
 
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use wasmtime::{Caller, Linker};
+
+/// WASM page size in bytes (64KB)
+const PAGE_SIZE: usize = 65536;
 
 /// Register all memory runtime functions with the linker
 pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
@@ -38,25 +41,42 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let state = caller.data_mut();
             let ptr = state.memory_mut().allocate(size);
 
-            // Ensure memory is large enough
+            // Ensure memory is large enough using 1.5x amortized growth
             let required = ptr + size;
             let current_size = memory.data_size(&caller);
 
             debug!("mem_alloc: size={}, ptr={}, required={}, current_size={}", size, ptr, required, current_size);
 
             if required > current_size {
-                // Calculate required pages (64KB per page)
-                let required_pages = ((required + 65535) / 65536) as u64;
                 let current_pages = memory.size(&caller);
-                let pages_to_grow = required_pages.saturating_sub(current_pages);
 
-                debug!("mem_alloc: growing from {} to {} pages", current_pages, required_pages);
+                // 1.5x amortized growth: grow by at least 1.5x current, at least 4 pages floor
+                let target = required
+                    .max(current_size * 3 / 2)
+                    .max(current_size + 4 * PAGE_SIZE);
+                let target_pages = ((target + PAGE_SIZE - 1) / PAGE_SIZE) as u64;
+                let pages_to_grow = target_pages.saturating_sub(current_pages);
 
                 if pages_to_grow > 0 {
+                    debug!(
+                        event = "wasm_memory_grow",
+                        current_pages = current_pages,
+                        requested_pages = pages_to_grow,
+                        new_total_pages = current_pages + pages_to_grow,
+                        "mem_alloc: growing memory"
+                    );
+
                     match memory.grow(&mut caller, pages_to_grow) {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            caller.data_mut().memory_mut().record_grow();
+                        }
                         Err(e) => {
-                            error!("mem_alloc: Failed to grow memory: {}", e);
+                            warn!(
+                                event = "wasm_memory_oom",
+                                current_pages = current_pages,
+                                requested_pages = pages_to_grow,
+                                "mem_alloc: Failed to grow memory: {}", e
+                            );
                             return 0;
                         }
                     }

@@ -12,8 +12,12 @@ use wasmtime::{Caller, Memory};
 /// Clean string format: [4-byte little-endian length][UTF-8 bytes]
 pub const STRING_LENGTH_PREFIX_SIZE: usize = 4;
 
+/// WASM page size in bytes (64KB)
+const PAGE_SIZE: usize = 65536;
+
 /// Ensure WASM memory is large enough for a write at the given offset + size.
-/// Grows memory if needed. Returns true on success, false if growth fails.
+/// Uses 1.5x amortized growth to reduce the number of memory.grow() calls.
+/// Returns true on success, false if growth fails.
 fn ensure_memory_capacity<T>(
     store: &mut T,
     memory: &Memory,
@@ -27,14 +31,23 @@ where
     let current_size = memory.data_size(&*store);
 
     if required > current_size {
-        let required_pages = ((required + 65535) / 65536) as u64;
         let current_pages = memory.size(&*store);
-        let pages_to_grow = required_pages.saturating_sub(current_pages);
+
+        // 1.5x amortized growth with 4-page floor
+        let target = required
+            .max(current_size * 3 / 2)
+            .max(current_size + 4 * PAGE_SIZE);
+        let target_pages = ((target + PAGE_SIZE - 1) / PAGE_SIZE) as u64;
+        let pages_to_grow = target_pages.saturating_sub(current_pages);
 
         if pages_to_grow > 0 {
             debug!(
-                "ensure_memory_capacity: growing memory from {} to {} pages (required {} bytes)",
-                current_pages, required_pages, required
+                event = "wasm_memory_grow",
+                current_pages = current_pages,
+                requested_pages = pages_to_grow,
+                new_total_pages = current_pages + pages_to_grow,
+                "ensure_memory_capacity: growing memory (required {} bytes)",
+                required
             );
             match memory.grow(&mut *store, pages_to_grow) {
                 Ok(prev) => {
@@ -46,8 +59,11 @@ where
                 }
                 Err(e) => {
                     error!(
-                        "ensure_memory_capacity: failed to grow memory by {} pages: {}",
-                        pages_to_grow, e
+                        event = "wasm_memory_oom",
+                        current_pages = current_pages,
+                        requested_pages = pages_to_grow,
+                        "ensure_memory_capacity: failed to grow memory: {}",
+                        e
                     );
                     return false;
                 }
