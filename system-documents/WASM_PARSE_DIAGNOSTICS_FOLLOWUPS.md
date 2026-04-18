@@ -85,26 +85,21 @@ prints the JSON for a human to paste.
 
 ## 3. MCP: directives + tools so AI instances auto-discover diagnostics
 
-**Component:** Clean MCP
+**Component:** Clean MCP (compiler MCP server at `src/mcp/server.rs`)
 **Priority:** Medium
-**Status:** Cross-component prompt written at
-`management/cross-component-prompts/mcp-wasm-parse-diagnostics-directives.md`
+**Status:** DONE — v0.30.55 (commit 0ad5387, 2026-04-16)
 
-### Context
-The on-disk diagnostic reports are invisible to AI instances until
-the MCP server tells them to look. Without this, every developer has
-to manually instruct the AI to check `./diagnostics/pending/` — which
-defeats the "good UX" goal.
-
-### Change required
-See the linked cross-component prompt. Summary:
-- Add a session-start directive pointing AIs at
-  `list_server_diagnostics` when a user reports a server failure.
-- Add `list_server_diagnostics` and `show_server_diagnostic` tools
-  that read the JSON reports directly (no shell-out).
-- Augment `check_reported_fixes` to cross-reference local diagnostics
-  against resolved fixes so the AI can suggest
-  `clean-server errors resolve <sha>` at the right moment.
+### Implementation
+All 5 parts implemented in `clean-language-compiler/src/mcp/server.rs`:
+1. **Instructions** — added `list_server_diagnostics` to BEST PRACTICES +
+   new `REPORTING RUNTIME_WASM_PARSE BUGS` workflow section
+2. **`list_server_diagnostics` tool** — reads `./diagnostics/{pending,published,resolved}/`
+   directly (no shell-out), returns structured report summaries
+3. **`show_server_diagnostic` tool** — returns full `report.json` for a SHA
+   prefix (≥4 chars), ready to feed into `report_error`
+4. **`check_reported_fixes` augmented** — cross-references resolved fixes
+   against local pending diagnostics, surfaces `matching_local_diagnostics`
+   with `suggest_resolve: true` when a fix version is newer
 
 ---
 

@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(kill %1)",
-      "Bash(wait)"
+      "Bash(wait)",
+      "mcp__clean-language__check_reported_fixes",
+      "WebFetch(domain:docs.wasmtime.dev)",
+      "WebFetch(domain:radu-matei.com)",
+      "Bash(rm -rf diagnostics)",
+      "Bash(CLEAN_DIAG_DIR=./diagnostics \"/Users/earcandy/Documents/Dev/Clean Language/clean-server/target/debug/clean-server\" /tmp/broken_with_build.wasm)",
+      "Bash(CLEAN_DIAG_DIR=./diagnostics \"/Users/earcandy/Documents/Dev/Clean Language/clean-server/target/debug/clean-server\" errors show 33c575)",
+      "Bash(gh api *)",
+      "mcp__clean-language__list_server_diagnostics",
+      "WebFetch(domain:errors.cleanlanguage.dev)"
     ]
   }
 }
