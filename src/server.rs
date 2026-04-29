@@ -368,7 +368,7 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         for route in router.all_routes() {
             info!(
                 "  {} {} -> handler {}",
-                route.method, route.path, route.handler_index
+                route.method, route.path, route.handler_name
             );
         }
     }
@@ -548,7 +548,7 @@ async fn handle_request(
 
     debug!(
         "Matched route: {} {} -> handler {} (extracted {} params)",
-        route_handler.method, route_handler.path, route_handler.handler_index, params.len()
+        route_handler.method, route_handler.path, route_handler.handler_name, params.len()
     );
     debug!("Extracted route params: {:?}", params);
 
@@ -620,7 +620,7 @@ async fn handle_request(
     // Call WASM handler with auth context
     match state
         .wasm
-        .call_handler_with_auth(route_handler.handler_index, request_ctx, auth_context)
+        .call_handler_with_auth(&route_handler.handler_name, request_ctx, auth_context)
     {
         Ok(handler_response) => {
             debug!("Handler returned: {} bytes", handler_response.body.len());

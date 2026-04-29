@@ -507,11 +507,11 @@ const FULL_CONTRACT_WAT: &str = r#"
   ;; _http_listen: (port: i32) -> i32
   (import "env" "_http_listen" (func (param i32) (result i32)))
 
-  ;; _http_route: (method_ptr, method_len, path_ptr, path_len, handler_idx) -> i32
-  (import "env" "_http_route" (func (param i32 i32 i32 i32 i32) (result i32)))
+  ;; _http_route: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len) -> i32
+  (import "env" "_http_route" (func (param i32 i32 i32 i32 i32 i32) (result i32)))
 
-  ;; _http_route_protected: (method_ptr, method_len, path_ptr, path_len, handler_idx, role_ptr, role_len) -> i32
-  (import "env" "_http_route_protected" (func (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  ;; _http_route_protected: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len, role_ptr, role_len) -> i32
+  (import "env" "_http_route_protected" (func (param i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
 
   ;; _http_serve_static: (prefix_ptr, prefix_len, dir_ptr, dir_len) -> i32
   (import "env" "_http_serve_static" (func (param i32 i32 i32 i32) (result i32)))

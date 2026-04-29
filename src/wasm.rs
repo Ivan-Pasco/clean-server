@@ -623,7 +623,7 @@ impl WasmInstance {
     /// Creates a fresh WASM instance for each request to ensure clean memory state
     pub fn call_handler(
         &self,
-        handler_index: u32,
+        handler_name: &str,
         request: RequestContext,
     ) -> RuntimeResult<String> {
         // Create a fresh instance for this request
@@ -638,52 +638,12 @@ impl WasmInstance {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| RuntimeError::wasm("Module has no memory export"))?;
 
-        // The handler function takes no arguments and returns a string pointer
-        // In Clean Language, handlers are generated like:
-        // func __handler_0() -> i32 { return string_ptr }
-
-        let handler_name = format!("__route_handler_{}", handler_index);
         debug!("Calling handler: {}", handler_name);
 
-        // Try the generated handler name first
-        if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, &handler_name) {
+        if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
             let result_ptr = handler.call(&mut store, ()).map_err(|e| {
                 RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
             })?;
-
-            // Read result string from memory
-            let result =
-                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
-
-            return Ok(result);
-        }
-
-        // Try direct function table call
-        // WASM function tables allow calling functions by index
-        if let Some(table) = instance.get_table(&mut store, "__indirect_function_table")
-            && let Some(func_ref) = table.get(&mut store, handler_index as u64)
-            && let Some(func) = func_ref.unwrap_func()
-        {
-            // Try to call as a function returning i32
-            let result_ptr = func
-                .typed::<(), i32>(&store)
-                .map_err(|e| {
-                    RuntimeError::wasm(format!("Invalid handler signature: {}", e))
-                })?
-                .call(&mut store, ())
-                .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
-
-            let result =
-                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
-
-            return Ok(result);
-        }
-
-        // Fallback: try calling a generic handler function with the index
-        if let Ok(dispatch) = instance.get_typed_func::<i32, i32>(&mut store, "__dispatch_route") {
-            let result_ptr = dispatch
-                .call(&mut store, handler_index as i32)
-                .map_err(|e| RuntimeError::wasm(format!("Dispatch failed: {}", e)))?;
 
             let result =
                 crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
@@ -692,8 +652,8 @@ impl WasmInstance {
         }
 
         Err(RuntimeError::wasm(format!(
-            "Could not find or call handler index {}",
-            handler_index
+            "Could not find or call handler '{}'",
+            handler_name
         )))
     }
 
@@ -701,12 +661,12 @@ impl WasmInstance {
     /// Returns the full handler response including body, headers, cookies, and redirects
     pub fn call_handler_with_auth(
         &self,
-        handler_index: u32,
+        handler_name: &str,
         request: RequestContext,
         auth_context: Option<AuthContext>,
     ) -> RuntimeResult<HandlerResponse> {
         debug!("call_handler_with_auth: handler={}, path={}, params={:?}",
-               handler_index, request.path, request.params);
+               handler_name, request.path, request.params);
 
         // Create a fresh instance for this request
         let (mut store, instance) = self.create_instance()?;
@@ -731,48 +691,18 @@ impl WasmInstance {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| RuntimeError::wasm("Module has no memory export"))?;
 
-        let handler_name = format!("__route_handler_{}", handler_index);
         debug!("Calling handler with auth: {}", handler_name);
 
-        // Try the generated handler name first
-        let result = if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, &handler_name) {
+        let result = if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
             let result_ptr = handler.call(&mut store, ()).map_err(|e| {
                 RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
             })?;
 
             crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
-        } else if let Some(table) = instance.get_table(&mut store, "__indirect_function_table") {
-            if let Some(func_ref) = table.get(&mut store, handler_index as u64) {
-                if let Some(func) = func_ref.unwrap_func() {
-                    let result_ptr = func
-                        .typed::<(), i32>(&store)
-                        .map_err(|e| RuntimeError::wasm(format!("Invalid handler signature: {}", e)))?
-                        .call(&mut store, ())
-                        .map_err(|e| RuntimeError::wasm(format!("Handler call failed: {}", e)))?;
-
-                    crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
-                } else {
-                    return Err(RuntimeError::wasm(format!(
-                        "Could not find or call handler index {}",
-                        handler_index
-                    )));
-                }
-            } else {
-                return Err(RuntimeError::wasm(format!(
-                    "Could not find or call handler index {}",
-                    handler_index
-                )));
-            }
-        } else if let Ok(dispatch) = instance.get_typed_func::<i32, i32>(&mut store, "__dispatch_route") {
-            let result_ptr = dispatch
-                .call(&mut store, handler_index as i32)
-                .map_err(|e| RuntimeError::wasm(format!("Dispatch failed: {}", e)))?;
-
-            crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
         } else {
             return Err(RuntimeError::wasm(format!(
-                "Could not find or call handler index {}",
-                handler_index
+                "Could not find or call handler '{}'",
+                handler_name
             )));
         };
 

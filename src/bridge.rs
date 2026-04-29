@@ -81,8 +81,8 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_listen: {}", e)))?;
 
     // _http_route - Register a route handler
-    // Signature: (method_ptr, method_len, path_ptr, path_len, handler_idx) -> i32
-    // Strings use raw ptr+len pairs (expand_strings in plugin expands to ptr+len)
+    // Signature: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len) -> i32
+    // Strings use raw ptr+len pairs; handler is the WASM export name (e.g. "__route_handler_0")
     linker
         .func_wrap(
             "env",
@@ -92,16 +92,19 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
              method_len: i32,
              path_ptr: i32,
              path_len: i32,
-             handler_idx: i32|
+             handler_ptr: i32,
+             handler_len: i32|
              -> i32 {
                 let method_str = read_raw_string(&mut caller, method_ptr, method_len)
                     .unwrap_or_else(|| "GET".to_string());
                 let path = read_raw_string(&mut caller, path_ptr, path_len)
                     .unwrap_or_else(|| "/".to_string());
+                let handler_name = read_raw_string(&mut caller, handler_ptr, handler_len)
+                    .unwrap_or_else(|| "__route_handler_0".to_string());
 
                 debug!(
                     "_http_route: method={}, path={}, handler={}",
-                    method_str, path, handler_idx
+                    method_str, path, handler_name
                 );
 
                 let method = match HttpMethod::parse(&method_str) {
@@ -116,7 +119,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 let router = state.router.clone();
                 // Not protected, no required role
                 if let Err(e) =
-                    router.register(method, path.clone(), handler_idx as u32, false, None)
+                    router.register(method, path.clone(), handler_name, false, None)
                 {
                     error!("Failed to register route {} {}: {}", method_str, path, e);
                     return -1; // Error
@@ -127,8 +130,8 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_route: {}", e)))?;
 
     // _http_route_protected - Register a protected route requiring authentication
-    // Signature: (method_ptr, method_len, path_ptr, path_len, handler_idx, role_ptr, role_len) -> i32
-    // Strings use raw ptr+len pairs (expand_strings in plugin expands to ptr+len)
+    // Signature: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len, role_ptr, role_len) -> i32
+    // Strings use raw ptr+len pairs; handler is the WASM export name (e.g. "__route_handler_0")
     linker
         .func_wrap(
             "env",
@@ -138,7 +141,8 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
              method_len: i32,
              path_ptr: i32,
              path_len: i32,
-             handler_idx: i32,
+             handler_ptr: i32,
+             handler_len: i32,
              role_ptr: i32,
              role_len: i32|
              -> i32 {
@@ -146,12 +150,14 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                     .unwrap_or_else(|| "GET".to_string());
                 let path = read_raw_string(&mut caller, path_ptr, path_len)
                     .unwrap_or_else(|| "/".to_string());
+                let handler_name = read_raw_string(&mut caller, handler_ptr, handler_len)
+                    .unwrap_or_else(|| "__route_handler_0".to_string());
                 let required_role = read_raw_string(&mut caller, role_ptr, role_len)
                     .filter(|s| !s.is_empty());
 
                 debug!(
                     "_http_route_protected: method={}, path={}, handler={}, role={:?}",
-                    method_str, path, handler_idx, required_role
+                    method_str, path, handler_name, required_role
                 );
 
                 let method = match HttpMethod::parse(&method_str) {
@@ -168,7 +174,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 if let Err(e) = router.register(
                     method,
                     path.clone(),
-                    handler_idx as u32,
+                    handler_name,
                     true,
                     required_role,
                 ) {
@@ -1911,7 +1917,7 @@ mod tests {
     fn test_layer3_spec_compliance() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let registry_path = std::path::Path::new(manifest_dir)
-            .join("../platform-architecture/function-registry.toml");
+            .join("../foundation/platform-architecture/function-registry.toml");
         let toml_str = std::fs::read_to_string(&registry_path)
             .unwrap_or_else(|e| panic!(
                 "Failed to read function-registry.toml at {:?}: {}",

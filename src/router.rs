@@ -91,8 +91,8 @@ pub struct RouteHandler {
     pub method: HttpMethod,
     /// URL path pattern
     pub path: String,
-    /// WASM function index to call
-    pub handler_index: u32,
+    /// WASM export name to call (e.g. "__route_handler_0")
+    pub handler_name: String,
     /// Whether this route requires authentication
     pub protected: bool,
     /// Required role (if any)
@@ -128,7 +128,7 @@ impl Router {
         &self,
         method: HttpMethod,
         path: String,
-        handler_index: u32,
+        handler_name: String,
         protected: bool,
         required_role: Option<String>,
     ) -> RuntimeResult<()> {
@@ -140,7 +140,7 @@ impl Router {
         let handler = RouteHandler {
             method,
             path: path.clone(),
-            handler_index,
+            handler_name,
             protected,
             required_role,
         };
@@ -291,13 +291,13 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/".to_string(), 0, false, None)
+            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None)
             .unwrap();
         router
-            .register(HttpMethod::GET, "/api/users".to_string(), 1, false, None)
+            .register(HttpMethod::GET, "/api/users".to_string(), "__route_handler_1".to_string(), false, None)
             .unwrap();
         router
-            .register(HttpMethod::POST, "/api/users".to_string(), 2, false, None)
+            .register(HttpMethod::POST, "/api/users".to_string(), "__route_handler_2".to_string(), false, None)
             .unwrap();
 
         assert!(router.find(HttpMethod::GET, "/").is_some());
@@ -312,26 +312,26 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/users/:id".to_string(), 0, false, None)
+            .register(HttpMethod::GET, "/users/:id".to_string(), "__route_handler_0".to_string(), false, None)
             .unwrap();
         router
             .register(
                 HttpMethod::GET,
                 "/posts/:post_id/comments/:comment_id".to_string(),
-                1,
+                "__route_handler_1".to_string(),
                 false,
                 None,
             )
             .unwrap();
 
         let (handler, params) = router.find(HttpMethod::GET, "/users/123").unwrap();
-        assert_eq!(handler.handler_index, 0);
+        assert_eq!(handler.handler_name, "__route_handler_0");
         assert_eq!(params.get("id"), Some(&"123".to_string()));
 
         let (handler, params) = router
             .find(HttpMethod::GET, "/posts/42/comments/7")
             .unwrap();
-        assert_eq!(handler.handler_index, 1);
+        assert_eq!(handler.handler_name, "__route_handler_1");
         assert_eq!(params.get("post_id"), Some(&"42".to_string()));
         assert_eq!(params.get("comment_id"), Some(&"7".to_string()));
     }
@@ -341,16 +341,16 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/public".to_string(), 0, false, None)
+            .register(HttpMethod::GET, "/public".to_string(), "__route_handler_0".to_string(), false, None)
             .unwrap();
         router
-            .register(HttpMethod::GET, "/protected".to_string(), 1, true, None)
+            .register(HttpMethod::GET, "/protected".to_string(), "__route_handler_1".to_string(), true, None)
             .unwrap();
         router
             .register(
                 HttpMethod::GET,
                 "/admin".to_string(),
-                2,
+                "__route_handler_2".to_string(),
                 true,
                 Some("admin".to_string()),
             )
@@ -374,7 +374,7 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/".to_string(), 0, false, None)
+            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None)
             .unwrap();
         assert_eq!(router.len(), 1);
 
@@ -403,7 +403,7 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/api/users/:id".to_string(), 2, false, None)
+            .register(HttpMethod::GET, "/api/users/:id".to_string(), "__route_handler_2".to_string(), false, None)
             .unwrap();
 
         // Test that the route matches and params are extracted
@@ -411,7 +411,7 @@ mod tests {
         assert!(result.is_some(), "Route should match /api/users/1");
 
         let (handler, params) = result.unwrap();
-        assert_eq!(handler.handler_index, 2);
+        assert_eq!(handler.handler_name, "__route_handler_2");
         assert_eq!(params.get("id"), Some(&"1".to_string()), "Param 'id' should be '1'");
     }
 }
