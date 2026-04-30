@@ -2,7 +2,7 @@
 
 This document tracks work deferred from the initial `RUNTIME_WASM_PARSE`
 enrichment (see prompt
-`management/cross-component-prompts/server-runtime-wasm-parse-enriched-reports.md`).
+`foundation/management/cross-component-prompts/server-runtime-wasm-parse-enriched-reports.md`).
 
 The server-side Part A (enriched payload, plugin manifest snapshot,
 local disk storage, `clean-server errors ...` CLI) has been implemented.

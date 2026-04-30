@@ -17,7 +17,7 @@
 | Missing functions | 0 |
 | Stub implementations fixed | 6 (HTTP client config functions) |
 
-All 201 host functions registered in `../platform-architecture/function-registry.toml` have correct WASM signatures and complete implementations. Both automated compliance tests pass.
+All 201 host functions registered in `../foundation/platform-architecture/function-registry.toml` have correct WASM signatures and complete implementations. Both automated compliance tests pass.
 
 ---
 
@@ -355,7 +355,7 @@ cargo test --lib layer3            # Layer 3 server-specific functions: PASSED
 cd host-bridge && cargo test test_spec_compliance   # Layer 2 portable functions: PASSED
 ```
 
-The compliance tests dynamically parse `../platform-architecture/function-registry.toml`, expand high-level types to WASM types, generate WAT import declarations, and instantiate them against the linker. A failure in either test identifies the exact function with the mismatched signature.
+The compliance tests dynamically parse `../foundation/platform-architecture/function-registry.toml`, expand high-level types to WASM types, generate WAT import declarations, and instantiate them against the linker. A failure in either test identifies the exact function with the mismatched signature.
 
 ---
 
@@ -373,4 +373,4 @@ All host functions follow these conventions consistently across both layers:
 
 ---
 
-*Report generated from audit of clean-server against `../platform-architecture/function-registry.toml`.*
+*Report generated from audit of clean-server against `../foundation/platform-architecture/function-registry.toml`.*

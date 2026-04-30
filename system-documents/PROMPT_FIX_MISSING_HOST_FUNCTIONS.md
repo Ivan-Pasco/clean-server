@@ -101,7 +101,7 @@ Then visit http://localhost:3000 in a browser.
 ### Compiler host bridge definitions
 Check these files in clean-language-compiler to see what functions are generated:
 - `src/codegen/` - WASM code generation
-- `platform-architecture/HOST_BRIDGE.md` - Host bridge specification
+- `foundation/platform-architecture/HOST_BRIDGE.md` - Host bridge specification
 
 ### Current server implementation
 - `src/main.rs` - Server entry point
@@ -118,6 +118,6 @@ Check these files in clean-language-compiler to see what functions are generated
 ## Notes
 
 - Use the existing host function patterns in the codebase
-- Follow the memory model for string passing (check platform-architecture/MEMORY_MODEL.md)
+- Follow the memory model for string passing (check foundation/platform-architecture/MEMORY_MODEL.md)
 - Functions should be no-ops or return sensible defaults if the feature isn't fully implemented yet
 - Log warnings for unimplemented functionality rather than crashing

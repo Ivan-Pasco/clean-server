@@ -5,7 +5,7 @@
 //! Layer 3 (server-specific) of the platform function registry.
 //!
 //! This test is the authoritative single-module proof that the complete server
-//! bridge satisfies every contract in `platform-architecture/function-registry.toml`.
+//! bridge satisfies every contract in `foundation/platform-architecture/function-registry.toml`.
 //!
 //! # How It Works
 //!
@@ -173,7 +173,7 @@ fn make_store(engine: &Engine) -> Store<WasmState> {
 // ---------------------------------------------------------------------------
 
 /// Verifies that the clean-server linker satisfies every import defined in
-/// `platform-architecture/function-registry.toml` for both Layer 2 and Layer 3.
+/// `foundation/platform-architecture/function-registry.toml` for both Layer 2 and Layer 3.
 ///
 /// The test generates a WAT module with one import per registered function
 /// (canonical name plus all aliases) and instantiates it against the full
@@ -190,14 +190,14 @@ fn make_store(engine: &Engine) -> Store<WasmState> {
 fn test_full_bridge_compliance() {
     // Locate the registry file relative to this crate's manifest directory.
     // clean-server is at:  <project-root>/clean-server/
-    // registry is at:      <project-root>/platform-architecture/function-registry.toml
+    // registry is at:      <project-root>/foundation/platform-architecture/function-registry.toml
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let registry_path = manifest_dir.join("../platform-architecture/function-registry.toml");
+    let registry_path = manifest_dir.join("../foundation/platform-architecture/function-registry.toml");
 
     let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
         panic!(
             "test_full_bridge_compliance: Cannot read function-registry.toml at {:?}.\n\
-             Ensure the platform-architecture directory exists at the project root.\n\
+             Ensure the foundation/platform-architecture directory exists at the project root.\n\
              Error: {}",
             registry_path.canonicalize().unwrap_or(registry_path.clone()),
             e
@@ -239,7 +239,7 @@ fn test_full_bridge_compliance() {
     // definitions in the WASM text format.
     let mut wat = String::from("(module\n");
     wat.push_str("  ;; Full bridge compliance: Layer 2 (host-bridge) + Layer 3 (server)\n");
-    wat.push_str("  ;; Generated from platform-architecture/function-registry.toml\n\n");
+    wat.push_str("  ;; Generated from foundation/platform-architecture/function-registry.toml\n\n");
 
     let mut import_count: usize = 0;
     let mut layer2_import_total: usize = 0;

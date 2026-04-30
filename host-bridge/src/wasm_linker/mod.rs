@@ -41,7 +41,7 @@ mod env_time;
 mod list_funcs;
 // NOTE: HTTP Server functions (Layer 3) are NOT in host-bridge.
 // They are server-specific and implemented in clean-server/src/bridge.rs.
-// See platform-architecture/EXECUTION_LAYERS.md for layer definitions.
+// See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
 
 // Re-export core types
 pub use state::{WasmState, WasmStateCore, WasmMemory, RequestContext, AuthContext, SharedDbBridge, HttpResponseBuilder};
@@ -98,7 +98,7 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     // NOTE: HTTP Server functions (Layer 3) are NOT provided by host-bridge.
     // Server-specific functions like _req_param, _req_body, _http_route, etc.
     // must be implemented by the server runtime (e.g., clean-server/src/bridge.rs).
-    // See platform-architecture/EXECUTION_LAYERS.md for layer definitions.
+    // See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
 
     Ok(())
 }
@@ -206,7 +206,7 @@ mod tests {
     }
 
     /// Spec compliance test: validates that ALL Layer 2 host function signatures
-    /// match the shared function registry (platform-architecture/function-registry.toml).
+    /// match the shared function registry (foundation/platform-architecture/function-registry.toml).
     ///
     /// The registry defines every function with high-level types that expand to
     /// exact WASM signatures. This test dynamically generates a WAT module from
@@ -219,7 +219,7 @@ mod tests {
     fn test_spec_compliance() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let registry_path = std::path::Path::new(manifest_dir)
-            .join("../../platform-architecture/function-registry.toml");
+            .join("../../foundation/platform-architecture/function-registry.toml");
         let toml_str = std::fs::read_to_string(&registry_path)
             .unwrap_or_else(|e| panic!(
                 "Failed to read function-registry.toml at {:?}: {}",

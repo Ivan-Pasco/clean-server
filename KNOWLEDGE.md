@@ -10,7 +10,7 @@ Known considerations and areas to watch. Read before modifying server code.
 
 **Where:** Bridge function implementations, WASM module instantiation code
 
-**Watch for:** Adding or modifying bridge functions requires coordinating with `platform-architecture/HOST_BRIDGE.md` and the corresponding plugin.toml `[bridge]` section. The compiler reads plugin.toml to generate import declarations.
+**Watch for:** Adding or modifying bridge functions requires coordinating with `foundation/platform-architecture/HOST_BRIDGE.md` and the corresponding plugin.toml `[bridge]` section. The compiler reads plugin.toml to generate import declarations.
 
 ---
 

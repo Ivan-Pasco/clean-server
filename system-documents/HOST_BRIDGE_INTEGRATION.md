@@ -2,14 +2,14 @@
 
 **This documentation has moved to the parent platform-architecture folder.**
 
-See: [/platform-architecture/README.md](../../platform-architecture/README.md)
+See: [/platform-architecture/README.md](../../foundation/platform-architecture/README.md)
 
 ## Quick Links
 
-- [Host Bridge Specification](../../platform-architecture/HOST_BRIDGE.md) - All portable host functions
-- [Memory Model](../../platform-architecture/MEMORY_MODEL.md) - WASM memory layout
-- [Server Extensions](../../platform-architecture/SERVER_EXTENSIONS.md) - HTTP server functions
-- [Implementing a New Host](../../platform-architecture/IMPLEMENTING_HOST.md) - New runtime guide
+- [Host Bridge Specification](../../foundation/platform-architecture/HOST_BRIDGE.md) - All portable host functions
+- [Memory Model](../../foundation/platform-architecture/MEMORY_MODEL.md) - WASM memory layout
+- [Server Extensions](../../foundation/platform-architecture/SERVER_EXTENSIONS.md) - HTTP server functions
+- [Implementing a New Host](../../foundation/platform-architecture/IMPLEMENTING_HOST.md) - New runtime guide
 
 ## Summary
 

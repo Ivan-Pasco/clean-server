@@ -21,7 +21,7 @@ Instead:
 
 1. **Document the issue** by creating a prompt/task description
 2. **Save the prompt** in a file that can be executed by the AI instance working in the correct folder
-3. **Location for cross-component prompts**: Save prompts in `../management/cross-component-prompts/` at the project root
+3. **Location for cross-component prompts**: Save prompts in `../foundation/management/cross-component-prompts/` at the project root
 
 ### Prompt Format for Cross-Component Issues
 
@@ -61,7 +61,7 @@ Files Affected: [List of files in the target component that need changes]
 
 **CRITICAL: All host function signatures are enforced by the shared function registry.**
 
-The file `../platform-architecture/function-registry.toml` is the single source of truth for ALL host function signatures (Layer 2 + Layer 3). Two automated spec compliance tests validate that every registered function matches the implementation:
+The file `../foundation/platform-architecture/function-registry.toml` is the single source of truth for ALL host function signatures (Layer 2 + Layer 3). Two automated spec compliance tests validate that every registered function matches the implementation:
 
 - **Layer 2 test** (`test_spec_compliance` in `host-bridge/src/wasm_linker/mod.rs`) — validates 154 portable host function imports
 - **Layer 3 test** (`test_layer3_spec_compliance` in `src/bridge.rs`) — validates 47 server-specific function imports
@@ -73,7 +73,7 @@ Both tests dynamically parse the TOML registry, expand high-level types to WASM 
 1. **NEVER** change a host function's WASM signature without updating `function-registry.toml`
 2. **NEVER** modify the registry just to make a test pass — fix the implementation instead
 3. When adding or changing a host function, follow this order:
-   1. Update `../platform-architecture/function-registry.toml` (the authoritative source)
+   1. Update `../foundation/platform-architecture/function-registry.toml` (the authoritative source)
    2. Update the implementation (host-bridge for Layer 2, bridge.rs for Layer 3)
    3. Run `cargo test` to verify everything matches
 4. The registry uses high-level types that expand to WASM types:
@@ -103,14 +103,14 @@ If a test fails, the error message identifies exactly which function has the wro
 
 ## Documentation Sync Protocol
 
-Facts about the language live in `spec/` (at the project root). Facts about the platform live in `platform-architecture/`. Do not duplicate them here — link to them instead.
+Facts about the language live in `foundation/spec/` (at the project root). Facts about the platform live in `foundation/platform-architecture/`. Do not duplicate them here — link to them instead.
 
 **When you make a change in this component, update the corresponding spec file in the same commit:**
 
 | Change type | Update required |
 |-------------|-----------------|
-| New or changed host bridge function | `platform-architecture/HOST_BRIDGE.md` |
-| New or changed execution layer | `platform-architecture/EXECUTION_LAYERS.md` |
-| New or changed plugin contract | `spec/plugins/plugin-contract.md` |
+| New or changed host bridge function | `foundation/platform-architecture/HOST_BRIDGE.md` |
+| New or changed execution layer | `foundation/platform-architecture/EXECUTION_LAYERS.md` |
+| New or changed plugin contract | `foundation/spec/plugins/plugin-contract.md` |
 
 The spec files are the single source of truth. Component documentation explains implementation — it does not redefine language rules.
