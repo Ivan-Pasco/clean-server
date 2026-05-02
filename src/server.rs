@@ -654,8 +654,13 @@ async fn handle_request(
                 "text/plain; charset=utf-8"
             };
 
+            let status = handler_response
+                .status
+                .and_then(|s| StatusCode::from_u16(s).ok())
+                .unwrap_or(StatusCode::OK);
+
             let mut builder = Response::builder()
-                .status(StatusCode::OK)
+                .status(status)
                 .header(header::CONTENT_TYPE, content_type);
 
             // Add Set-Cookie header if pending
