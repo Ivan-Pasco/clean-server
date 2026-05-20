@@ -28,6 +28,40 @@ use host_bridge::{read_string_from_caller, read_raw_string, write_string_to_call
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
 
+/// Register a Layer 3 bridge function under its canonical `_namespace_fn` name
+/// and automatically under its `namespace.fn` dot-notation alias.
+///
+/// Use this macro for all new Layer 3 bridge functions instead of calling
+/// `.func_wrap(...).map_err(...)` directly.  It prevents silently omitting the
+/// dot alias that the compiler (>= 0.30.120) also emits.
+///
+/// The macro calls `func_wrap` once (consuming the closure), then derives the
+/// alias via `linker.alias()` — no second closure needed.
+///
+/// See `foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+macro_rules! register_bridge_fn {
+    ($linker:expr, $name:literal, $func:expr) => {{
+        $linker
+            .func_wrap("env", $name, $func)
+            .map_err(|e| RuntimeError::wasm(format!("Failed to define {}: {}", $name, e)))?;
+        let _stripped: &str = $name.trim_start_matches('_');
+        if $name.starts_with('_') && !$name.starts_with("__") {
+            if let Some(_dot_idx) = _stripped.find('_') {
+                let _dot_name = format!(
+                    "{}.{}",
+                    &_stripped[.._dot_idx],
+                    &_stripped[_dot_idx + 1..]
+                );
+                $linker
+                    .alias("env", $name, "env", &_dot_name)
+                    .map_err(|e| RuntimeError::wasm(format!(
+                        "Failed to alias {} -> {}: {}", $name, _dot_name, e
+                    )))?;
+            }
+        }
+    }};
+}
+
 /// Create a linker with all host functions
 ///
 /// This registers:
@@ -49,6 +83,11 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_roles_functions(&mut linker)?;
     register_response_functions(&mut linker)?;
     register_islands_functions(&mut linker)?;
+    register_async_functions(&mut linker)?;
+
+    // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
+    // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
+    register_dot_aliases(&mut linker)?;
 
     Ok(linker)
 }
@@ -1760,6 +1799,135 @@ fn register_islands_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<(
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _island_register: {}", e)))?;
+
+    Ok(())
+}
+
+/// Register async bridge functions (_async_fire, _async_await, _server_sleep)
+fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _async_fire — fire-and-forget: lower `background expr`
+    // Signature: (fn_name_ptr: i32, fn_name_len: i32, args_ptr: i32, args_len: i32) -> void
+    register_bridge_fn!(
+        linker,
+        "_async_fire",
+        |mut caller: Caller<'_, WasmState>,
+         fn_name_ptr: i32,
+         fn_name_len: i32,
+         _args_ptr: i32,
+         _args_len: i32| {
+            let fn_name = read_raw_string(&mut caller, fn_name_ptr, fn_name_len)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            debug!("_async_fire: scheduling background call to '{}'", fn_name);
+        }
+    );
+
+    // _async_await — blocking async: lower `later x = expr`
+    // Signature: (fn_name_ptr: i32, fn_name_len: i32, args_ptr: i32, args_len: i32) -> i32 (ptr)
+    register_bridge_fn!(
+        linker,
+        "_async_await",
+        |mut caller: Caller<'_, WasmState>,
+         fn_name_ptr: i32,
+         fn_name_len: i32,
+         _args_ptr: i32,
+         _args_len: i32|
+         -> i32 {
+            let fn_name = read_raw_string(&mut caller, fn_name_ptr, fn_name_len)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            debug!("_async_await: blocking call to '{}'", fn_name);
+            // Write an empty string result into WASM memory and return its pointer
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    // _server_sleep — suspend for N milliseconds
+    // Signature: (ms: i64) -> void
+    register_bridge_fn!(
+        linker,
+        "_server_sleep",
+        |_caller: Caller<'_, WasmState>, ms: i64| {
+            let duration = std::time::Duration::from_millis(ms.max(0) as u64);
+            debug!("_server_sleep: sleeping for {}ms", ms);
+            std::thread::sleep(duration);
+        }
+    );
+
+    Ok(())
+}
+
+/// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
+///
+/// The Clean Language compiler (0.30.120+) generates WASM imports in both
+/// `_namespace_fn` and `namespace.fn` styles. This registers the dot form as
+/// an alias of the already-registered underscore form so both resolve at link time.
+///
+/// Derived from function-registry.toml `aliases` field (Layer 3 entries).
+fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    const ALIASES: &[(&str, &str)] = &[
+        // HTTP server (register_http_server_functions)
+        ("_http_listen",         "http.listen"),
+        ("_http_route",          "http.route"),
+        ("_http_route_protected","http.route_protected"),
+        ("_http_serve_static",   "http.serve_static"),
+        // Islands (register_islands_functions)
+        ("_island_register",     "island.register"),
+        // Request context (register_request_context_functions)
+        ("_req_param",           "req.param"),
+        ("_req_param_int",       "req.param_int"),
+        ("_req_query",           "req.query"),
+        ("_req_body",            "req.body"),
+        ("_req_body_field",      "req.body_field"),
+        ("_req_header",          "req.header"),
+        ("_req_headers",         "req.headers"),
+        ("_req_method",          "req.method"),
+        ("_req_path",            "req.path"),
+        ("_req_cookie",          "req.cookie"),
+        ("_req_form",            "req.form"),
+        ("_req_ip",              "req.ip"),
+        // Session management (register_session_management_functions)
+        ("_session_store",       "session.store"),
+        ("_session_get",         "session.get"),
+        ("_session_delete",      "session.delete"),
+        ("_session_exists",      "session.exists"),
+        ("_session_set_csrf",    "session.set_csrf"),
+        ("_session_get_csrf",    "session.get_csrf"),
+        ("_http_set_cookie",     "http.set_cookie"),
+        // Auth (register_session_auth_functions)
+        ("_auth_get_session",    "auth.get_session"),
+        ("_auth_require_auth",   "auth.require_auth"),
+        ("_auth_require_role",   "auth.require_role"),
+        ("_auth_can",            "auth.can"),
+        ("_auth_has_any_role",   "auth.has_any_role"),
+        ("_auth_set_session",    "auth.set_session"),
+        ("_auth_clear_session",  "auth.clear_session"),
+        ("_auth_user_id",        "auth.user_id"),
+        ("_auth_user_role",      "auth.user_role"),
+        // Roles (register_roles_functions)
+        ("_roles_register",      "roles.register"),
+        ("_role_has_permission", "role.has_permission"),
+        ("_role_get_permissions","role.get_permissions"),
+        // Response (register_response_functions)
+        ("_http_respond",        "http.respond"),
+        ("_http_redirect",       "http.redirect"),
+        ("_http_set_header",     "http.set_header"),
+        ("_res_set_header",      "res.set_header"),
+        ("_res_redirect",        "res.redirect"),
+        ("_res_status",          "res.status"),
+        ("_res_body",            "res.body"),
+        ("_res_json",            "res.json"),
+        ("_http_set_cache",      "http.set_cache"),
+        ("_http_no_cache",       "http.no_cache"),
+        ("_json_encode",         "json.encode"),
+        ("_json_decode",         "json.decode"),
+        ("_json_get",            "json.get"),
+        // Async aliases are registered by register_bridge_fn! macro in register_async_functions
+    ];
+
+    for (canonical, dot_alias) in ALIASES {
+        linker
+            .alias("env", canonical, "env", dot_alias)
+            .map_err(|e| RuntimeError::wasm(format!("Failed to alias {} -> {}: {}", canonical, dot_alias, e)))?;
+    }
 
     Ok(())
 }
