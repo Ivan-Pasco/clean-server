@@ -441,6 +441,126 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // =========================================
+    // STRING REPEAT / MATCHES
+    // =========================================
+
+    // string_repeat - Repeat a string N times
+    // Signature: (str_ptr: i32, str_len: i32, count: i32) -> i32
+    // str_ptr is a length-prefixed pointer; str_len is raw length (ignored); count >= 0
+    linker.func_wrap(
+        "env",
+        "string_repeat",
+        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, count: i32| -> i32 {
+            let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
+            let result = s.repeat(count.max(0) as usize);
+            write_string_to_caller(&mut caller, &result)
+        },
+    )?;
+
+    // string.repeat - Dot-notation alias
+    linker.func_wrap(
+        "env",
+        "string.repeat",
+        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, count: i32| -> i32 {
+            let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
+            let result = s.repeat(count.max(0) as usize);
+            write_string_to_caller(&mut caller, &result)
+        },
+    )?;
+
+    // string_matches - Validate a string against a named pattern
+    // Signature: (str_ptr: i32, str_len: i32, pattern_ptr: i32, pattern_len: i32) -> i32
+    // Supported patterns: email, url, uuid, phone, date, integer, number, alphanumeric
+    linker.func_wrap(
+        "env",
+        "string_matches",
+        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, pattern_ptr: i32, _pattern_len: i32| -> i32 {
+            let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
+            let pattern = read_string_from_caller(&mut caller, pattern_ptr).unwrap_or_default();
+            let matches = match pattern.trim() {
+                "email" => {
+                    let parts: Vec<&str> = s.splitn(2, '@').collect();
+                    parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.')
+                }
+                "url" => s.starts_with("http://") || s.starts_with("https://"),
+                "uuid" => {
+                    let b = s.as_bytes();
+                    b.len() == 36
+                        && b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-'
+                        && b.iter().enumerate().all(|(i, &c)| {
+                            if i == 8 || i == 13 || i == 18 || i == 23 {
+                                c == b'-'
+                            } else {
+                                c.is_ascii_hexdigit()
+                            }
+                        })
+                }
+                "phone" => {
+                    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+                    digits.len() >= 7 && digits.len() <= 15
+                }
+                "date" => {
+                    let parts: Vec<&str> = s.splitn(3, '-').collect();
+                    parts.len() == 3
+                        && parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit())
+                        && parts[1].len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit())
+                        && parts[2].len() == 2 && parts[2].chars().all(|c| c.is_ascii_digit())
+                }
+                "integer" => !s.is_empty() && s.parse::<i64>().is_ok(),
+                "number" => !s.is_empty() && s.parse::<f64>().is_ok(),
+                "alphanumeric" => !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
+                _ => false,
+            };
+            if matches { 1 } else { 0 }
+        },
+    )?;
+
+    // string.matches - Dot-notation alias
+    linker.func_wrap(
+        "env",
+        "string.matches",
+        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, pattern_ptr: i32, _pattern_len: i32| -> i32 {
+            let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
+            let pattern = read_string_from_caller(&mut caller, pattern_ptr).unwrap_or_default();
+            let matches = match pattern.trim() {
+                "email" => {
+                    let parts: Vec<&str> = s.splitn(2, '@').collect();
+                    parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.')
+                }
+                "url" => s.starts_with("http://") || s.starts_with("https://"),
+                "uuid" => {
+                    let b = s.as_bytes();
+                    b.len() == 36
+                        && b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-'
+                        && b.iter().enumerate().all(|(i, &c)| {
+                            if i == 8 || i == 13 || i == 18 || i == 23 {
+                                c == b'-'
+                            } else {
+                                c.is_ascii_hexdigit()
+                            }
+                        })
+                }
+                "phone" => {
+                    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+                    digits.len() >= 7 && digits.len() <= 15
+                }
+                "date" => {
+                    let parts: Vec<&str> = s.splitn(3, '-').collect();
+                    parts.len() == 3
+                        && parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit())
+                        && parts[1].len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit())
+                        && parts[2].len() == 2 && parts[2].chars().all(|c| c.is_ascii_digit())
+                }
+                "integer" => !s.is_empty() && s.parse::<i64>().is_ok(),
+                "number" => !s.is_empty() && s.parse::<f64>().is_ok(),
+                "alphanumeric" => !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
+                _ => false,
+            };
+            if matches { 1 } else { 0 }
+        },
+    )?;
+
+    // =========================================
     // HTML Escape / Raw (plugin: frame.ui)
     // =========================================
 

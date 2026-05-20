@@ -101,6 +101,25 @@ cargo test test_layer3_spec_compliance
 
 If a test fails, the error message identifies exactly which function has the wrong signature.
 
+## Bridge Function Naming — Dual Registration (Temporary)
+
+The compiler currently emits both `_namespace_fn` and `namespace.fn` import styles.
+Both must be registered until the compiler is fixed to emit only canonical names
+(tracked in `compiler-dual-naming-registry-sync.md`).
+
+Use `register_bridge_fn!` when adding new bridge functions. See
+`foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+
+### How it works
+
+- **New functions (Layer 2):** use `host_bridge::register_bridge_fn!(linker, "env", "_namespace_fn", closure)?;` — macro derives the `namespace.fn` alias automatically.
+- **New functions (Layer 3):** use the local `register_bridge_fn!(linker, "_namespace_fn", closure);` macro defined at the top of `src/bridge.rs`.
+- **Existing functions:** covered by `register_dot_aliases()` post-registration loops in `host-bridge/src/wasm_linker/mod.rs` and `src/bridge.rs`.
+
+### Enforcement
+
+`tests/bridge_contract_test.rs::bridge_covers_registry` probes every canonical name and alias from `function-registry.toml` individually and reports all missing registrations in one failure message. This test must stay green.
+
 ## Documentation Sync Protocol
 
 Facts about the language live in `foundation/spec/` (at the project root). Facts about the platform live in `foundation/platform-architecture/`. Do not duplicate them here — link to them instead.

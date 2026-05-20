@@ -54,6 +54,47 @@ pub use helpers::{
 use crate::error::BridgeResult;
 use wasmtime::{Engine, Linker};
 
+/// Register a bridge function under its canonical name and, when it follows the
+/// `_namespace_fn` convention, also under its `namespace.fn` dot-notation alias.
+///
+/// This is the preferred way to add new `_*`-prefix bridge functions.  Using
+/// the macro instead of a bare `linker.func_wrap` call ensures the dot alias is
+/// never accidentally omitted (the compiler >= 0.30.120 emits both forms).
+///
+/// # Usage
+///
+/// ```ignore
+/// register_bridge_fn!(linker, "env", "_db_query", |mut caller, ptr, len, p2, l2| { … })?;
+/// ```
+///
+/// The macro calls `func_wrap` once (consuming the closure), then derives the
+/// dot alias from the canonical name via `linker.alias()` — which does not
+/// require the closure a second time.
+///
+/// Existing functions registered before this macro was introduced are covered
+/// by the `register_dot_aliases` post-registration loop.
+///
+/// See `foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+#[macro_export]
+macro_rules! register_bridge_fn {
+    ($linker:expr, $env:expr, $name:expr, $func:expr) => {{
+        $linker.func_wrap($env, $name, $func)?;
+        // Derive dot-notation alias: _namespace_fn → namespace.fn
+        // Skip names that don't start with '_' or have no second '_' to pivot on.
+        let _stripped: &str = $name.trim_start_matches('_');
+        if $name.starts_with('_') && !$name.starts_with("__") {
+            if let Some(_dot_idx) = _stripped.find('_') {
+                let _dot_name = format!(
+                    "{}.{}",
+                    &_stripped[.._dot_idx],
+                    &_stripped[_dot_idx + 1..]
+                );
+                $linker.alias($env, $name, $env, &_dot_name)?;
+            }
+        }
+    }};
+}
+
 /// Register all bridge host functions with a linker
 ///
 /// This is the main entry point for any runtime. It registers:
@@ -99,6 +140,54 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     // Server-specific functions like _req_param, _req_body, _http_route, etc.
     // must be implemented by the server runtime (e.g., clean-server/src/bridge.rs).
     // See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
+
+    // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
+    // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
+    register_dot_aliases(linker)?;
+
+    Ok(())
+}
+
+/// Register dot-notation aliases for all `_namespace_fn` bridge functions.
+///
+/// The Clean Language compiler (0.30.120+) generates WASM imports in both
+/// `_namespace_fn` and `namespace.fn` styles. This loop registers the dot form
+/// as an alias of the already-registered underscore form so both work.
+///
+/// Derived from function-registry.toml `aliases` field (Layer 2 entries).
+/// Math and string dot aliases are registered inline in their own modules
+/// because they predate this loop; only the newer `_*`-prefix groups are here.
+fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
+    const ALIASES: &[(&str, &str)] = &[
+        // HTML interpolation helpers (string_ops module)
+        ("_html_escape", "html.escape"),
+        ("_html_raw",    "html.raw"),
+        // Database (database module)
+        ("_db_query",    "db.query"),
+        ("_db_execute",  "db.execute"),
+        ("_db_begin",    "db.begin"),
+        ("_db_commit",   "db.commit"),
+        ("_db_rollback", "db.rollback"),
+        // Crypto (crypto_funcs module)
+        ("_crypto_hash_password",   "crypto.hash_password"),
+        ("_crypto_verify_password", "crypto.verify_password"),
+        ("_crypto_random_bytes",    "crypto.random_bytes"),
+        ("_crypto_random_hex",      "crypto.random_hex"),
+        ("_crypto_hash_sha256",     "crypto.hash_sha256"),
+        ("_crypto_hash_sha512",     "crypto.hash_sha512"),
+        ("_crypto_hmac",            "crypto.hmac"),
+        // JWT (crypto_funcs module)
+        ("_jwt_sign",   "jwt.sign"),
+        ("_jwt_verify", "jwt.verify"),
+        ("_jwt_decode", "jwt.decode"),
+        // Environment and time (env_time module)
+        ("_env_get",  "env.get"),
+        ("_time_now", "time.now"),
+    ];
+
+    for (canonical, dot_alias) in ALIASES {
+        linker.alias("env", canonical, "env", dot_alias)?;
+    }
 
     Ok(())
 }
