@@ -311,6 +311,33 @@ const LOADER_JS: &str = r#"(function() {
 })();
 "#;
 
+async fn configure_db_bridge(config: &ServerConfig) -> SharedDbBridge {
+    let db_bridge: SharedDbBridge = Arc::new(TokioRwLock::new(DbBridge::new()));
+
+    if let Some(ref db_url) = config.database_url {
+        info!("Configuring database connection: {}", mask_db_url(db_url));
+        let db_config = DbConfig {
+            database_url: db_url.clone(),
+            max_connections: config.database_max_connections,
+            min_connections: 2,
+            connection_timeout: 10000,
+            query_timeout: 30000,
+        };
+        let mut bridge = db_bridge.write().await;
+        match bridge.configure(db_config).await {
+            Ok(()) => info!("Database connection pool initialized"),
+            Err(e) => warn!(
+                "Failed to initialize database: {}. Database features will be unavailable.",
+                e
+            ),
+        }
+    } else {
+        info!("No DATABASE_URL configured. Database features disabled.");
+    }
+
+    db_bridge
+}
+
 /// Start the HTTP server with the given WASM module
 pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeResult<()> {
     info!("Starting Frame Runtime server");
@@ -319,34 +346,8 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     // Create shared router
     let router = crate::router::create_shared_router();
 
-    // Create database bridge
-    let db_bridge: SharedDbBridge = Arc::new(TokioRwLock::new(DbBridge::new()));
-
-    // Configure database if URL is provided
-    if let Some(ref db_url) = config.database_url {
-        info!("Configuring database connection: {}", mask_db_url(db_url));
-
-        let db_config = DbConfig {
-            database_url: db_url.clone(),
-            max_connections: config.database_max_connections,
-            min_connections: 2,
-            connection_timeout: 10000,
-            query_timeout: 30000,
-        };
-
-        let mut bridge = db_bridge.write().await;
-        match bridge.configure(db_config).await {
-            Ok(()) => info!("Database connection pool initialized"),
-            Err(e) => {
-                warn!(
-                    "Failed to initialize database: {}. Database features will be unavailable.",
-                    e
-                );
-            }
-        }
-    } else {
-        info!("No DATABASE_URL configured. Database features disabled.");
-    }
+    // Configure database bridge
+    let db_bridge = configure_db_bridge(&config).await;
 
     // Load WASM module with database bridge and memory limit
     let wasm = crate::wasm::create_shared_instance_with_config(

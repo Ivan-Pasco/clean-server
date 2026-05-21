@@ -26,10 +26,6 @@ pub struct SessionData {
     pub role: String,
     /// Additional claims (JSON string)
     pub claims: String,
-    /// Creation timestamp (tracked for logging/debugging)
-    #[serde(skip)]
-    #[allow(dead_code)]
-    created_at: Option<Instant>,
     /// Last accessed timestamp
     #[serde(skip)]
     last_accessed: Option<Instant>,
@@ -37,14 +33,12 @@ pub struct SessionData {
 
 impl SessionData {
     pub fn new(user_id: i32, role: String, claims: String) -> Self {
-        let now = Instant::now();
         Self {
             session_id: Uuid::new_v4().to_string(),
             user_id,
             role,
             claims,
-            created_at: Some(now),
-            last_accessed: Some(now),
+            last_accessed: Some(Instant::now()),
         }
     }
 

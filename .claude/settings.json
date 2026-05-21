@@ -11,7 +11,8 @@
       "Bash(CLEAN_DIAG_DIR=./diagnostics \"/Users/earcandy/Documents/Dev/Clean Language/clean-server/target/debug/clean-server\" errors show 33c575)",
       "Bash(gh api *)",
       "mcp__clean-language__list_server_diagnostics",
-      "WebFetch(domain:errors.cleanlanguage.dev)"
+      "WebFetch(domain:errors.cleanlanguage.dev)",
+      "Bash(awk '/^[ \\\\t]*fn / {fn_name=$0; fn_start=NR; lines=0} fn_start>0 {lines++} lines>60 && /^[ \\\\t]*}/ && lines>60 {print FILENAME \":\" fn_start \" - \" fn_name \" \\(\" lines \" lines\\)\"; fn_start=0}' src/*.rs src/**/*.rs)"
     ]
   }
 }

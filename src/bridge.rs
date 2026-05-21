@@ -82,6 +82,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_session_auth_functions(&mut linker)?;
     register_roles_functions(&mut linker)?;
     register_response_functions(&mut linker)?;
+    register_json_functions(&mut linker)?;
     register_islands_functions(&mut linker)?;
     register_async_functions(&mut linker)?;
 
@@ -1597,6 +1598,11 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_no_cache: {}", e)))?;
 
+    Ok(())
+}
+
+/// Register JSON encode/decode/query functions (_json_encode, _json_decode, _json_get)
+fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _json_encode - Serialize value to JSON string
     linker
         .func_wrap(
@@ -1997,33 +2003,31 @@ mod tests {
 
     // --- Registry TOML types ---
 
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct Registry {
-        #[allow(dead_code)]
         meta: RegistryMeta,
         functions: Vec<FunctionEntry>,
     }
 
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct RegistryMeta {
-        #[allow(dead_code)]
         version: String,
-        #[allow(dead_code)]
         generated_from: Vec<String>,
     }
 
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct FunctionEntry {
         name: String,
         layer: u32,
-        #[allow(dead_code)]
         category: String,
         module: String,
         params: Vec<String>,
         returns: String,
         #[serde(default)]
         aliases: Vec<String>,
-        #[allow(dead_code)]
         description: String,
     }
 
