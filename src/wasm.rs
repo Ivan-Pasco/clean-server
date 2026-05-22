@@ -140,6 +140,8 @@ pub struct WasmState {
     pub permission_gate: PermissionGate,
     /// Resource limits for this Store (memory, tables, instances)
     pub limits: StoreLimits,
+    /// Accumulated CSS strings for injection into the response <head>
+    pub pending_head_css: Vec<String>,
 }
 
 /// Request context passed to handlers
@@ -212,6 +214,7 @@ impl WasmState {
             islands_store: create_shared_islands_store(),
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
+            pending_head_css: Vec::new(),
         }
     }
 
@@ -236,6 +239,7 @@ impl WasmState {
             islands_store: create_shared_islands_store(),
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
+            pending_head_css: Vec::new(),
         }
     }
 
@@ -268,6 +272,7 @@ impl WasmState {
             islands_store,
             permission_gate,
             limits: build_store_limits(memory_limit),
+            pending_head_css: Vec::new(),
         }
     }
 
@@ -336,6 +341,11 @@ impl WasmState {
     /// Set a redirect response
     pub fn set_redirect(&mut self, status_code: u16, url: String) {
         self.pending_redirect = Some((status_code, url));
+    }
+
+    /// Take accumulated head CSS (consumes it)
+    pub fn take_pending_head_css(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_head_css)
     }
 }
 

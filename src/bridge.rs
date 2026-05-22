@@ -19,6 +19,7 @@
 //! - Session management (_session_store, _session_get, _session_delete, _session_exists, _session_set_csrf, _session_get_csrf, _http_set_cookie)
 //! - Session auth (_auth_get_session, _auth_require_auth, _auth_require_role, _auth_can, _auth_has_any_role)
 //! - Roles (_roles_register, _role_has_permission, _role_get_permissions)
+//! - UI templates (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css)
 
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
@@ -84,6 +85,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_response_functions(&mut linker)?;
     register_json_functions(&mut linker)?;
     register_islands_functions(&mut linker)?;
+    register_ui_functions(&mut linker)?;
     register_async_functions(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
@@ -1807,6 +1809,172 @@ fn register_islands_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<(
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _island_register: {}", e)))?;
 
     Ok(())
+}
+
+/// Register UI template bridge functions (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css)
+fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _ui_load_layout - Load an HTML layout file from {cwd}/app/layouts/{name}.html
+    register_bridge_fn!(
+        linker,
+        "_ui_load_layout",
+        |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    error!("_ui_load_layout: Failed to read layout name");
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let path = cwd.join("app").join("layouts").join(format!("{}.html", name));
+            debug!("_ui_load_layout: loading {:?}", path);
+
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => write_string_to_caller(&mut caller, &contents),
+                Err(e) => {
+                    error!("_ui_load_layout: Failed to read '{:?}': {}", path, e);
+                    write_string_to_caller(&mut caller, "")
+                }
+            }
+        }
+    );
+
+    // _ui_load_page - Load an HTML page template from {cwd}/app/pages/{name}.html
+    register_bridge_fn!(
+        linker,
+        "_ui_load_page",
+        |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    error!("_ui_load_page: Failed to read page name");
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let path = cwd.join("app").join("pages").join(format!("{}.html", name));
+            debug!("_ui_load_page: loading {:?}", path);
+
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => write_string_to_caller(&mut caller, &contents),
+                Err(e) => {
+                    error!("_ui_load_page: Failed to read '{:?}': {}", path, e);
+                    write_string_to_caller(&mut caller, "")
+                }
+            }
+        }
+    );
+
+    // _ui_render_page - Render {cwd}/app/pages/{name}.html with {{ key }} substitution
+    // data is a JSON string; missing keys produce empty string
+    register_bridge_fn!(
+        linker,
+        "_ui_render_page",
+        |mut caller: Caller<'_, WasmState>,
+         name_ptr: i32,
+         name_len: i32,
+         data_ptr: i32,
+         data_len: i32|
+         -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    error!("_ui_render_page: Failed to read page name");
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+
+            let data_str = read_raw_string(&mut caller, data_ptr, data_len).unwrap_or_default();
+
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let path = cwd.join("app").join("pages").join(format!("{}.html", name));
+            debug!("_ui_render_page: rendering {:?}", path);
+
+            let template = match std::fs::read_to_string(&path) {
+                Ok(contents) => contents,
+                Err(e) => {
+                    error!("_ui_render_page: Failed to read '{:?}': {}", path, e);
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+
+            let data: serde_json::Value = if data_str.is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&data_str).unwrap_or_else(|e| {
+                    error!("_ui_render_page: Failed to parse JSON data for '{}': {}", name, e);
+                    serde_json::Value::Object(serde_json::Map::new())
+                })
+            };
+
+            let rendered = substitute_template(&template, &data);
+            write_string_to_caller(&mut caller, &rendered)
+        }
+    );
+
+    // _ui_inject_head_css - Accumulate CSS for injection into the response <head>
+    register_bridge_fn!(
+        linker,
+        "_ui_inject_head_css",
+        |mut caller: Caller<'_, WasmState>, css_ptr: i32, css_len: i32| -> i32 {
+            let css = match read_raw_string(&mut caller, css_ptr, css_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ui_inject_head_css: Failed to read CSS string");
+                    return 0;
+                }
+            };
+
+            caller.data_mut().pending_head_css.push(css);
+            1
+        }
+    );
+
+    Ok(())
+}
+
+/// Replace all `{{ key }}` tokens in `template` with the corresponding value
+/// from `data`. Missing keys produce an empty string. Nested keys are not
+/// supported — only top-level JSON object fields.
+fn substitute_template(template: &str, data: &serde_json::Value) -> String {
+    let mut result = template.to_string();
+    if let Some(obj) = data.as_object() {
+        for (key, value) in obj {
+            let placeholder = format!("{{{{ {} }}}}", key);
+            let replacement = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            result = result.replace(&placeholder, &replacement);
+        }
+    }
+    // Replace any remaining {{ ... }} placeholders (unknown keys) with empty string
+    let mut cleaned = String::with_capacity(result.len());
+    let mut chars = result.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '{' && chars.peek() == Some(&'{') {
+            chars.next(); // consume second '{'
+            // skip until '}}'
+            let mut found_close = false;
+            while let Some(inner) = chars.next() {
+                if inner == '}' && chars.peek() == Some(&'}') {
+                    chars.next(); // consume second '}'
+                    found_close = true;
+                    break;
+                }
+            }
+            if !found_close {
+                cleaned.push('{');
+                cleaned.push('{');
+            }
+        } else {
+            cleaned.push(ch);
+        }
+    }
+    cleaned
 }
 
 /// Register async bridge functions (_async_fire, _async_await, _server_sleep)
