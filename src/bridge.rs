@@ -1813,21 +1813,22 @@ fn register_islands_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<(
 
 /// Register UI template bridge functions (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css)
 fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
-    // _ui_load_layout - Load an HTML layout file from {cwd}/app/layouts/{name}.html
+    // _ui_load_layout - Load an HTML layout file. Caller provides the full relative path
+    // (e.g. "app/ui/layouts/main.html"). Path resolution is the caller's responsibility.
     register_bridge_fn!(
         linker,
         "_ui_load_layout",
         |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) if !s.is_empty() => s,
                 _ => {
-                    error!("_ui_load_layout: Failed to read layout name");
+                    error!("_ui_load_layout: Failed to read path");
                     return write_string_to_caller(&mut caller, "");
                 }
             };
 
             let cwd = std::env::current_dir().unwrap_or_default();
-            let path = cwd.join("app").join("layouts").join(format!("{}.html", name));
+            let path = cwd.join(&path_str);
             debug!("_ui_load_layout: loading {:?}", path);
 
             match std::fs::read_to_string(&path) {
@@ -1840,21 +1841,22 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         }
     );
 
-    // _ui_load_page - Load an HTML page template from {cwd}/app/pages/{name}.html
+    // _ui_load_page - Load an HTML page template. Caller provides the full relative path
+    // (e.g. "app/ui/pages/index.html"). Path resolution is the caller's responsibility.
     register_bridge_fn!(
         linker,
         "_ui_load_page",
         |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) if !s.is_empty() => s,
                 _ => {
-                    error!("_ui_load_page: Failed to read page name");
+                    error!("_ui_load_page: Failed to read path");
                     return write_string_to_caller(&mut caller, "");
                 }
             };
 
             let cwd = std::env::current_dir().unwrap_or_default();
-            let path = cwd.join("app").join("pages").join(format!("{}.html", name));
+            let path = cwd.join(&path_str);
             debug!("_ui_load_page: loading {:?}", path);
 
             match std::fs::read_to_string(&path) {
@@ -1867,8 +1869,9 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         }
     );
 
-    // _ui_render_page - Render {cwd}/app/pages/{name}.html with {{ key }} substitution
-    // data is a JSON string; missing keys produce empty string
+    // _ui_render_page - Render an HTML template with {{ key }} substitution.
+    // Caller provides the full relative path (e.g. "app/ui/pages/index.html").
+    // data is a JSON string; missing keys produce empty string.
     register_bridge_fn!(
         linker,
         "_ui_render_page",
@@ -1878,10 +1881,10 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
          data_ptr: i32,
          data_len: i32|
          -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) if !s.is_empty() => s,
                 _ => {
-                    error!("_ui_render_page: Failed to read page name");
+                    error!("_ui_render_page: Failed to read path");
                     return write_string_to_caller(&mut caller, "");
                 }
             };
@@ -1889,7 +1892,7 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             let data_str = read_raw_string(&mut caller, data_ptr, data_len).unwrap_or_default();
 
             let cwd = std::env::current_dir().unwrap_or_default();
-            let path = cwd.join("app").join("pages").join(format!("{}.html", name));
+            let path = cwd.join(&path_str);
             debug!("_ui_render_page: rendering {:?}", path);
 
             let template = match std::fs::read_to_string(&path) {
@@ -1904,7 +1907,7 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
                 serde_json::Value::Object(serde_json::Map::new())
             } else {
                 serde_json::from_str(&data_str).unwrap_or_else(|e| {
-                    error!("_ui_render_page: Failed to parse JSON data for '{}': {}", name, e);
+                    error!("_ui_render_page: Failed to parse JSON data for '{}': {}", path_str, e);
                     serde_json::Value::Object(serde_json::Map::new())
                 })
             };
