@@ -148,6 +148,19 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
     linker.alias("env", "_state_reset_all", "env", "state.reset_all")?;
 
+    // _state_reset_named - Reset a named state variable
+    // Signature: (name_ptr: i32) -> void
+    // No-op for bump allocator; name_ptr points to the variable name (unused here).
+    linker.func_wrap(
+        "env",
+        "_state_reset_named",
+        |_: Caller<'_, S>, _name_ptr: i32| {
+            // No-op: named state reset not applicable to bump allocator
+        },
+    )?;
+
+    linker.alias("env", "_state_reset_named", "env", "state.reset_named")?;
+
     Ok(())
 }
 
