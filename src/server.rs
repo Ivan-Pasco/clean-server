@@ -676,7 +676,14 @@ async fn handle_request(
                 builder = builder.header(name.as_str(), value.as_str());
             }
 
-            builder.body(Body::from(handler_response.body)).expect("response builder")
+            // Inject accumulated <style> and <link> tags into HTML responses
+            let body = inject_head_tags(
+                handler_response.body,
+                handler_response.head_css,
+                handler_response.head_links,
+            );
+
+            builder.body(Body::from(body)).expect("response builder")
         }
         Err(e) => {
             error!("Handler error: {}", e);
@@ -781,6 +788,33 @@ fn mask_db_url(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Inject accumulated `<style>` and `<link rel="stylesheet">` tags before `</head>`.
+/// If the response is not HTML or has no `</head>`, returns the body unchanged.
+fn inject_head_tags(body: String, css: Vec<String>, links: Vec<String>) -> String {
+    if css.is_empty() && links.is_empty() {
+        return body;
+    }
+    let close_head = body.find("</head>");
+    let close_head = match close_head {
+        Some(pos) => pos,
+        None => return body,
+    };
+
+    let mut injection = String::new();
+    for href in &links {
+        injection.push_str(&format!("<link rel=\"stylesheet\" href=\"{}\">\n", href));
+    }
+    for style in &css {
+        injection.push_str(&format!("<style>{}</style>\n", style));
+    }
+
+    let mut result = String::with_capacity(body.len() + injection.len());
+    result.push_str(&body[..close_head]);
+    result.push_str(&injection);
+    result.push_str(&body[close_head..]);
+    result
 }
 
 #[cfg(test)]
