@@ -24,7 +24,7 @@
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
 use crate::session::parse_cookies;
-use crate::wasm::{IslandEntry, WasmState};
+use crate::wasm::{IslandEntry, McpBridgeState, McpPendingRequest, McpTransport, WasmState};
 use host_bridge::{read_string_from_caller, read_raw_string, write_string_to_caller};
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
@@ -87,6 +87,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_islands_functions(&mut linker)?;
     register_ui_functions(&mut linker)?;
     register_async_functions(&mut linker)?;
+    register_mcp_functions(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
     // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
@@ -2052,6 +2053,315 @@ fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
     );
 
     Ok(())
+}
+
+/// Register MCP bridge functions (_mcp_stdio_read, _mcp_stdio_write, _mcp_http_serve,
+/// _mcp_http_accept, _mcp_sse_send, _mcp_log)
+fn register_mcp_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _mcp_stdio_read — blocks reading one newline-terminated JSON-RPC message from stdin
+    register_bridge_fn!(
+        linker,
+        "_mcp_stdio_read",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            use std::io::BufRead;
+            let mut line = String::new();
+            match std::io::stdin().lock().read_line(&mut line) {
+                Ok(0) => write_string_to_caller(&mut caller, ""),
+                Ok(_) => {
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                    }
+                    debug!("_mcp_stdio_read: {} bytes", line.len());
+                    write_string_to_caller(&mut caller, &line)
+                }
+                Err(e) => {
+                    error!("_mcp_stdio_read: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
+            }
+        }
+    );
+
+    // _mcp_stdio_write — write to stdout (stdio mode) or pending HTTP response (HTTP mode)
+    register_bridge_fn!(
+        linker,
+        "_mcp_stdio_write",
+        |mut caller: Caller<'_, WasmState>, msg_ptr: i32, msg_len: i32| -> i32 {
+            let msg = match read_raw_string(&mut caller, msg_ptr, msg_len) {
+                Some(s) => s,
+                None => {
+                    error!("_mcp_stdio_write: failed to read message");
+                    return 0;
+                }
+            };
+            let mcp = caller.data().mcp.clone();
+            let transport = mcp.transport.lock().expect("mcp transport lock").clone();
+            match transport {
+                McpTransport::Stdio => {
+                    use std::io::Write;
+                    let mut stdout = std::io::stdout().lock();
+                    if stdout
+                        .write_all(format!("{}\n", msg).as_bytes())
+                        .is_ok()
+                    {
+                        let _ = stdout.flush();
+                        debug!("_mcp_stdio_write: stdio {} bytes", msg.len());
+                        1
+                    } else {
+                        0
+                    }
+                }
+                McpTransport::Http => {
+                    let tx = mcp
+                        .current_http_response
+                        .lock()
+                        .expect("mcp response lock")
+                        .take();
+                    match tx {
+                        Some(sender) => {
+                            debug!("_mcp_stdio_write: http {} bytes", msg.len());
+                            if sender.send(msg).is_ok() { 1 } else { 0 }
+                        }
+                        None => {
+                            error!("_mcp_stdio_write: no pending HTTP response context");
+                            0
+                        }
+                    }
+                }
+            }
+        }
+    );
+
+    // _mcp_http_serve — start background MCP HTTP+SSE server
+    register_bridge_fn!(
+        linker,
+        "_mcp_http_serve",
+        |mut caller: Caller<'_, WasmState>, port: i32, host_ptr: i32, host_len: i32| -> i32 {
+            let host = read_raw_string(&mut caller, host_ptr, host_len)
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+            let mcp = caller.data().mcp.clone();
+            *mcp.transport.lock().expect("mcp transport lock") = McpTransport::Http;
+            let addr = format!("{}:{}", host, port);
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(run_mcp_http_server(addr.clone(), mcp));
+                    info!("_mcp_http_serve: MCP HTTP server starting on {}", addr);
+                    1
+                }
+                Err(e) => {
+                    error!("_mcp_http_serve: no tokio runtime: {}", e);
+                    0
+                }
+            }
+        }
+    );
+
+    // _mcp_http_accept — block until next POST /mcp request, return body
+    register_bridge_fn!(
+        linker,
+        "_mcp_http_accept",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let mcp = caller.data().mcp.clone();
+            let request = {
+                let (ref queue_mutex, ref condvar) = mcp.request_queue;
+                let mut q = queue_mutex.lock().expect("mcp queue lock");
+                loop {
+                    if let Some(req) = q.pop_front() {
+                        break req;
+                    }
+                    q = condvar.wait(q).expect("mcp condvar wait");
+                }
+            };
+            *mcp.current_http_response.lock().expect("mcp response lock") =
+                Some(request.response_tx);
+            debug!("_mcp_http_accept: received request {} bytes", request.body.len());
+            write_string_to_caller(&mut caller, &request.body)
+        }
+    );
+
+    // _mcp_sse_send — send raw SSE-formatted event to a specific connected client
+    register_bridge_fn!(
+        linker,
+        "_mcp_sse_send",
+        |mut caller: Caller<'_, WasmState>,
+         client_id_ptr: i32,
+         client_id_len: i32,
+         event_ptr: i32,
+         event_len: i32|
+         -> i32 {
+            let client_id = match read_raw_string(&mut caller, client_id_ptr, client_id_len) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let event = match read_raw_string(&mut caller, event_ptr, event_len) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let clients = caller.data().mcp.sse_clients.lock().expect("sse clients lock");
+            match clients.get(&client_id) {
+                Some(tx) => {
+                    if tx.send(event).is_ok() {
+                        debug!("_mcp_sse_send: sent to client {}", client_id);
+                        1
+                    } else {
+                        debug!("_mcp_sse_send: client {} disconnected", client_id);
+                        0
+                    }
+                }
+                None => {
+                    debug!("_mcp_sse_send: unknown client {}", client_id);
+                    0
+                }
+            }
+        }
+    );
+
+    // _mcp_log — write structured log to stderr (never stdout, which would corrupt stdio transport)
+    register_bridge_fn!(
+        linker,
+        "_mcp_log",
+        |mut caller: Caller<'_, WasmState>,
+         level_ptr: i32,
+         level_len: i32,
+         msg_ptr: i32,
+         msg_len: i32|
+         -> i32 {
+            let level = read_raw_string(&mut caller, level_ptr, level_len)
+                .unwrap_or_else(|| "info".to_string());
+            let msg = read_raw_string(&mut caller, msg_ptr, msg_len).unwrap_or_default();
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "[frame.mcp] {}: {}", level, msg);
+            1
+        }
+    );
+
+    Ok(())
+}
+
+// ── MCP HTTP server helpers ──────────────────────────────────────────────────
+
+/// Axum router state for the MCP HTTP server
+type McpAxumState = std::sync::Arc<McpBridgeState>;
+
+/// Run an MCP HTTP+SSE server on the given address.
+///
+/// Called by `_mcp_http_serve` on the current tokio runtime.
+async fn run_mcp_http_server(addr: String, mcp: McpAxumState) {
+    use axum::{Router, routing::{get, post}};
+    use tower_http::cors::{Any, CorsLayer};
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/mcp", post(handle_mcp_post))
+        .route("/sse", get(handle_mcp_sse))
+        .layer(cors)
+        .with_state(mcp);
+
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("MCP HTTP server: failed to bind {}: {}", addr, e);
+            return;
+        }
+    };
+
+    tracing::info!("MCP HTTP server listening on {}", addr);
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("MCP HTTP server error: {}", e);
+    }
+}
+
+/// Handle POST /mcp — queue the request body for the WASM module, await the response.
+async fn handle_mcp_post(
+    axum::extract::State(mcp): axum::extract::State<McpAxumState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let body_str = String::from_utf8_lossy(&body).into_owned();
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
+    {
+        let (ref queue_mutex, ref condvar) = mcp.request_queue;
+        let mut queue = queue_mutex.lock().expect("mcp queue lock");
+        queue.push_back(McpPendingRequest {
+            body: body_str,
+            response_tx: tx,
+        });
+        condvar.notify_one();
+    }
+
+    let response_body = tokio::task::spawn_blocking(move || rx.recv().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Mcp-Session-Id", session_id)
+        .body(axum::body::Body::from(response_body))
+        .expect("valid MCP POST response")
+}
+
+/// Handle GET /sse — register a new SSE client and stream events to it.
+async fn handle_mcp_sse(
+    axum::extract::State(mcp): axum::extract::State<McpAxumState>,
+) -> axum::response::Response {
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    mcp.sse_clients
+        .lock()
+        .expect("sse clients lock")
+        .insert(client_id.clone(), tx);
+
+    tracing::info!("MCP SSE client connected: {}", client_id);
+
+    let stream = McpSseStream { rx };
+
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("X-Accel-Buffering", "no")
+        .header("Mcp-Session-Id", client_id)
+        .body(axum::body::Body::from_stream(stream))
+        .expect("valid SSE response")
+}
+
+/// Stream adapter that converts a tokio unbounded channel receiver into an
+/// `http_body` `Stream` usable by `axum::body::Body::from_stream`.
+struct McpSseStream {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+impl futures::Stream for McpSseStream {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(s)) => {
+                std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(s))))
+            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
 }
 
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.

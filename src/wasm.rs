@@ -11,7 +11,7 @@ use crate::session::{SessionConfig, SharedSessionStore, create_session_store};
 use host_bridge::{DbBridge, WasmMemory, WasmStateCore};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, info, warn};
 use wasmtime::{Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -99,6 +99,55 @@ pub fn create_shared_islands_store() -> SharedIslandsStore {
     Arc::new(RwLock::new(IslandsStore::new()))
 }
 
+/// MCP transport mode — toggles when `_mcp_http_serve` is called
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum McpTransport {
+    #[default]
+    Stdio,
+    Http,
+}
+
+/// A pending HTTP MCP request waiting for a WASM-side response
+pub struct McpPendingRequest {
+    pub body: String,
+    /// Sync channel sender used to deliver the WASM response back to the HTTP handler
+    pub response_tx: std::sync::mpsc::SyncSender<String>,
+}
+
+/// Shared MCP bridge state — one instance per WASM module
+///
+/// Bridges synchronous WASM bridge calls to the async HTTP+SSE server when in
+/// HTTP transport mode. In stdio mode the queue and SSE map are unused.
+pub struct McpBridgeState {
+    pub transport: Mutex<McpTransport>,
+    pub request_queue: (Mutex<std::collections::VecDeque<McpPendingRequest>>, Condvar),
+    pub current_http_response: Mutex<Option<std::sync::mpsc::SyncSender<String>>>,
+    pub sse_clients: Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+}
+
+impl McpBridgeState {
+    pub fn new() -> Self {
+        Self {
+            transport: Mutex::new(McpTransport::Stdio),
+            request_queue: (Mutex::new(std::collections::VecDeque::new()), Condvar::new()),
+            current_http_response: Mutex::new(None),
+            sse_clients: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl Default for McpBridgeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub type SharedMcpBridgeState = Arc<McpBridgeState>;
+
+pub fn create_shared_mcp_bridge_state() -> SharedMcpBridgeState {
+    Arc::new(McpBridgeState::new())
+}
+
 /// State held by each WASM store instance
 pub struct WasmState {
     /// Memory allocator
@@ -144,6 +193,8 @@ pub struct WasmState {
     pub pending_head_css: Vec<String>,
     /// Accumulated stylesheet hrefs for injection into the response <head> (deduplicated)
     pub pending_head_links: Vec<String>,
+    /// MCP bridge state (transport mode, request queue, SSE clients)
+    pub mcp: SharedMcpBridgeState,
 }
 
 /// Request context passed to handlers
@@ -222,6 +273,7 @@ impl WasmState {
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
             pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
+            mcp: create_shared_mcp_bridge_state(),
         }
     }
 
@@ -248,6 +300,7 @@ impl WasmState {
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
             pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
+            mcp: create_shared_mcp_bridge_state(),
         }
     }
 
@@ -282,6 +335,7 @@ impl WasmState {
             limits: build_store_limits(memory_limit),
             pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
+            mcp: create_shared_mcp_bridge_state(),
         }
     }
 
