@@ -565,6 +565,7 @@ mod tests {
 	use tokio;
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_get_success() {
 		let mut bridge = HttpBridge::new();
 
@@ -588,6 +589,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_post_json() {
 		let mut bridge = HttpBridge::new();
 
@@ -645,6 +647,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_timeout() {
 		let mut bridge = HttpBridge::new();
 
@@ -662,6 +665,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_redirect_follow() {
 		let mut bridge = HttpBridge::new();
 
@@ -682,6 +686,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_redirect_no_follow() {
 		let mut bridge = HttpBridge::new();
 
@@ -700,6 +705,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_too_many_redirects() {
 		let mut bridge = HttpBridge::new();
 
@@ -719,6 +725,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_custom_headers() {
 		let mut bridge = HttpBridge::new();
 
@@ -743,6 +750,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_put_request() {
 		let mut bridge = HttpBridge::new();
 
@@ -763,6 +771,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_delete_request() {
 		let mut bridge = HttpBridge::new();
 
@@ -779,6 +788,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_patch_request() {
 		let mut bridge = HttpBridge::new();
 
@@ -942,6 +952,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_direct_get_method() {
 		let bridge = HttpBridge::new();
 
@@ -954,6 +965,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_direct_post_method() {
 		let bridge = HttpBridge::new();
 
@@ -971,6 +983,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[ignore = "requires external network access to httpbin.org"]
 	async fn test_http_status_codes() {
 		let mut bridge = HttpBridge::new();
 
