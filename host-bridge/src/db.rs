@@ -791,12 +791,12 @@ impl DbBridge {
 
 		// Ensure tracking table exists (syntax works for all three drivers)
 		let create_tracking = "CREATE TABLE IF NOT EXISTS _clean_migrations \
-			(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)";
+			(name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(64) NOT NULL)";
 		driver.execute(create_tracking, &[]).await?;
 
 		for migration in &migrations {
 			// Check if already applied
-			let check_sql = "SELECT COUNT(*) AS cnt FROM _clean_migrations WHERE name = $1";
+			let check_sql = "SELECT COUNT(*) AS cnt FROM _clean_migrations WHERE name = ?";
 			let rows = driver.query(check_sql, &[Value::String(migration.name.clone())]).await;
 			let already_applied = match rows {
 				Ok(ref r) => r.first()
@@ -823,7 +823,7 @@ impl DbBridge {
 
 			// Record as applied
 			let now = chrono::Utc::now().to_rfc3339();
-			let record_sql = "INSERT INTO _clean_migrations (name, applied_at) VALUES ($1, $2)";
+			let record_sql = "INSERT INTO _clean_migrations (name, applied_at) VALUES (?, ?)";
 			driver.execute(record_sql, &[
 				Value::String(migration.name.clone()),
 				Value::String(now),
