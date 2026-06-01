@@ -356,37 +356,28 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // _db_register_migration - Register a migration definition at WASM startup
-    // Args: json_ptr, json_len — a single JSON string with keys name, up_sql, down_sql
+    // Args: name_ptr, name_len, up_ptr, up_len, down_ptr, down_len
     // Returns: 1 on success, 0 on error
     linker.func_wrap(
         "env",
         "_db_register_migration",
-        |mut caller: Caller<'_, S>, json_ptr: i32, json_len: i32| -> i32 {
-            let raw = match read_raw_string(&mut caller, json_ptr, json_len) {
+        |mut caller: Caller<'_, S>,
+         name_ptr: i32,
+         name_len: i32,
+         up_ptr: i32,
+         up_len: i32,
+         down_ptr: i32,
+         down_len: i32|
+         -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) => s,
                 None => {
-                    error!("_db_register_migration: Failed to read JSON string");
+                    error!("_db_register_migration: Failed to read name string");
                     return 0;
                 }
             };
-
-            let payload: serde_json::Value = match serde_json::from_str(&raw) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("_db_register_migration: Failed to parse JSON: {}", e);
-                    return 0;
-                }
-            };
-
-            let name = match payload.get("name").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    error!("_db_register_migration: Missing 'name' field in JSON");
-                    return 0;
-                }
-            };
-            let up_sql = payload.get("up_sql").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let down_sql = payload.get("down_sql").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let up_sql = read_raw_string(&mut caller, up_ptr, up_len).unwrap_or_default();
+            let down_sql = read_raw_string(&mut caller, down_ptr, down_len).unwrap_or_default();
 
             debug!("_db_register_migration: name='{}', up_sql={} bytes, down_sql={} bytes",
                 name, up_sql.len(), down_sql.len());
