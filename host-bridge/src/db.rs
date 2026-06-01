@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 // ============================================================================
@@ -534,11 +535,23 @@ impl DatabaseDriver {
 // DATABASE BRIDGE
 // ============================================================================
 
+/// A single migration definition registered via `_db_register_migration`
+#[derive(Debug, Clone)]
+pub struct MigrationEntry {
+	pub name: String,
+	pub up_sql: String,
+	/// Stored for future rollback support; not used during `run_pending_migrations`
+	#[allow(dead_code)]
+	pub down_sql: String,
+}
+
 /// Database bridge providing database access capabilities
 pub struct DbBridge {
 	driver: Arc<RwLock<Option<DatabaseDriver>>>,
 	config: Arc<RwLock<Option<DbConfig>>>,
 	transactions: Arc<RwLock<HashMap<String, Transaction>>>,
+	/// Pending migration definitions registered by WASM at startup via `_db_register_migration`
+	pending_migrations: Arc<RwLock<Vec<MigrationEntry>>>,
 }
 
 /// Database configuration
@@ -654,6 +667,7 @@ impl DbBridge {
 			driver: Arc::new(RwLock::new(None)),
 			config: Arc::new(RwLock::new(None)),
 			transactions: Arc::new(RwLock::new(HashMap::new())),
+			pending_migrations: Arc::new(RwLock::new(Vec::new())),
 		}
 	}
 
@@ -709,6 +723,7 @@ impl DbBridge {
 			"query_in_tx" => self.query_in_tx(params).await,
 			"execute_in_tx" => self.execute_in_tx(params).await,
 			"config" => self.config_call(params).await,
+			"register_migration" => self.register_migration(params).await,
 			_ => {
 				Ok(json!({
 					"ok": false,
@@ -720,6 +735,104 @@ impl DbBridge {
 				}))
 			}
 		}
+	}
+
+	/// Register a migration definition (called by `_db_register_migration` at WASM startup)
+	async fn register_migration(&self, params: Value) -> Result<Value> {
+		let name = match params.get("name").and_then(|v| v.as_str()) {
+			Some(n) => n.to_string(),
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": {
+						"code": "VALIDATION_ERROR",
+						"message": "register_migration requires 'name' field",
+						"details": {}
+					}
+				}));
+			}
+		};
+		let up_sql = params.get("up_sql").and_then(|v| v.as_str()).unwrap_or("").to_string();
+		let down_sql = params.get("down_sql").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+		let mut migrations = self.pending_migrations.write().await;
+		if migrations.iter().any(|m| m.name == name) {
+			return Ok(json!({ "ok": true, "data": { "status": "already_registered" } }));
+		}
+		migrations.push(MigrationEntry { name, up_sql, down_sql });
+
+		Ok(json!({ "ok": true, "data": null }))
+	}
+
+	/// Run all pending migrations that have not yet been applied to the database.
+	///
+	/// Called once after WASM startup completes. Creates the `_clean_migrations`
+	/// tracking table if it doesn't exist, then applies each registered migration
+	/// in name-sorted order, skipping those already recorded as applied.
+	pub async fn run_pending_migrations(&self) -> Result<()> {
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(_) => {
+				// No DB configured — nothing to run
+				return Ok(());
+			}
+		};
+
+		let migrations = {
+			let guard = self.pending_migrations.read().await;
+			let mut list = guard.clone();
+			list.sort_by(|a, b| a.name.cmp(&b.name));
+			list
+		};
+
+		if migrations.is_empty() {
+			return Ok(());
+		}
+
+		// Ensure tracking table exists (syntax works for all three drivers)
+		let create_tracking = "CREATE TABLE IF NOT EXISTS _clean_migrations \
+			(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)";
+		driver.execute(create_tracking, &[]).await?;
+
+		for migration in &migrations {
+			// Check if already applied
+			let check_sql = "SELECT COUNT(*) AS cnt FROM _clean_migrations WHERE name = $1";
+			let rows = driver.query(check_sql, &[Value::String(migration.name.clone())]).await;
+			let already_applied = match rows {
+				Ok(ref r) => r.first()
+					.and_then(|row| row.get("cnt"))
+					.and_then(|v| v.as_i64())
+					.unwrap_or(0) > 0,
+				Err(_) => false,
+			};
+
+			if already_applied {
+				continue;
+			}
+
+			info!("Applying migration: {}", migration.name);
+
+			if !migration.up_sql.is_empty() {
+				if let Err(e) = driver.execute(&migration.up_sql, &[]).await {
+					warn!("Migration '{}' failed: {}", migration.name, e);
+					return Err(anyhow::anyhow!(
+						"Migration '{}' failed: {}", migration.name, e
+					));
+				}
+			}
+
+			// Record as applied
+			let now = chrono::Utc::now().to_rfc3339();
+			let record_sql = "INSERT INTO _clean_migrations (name, applied_at) VALUES ($1, $2)";
+			driver.execute(record_sql, &[
+				Value::String(migration.name.clone()),
+				Value::String(now),
+			]).await?;
+
+			info!("Migration '{}' applied successfully", migration.name);
+		}
+
+		Ok(())
 	}
 
 	/// Execute a SELECT query and return rows

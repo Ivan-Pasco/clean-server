@@ -336,6 +336,79 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // =========================================
+    // MIGRATION REGISTRATION
+    // =========================================
+
+    // _db_register_migration - Register a migration definition at WASM startup
+    // Args: name_ptr, name_len, up_ptr, up_len, down_ptr, down_len
+    // Returns: 1 on success, 0 on error
+    linker.func_wrap(
+        "env",
+        "_db_register_migration",
+        |mut caller: Caller<'_, S>,
+         name_ptr: i32,
+         name_len: i32,
+         up_ptr: i32,
+         up_len: i32,
+         down_ptr: i32,
+         down_len: i32|
+         -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => {
+                    error!("_db_register_migration: Failed to read name string");
+                    return 0;
+                }
+            };
+
+            let up_sql = read_raw_string(&mut caller, up_ptr, up_len).unwrap_or_default();
+            let down_sql = read_raw_string(&mut caller, down_ptr, down_len).unwrap_or_default();
+
+            debug!("_db_register_migration: name='{}', up_sql={} bytes, down_sql={} bytes",
+                name, up_sql.len(), down_sql.len());
+
+            let db_bridge = match caller.data().db_bridge() {
+                Some(db) => db,
+                None => {
+                    error!("_db_register_migration: No database configured");
+                    return 0;
+                }
+            };
+
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut bridge = db_bridge.write().await;
+                    bridge
+                        .call(
+                            "register_migration",
+                            serde_json::json!({
+                                "name": name,
+                                "up_sql": up_sql,
+                                "down_sql": down_sql
+                            }),
+                        )
+                        .await
+                })
+            });
+
+            match result {
+                Ok(v) => {
+                    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+                        1
+                    } else {
+                        error!("_db_register_migration: Failed: {:?}", v.get("err"));
+                        0
+                    }
+                }
+                Err(e) => {
+                    error!("_db_register_migration: Error: {}", e);
+                    0
+                }
+            }
+        },
+    )?;
+
     Ok(())
 }
 

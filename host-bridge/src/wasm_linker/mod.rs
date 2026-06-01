@@ -163,11 +163,12 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
         ("_html_escape", "html.escape"),
         ("_html_raw",    "html.raw"),
         // Database (database module)
-        ("_db_query",    "db.query"),
-        ("_db_execute",  "db.execute"),
-        ("_db_begin",    "db.begin"),
-        ("_db_commit",   "db.commit"),
-        ("_db_rollback", "db.rollback"),
+        ("_db_query",               "db.query"),
+        ("_db_execute",             "db.execute"),
+        ("_db_begin",               "db.begin"),
+        ("_db_commit",              "db.commit"),
+        ("_db_rollback",            "db.rollback"),
+        ("_db_register_migration",  "db.register_migration"),
         // Crypto (crypto_funcs module)
         ("_crypto_hash_password",   "crypto.hash_password"),
         ("_crypto_verify_password", "crypto.verify_password"),

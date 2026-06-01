@@ -685,6 +685,17 @@ impl WasmInstance {
                 func.call(&mut store, ())
                     .map_err(|e| RuntimeError::wasm(format!("Failed to call {}: {}", name, e)))?;
 
+                // Run any migrations registered during WASM startup
+                let db = self.db_bridge.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let bridge = db.read().await;
+                        if let Err(e) = bridge.run_pending_migrations().await {
+                            tracing::warn!("Migration runner failed: {}", e);
+                        }
+                    })
+                });
+
                 // Check if routes were registered
                 let route_count = self.router.len();
                 info!("Module initialized with {} routes", route_count);
