@@ -2145,11 +2145,7 @@ fn process_iterate_directive(html: &str, data: &serde_json::Value) -> String {
     const MARKER: &str = " cl-iterate=\"";
     let mut result = html.to_string();
 
-    loop {
-        let attr_pos = match result.find(MARKER) {
-            Some(p) => p,
-            None => break,
-        };
+    while let Some(attr_pos) = result.find(MARKER) {
 
         let tag_start = match find_tag_start(&result, attr_pos) {
             Some(p) => p,
@@ -2230,11 +2226,7 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
     const MARKER: &str = " cl-if=\"";
     let mut result = html.to_string();
 
-    loop {
-        let attr_pos = match result.find(MARKER) {
-            Some(p) => p,
-            None => break,
-        };
+    while let Some(attr_pos) = result.find(MARKER) {
 
         let tag_start = match find_tag_start(&result, attr_pos) {
             Some(p) => p,
@@ -2286,12 +2278,10 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
             } else {
                 (else_inner, else_element_end)
             }
+        } else if is_truthy {
+            (inner, element_end)
         } else {
-            if is_truthy {
-                (inner, element_end)
-            } else {
-                (String::new(), element_end)
-            }
+            (String::new(), element_end)
         };
 
         result = format!("{}{}{}", &result[..tag_start], keep, &result[total_end..]);
@@ -2305,11 +2295,7 @@ fn process_show_directive(html: &str, data: &serde_json::Value) -> String {
     const MARKER: &str = " cl-show=\"";
     let mut result = html.to_string();
 
-    loop {
-        let attr_pos = match result.find(MARKER) {
-            Some(p) => p,
-            None => break,
-        };
+    while let Some(attr_pos) = result.find(MARKER) {
 
         let val_start = attr_pos + MARKER.len();
         let val_end = match result[val_start..].find('"') {
