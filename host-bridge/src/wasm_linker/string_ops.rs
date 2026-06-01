@@ -15,6 +15,49 @@ use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use wasmtime::{Caller, Linker};
 
+/// Validate a string against a compile-time integer pattern ID.
+/// IDs: 0=email 1=url 2=uuid 3=phone 4=date 5=integer 6=number 7=alphanumeric
+fn string_matches_by_id(s: &str, pattern_id: i32) -> bool {
+    match pattern_id {
+        0 => {
+            // email
+            let parts: Vec<&str> = s.splitn(2, '@').collect();
+            parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.')
+        }
+        1 => s.starts_with("http://") || s.starts_with("https://"),
+        2 => {
+            // uuid
+            let b = s.as_bytes();
+            b.len() == 36
+                && b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-'
+                && b.iter().enumerate().all(|(i, &c)| {
+                    if i == 8 || i == 13 || i == 18 || i == 23 {
+                        c == b'-'
+                    } else {
+                        c.is_ascii_hexdigit()
+                    }
+                })
+        }
+        3 => {
+            // phone
+            let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+            digits.len() >= 7 && digits.len() <= 15
+        }
+        4 => {
+            // date (YYYY-MM-DD)
+            let parts: Vec<&str> = s.splitn(3, '-').collect();
+            parts.len() == 3
+                && parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit())
+                && parts[1].len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit())
+                && parts[2].len() == 2 && parts[2].chars().all(|c| c.is_ascii_digit())
+        }
+        5 => !s.is_empty() && s.parse::<i64>().is_ok(),
+        6 => !s.is_empty() && s.parse::<f64>().is_ok(),
+        7 => !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
+        _ => false,
+    }
+}
+
 /// Register all string operation functions with the linker
 pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
     // =========================================
@@ -468,49 +511,15 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // string_matches - Validate a string against a named pattern
-    // Signature: (str_ptr: i32, str_len: i32, pattern_ptr: i32, pattern_len: i32) -> i32
-    // Supported patterns: email, url, uuid, phone, date, integer, number, alphanumeric
+    // string_matches - Validate a string against a compile-time integer pattern ID
+    // Signature: (str_ptr: i32, str_len: i32, pattern_id: i32) -> i32
+    // Pattern IDs: 0=email 1=url 2=uuid 3=phone 4=date 5=integer 6=number 7=alphanumeric
     linker.func_wrap(
         "env",
         "string_matches",
-        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, pattern_ptr: i32, _pattern_len: i32| -> i32 {
+        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, pattern_id: i32| -> i32 {
             let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
-            let pattern = read_string_from_caller(&mut caller, pattern_ptr).unwrap_or_default();
-            let matches = match pattern.trim() {
-                "email" => {
-                    let parts: Vec<&str> = s.splitn(2, '@').collect();
-                    parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.')
-                }
-                "url" => s.starts_with("http://") || s.starts_with("https://"),
-                "uuid" => {
-                    let b = s.as_bytes();
-                    b.len() == 36
-                        && b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-'
-                        && b.iter().enumerate().all(|(i, &c)| {
-                            if i == 8 || i == 13 || i == 18 || i == 23 {
-                                c == b'-'
-                            } else {
-                                c.is_ascii_hexdigit()
-                            }
-                        })
-                }
-                "phone" => {
-                    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-                    digits.len() >= 7 && digits.len() <= 15
-                }
-                "date" => {
-                    let parts: Vec<&str> = s.splitn(3, '-').collect();
-                    parts.len() == 3
-                        && parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit())
-                        && parts[1].len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit())
-                        && parts[2].len() == 2 && parts[2].chars().all(|c| c.is_ascii_digit())
-                }
-                "integer" => !s.is_empty() && s.parse::<i64>().is_ok(),
-                "number" => !s.is_empty() && s.parse::<f64>().is_ok(),
-                "alphanumeric" => !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
-                _ => false,
-            };
+            let matches = string_matches_by_id(&s, pattern_id);
             if matches { 1 } else { 0 }
         },
     )?;
@@ -519,43 +528,9 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     linker.func_wrap(
         "env",
         "string.matches",
-        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, pattern_ptr: i32, _pattern_len: i32| -> i32 {
+        |mut caller: Caller<'_, S>, str_ptr: i32, _str_len: i32, pattern_id: i32| -> i32 {
             let s = read_string_from_caller(&mut caller, str_ptr).unwrap_or_default();
-            let pattern = read_string_from_caller(&mut caller, pattern_ptr).unwrap_or_default();
-            let matches = match pattern.trim() {
-                "email" => {
-                    let parts: Vec<&str> = s.splitn(2, '@').collect();
-                    parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.')
-                }
-                "url" => s.starts_with("http://") || s.starts_with("https://"),
-                "uuid" => {
-                    let b = s.as_bytes();
-                    b.len() == 36
-                        && b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-'
-                        && b.iter().enumerate().all(|(i, &c)| {
-                            if i == 8 || i == 13 || i == 18 || i == 23 {
-                                c == b'-'
-                            } else {
-                                c.is_ascii_hexdigit()
-                            }
-                        })
-                }
-                "phone" => {
-                    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-                    digits.len() >= 7 && digits.len() <= 15
-                }
-                "date" => {
-                    let parts: Vec<&str> = s.splitn(3, '-').collect();
-                    parts.len() == 3
-                        && parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit())
-                        && parts[1].len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit())
-                        && parts[2].len() == 2 && parts[2].chars().all(|c| c.is_ascii_digit())
-                }
-                "integer" => !s.is_empty() && s.parse::<i64>().is_ok(),
-                "number" => !s.is_empty() && s.parse::<f64>().is_ok(),
-                "alphanumeric" => !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
-                _ => false,
-            };
+            let matches = string_matches_by_id(&s, pattern_id);
             if matches { 1 } else { 0 }
         },
     )?;

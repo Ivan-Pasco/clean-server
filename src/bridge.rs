@@ -24,7 +24,7 @@
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
 use crate::session::parse_cookies;
-use crate::wasm::{IslandEntry, McpBridgeState, McpPendingRequest, McpTransport, WasmState};
+use crate::wasm::{IslandEntry, McpBridgeState, McpPendingRequest, McpTransport, TestResponse, WasmState};
 use host_bridge::{read_string_from_caller, read_raw_string, write_string_to_caller};
 use tracing::{debug, error, info};
 use wasmtime::{Caller, Engine, Linker};
@@ -88,6 +88,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_ui_functions(&mut linker)?;
     register_async_functions(&mut linker)?;
     register_mcp_functions(&mut linker)?;
+    register_test_functions(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
     // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
@@ -2697,6 +2698,192 @@ impl futures::Stream for McpSseStream {
     }
 }
 
+/// Register test bridge functions (_test_http_request, _test_response_status, _test_response_body).
+///
+/// These support `test: endpoint:` blocks in Clean Language. `_test_http_request` dispatches
+/// an in-process HTTP request by calling the registered route handler WASM export directly,
+/// capturing the response into a handle map. The companion functions read back status/body.
+fn register_test_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _test_http_request - Dispatch an in-process request and return a response handle
+    // Signature: (method_ptr, method_len, path_ptr, path_len, body_ptr, body_len,
+    //             hkey_ptr, hkey_len, hval_ptr, hval_len) -> i32
+    // Returns: handle >= 0 on success, -1 if route not found or dispatch fails
+    register_bridge_fn!(
+        linker,
+        "_test_http_request",
+        |mut caller: Caller<'_, WasmState>,
+         method_ptr: i32,
+         method_len: i32,
+         path_ptr: i32,
+         path_len: i32,
+         body_ptr: i32,
+         body_len: i32,
+         hkey_ptr: i32,
+         hkey_len: i32,
+         hval_ptr: i32,
+         hval_len: i32|
+         -> i32 {
+            let method = read_raw_string(&mut caller, method_ptr, method_len)
+                .unwrap_or_else(|| "GET".to_string());
+            let full_path = read_raw_string(&mut caller, path_ptr, path_len)
+                .unwrap_or_else(|| "/".to_string());
+            let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
+            let hkey = read_raw_string(&mut caller, hkey_ptr, hkey_len).unwrap_or_default();
+            let hval = read_raw_string(&mut caller, hval_ptr, hval_len).unwrap_or_default();
+
+            // Strip query string from path for route lookup
+            let (clean_path, query_str) = match full_path.find('?') {
+                Some(qi) => (full_path[..qi].to_string(), full_path[qi + 1..].to_string()),
+                None => (full_path.clone(), String::new()),
+            };
+
+            let http_method = match HttpMethod::parse(&method) {
+                Ok(m) => m,
+                Err(_) => {
+                    error!("_test_http_request: invalid method '{}'", method);
+                    return -1;
+                }
+            };
+
+            // Look up route and extract path params
+            let (handler_name, path_params) = {
+                let state = caller.data();
+                match state.router.find(http_method, &clean_path) {
+                    Some((handler, params)) => (handler.handler_name.clone(), params),
+                    None => {
+                        debug!("_test_http_request: no route for {} {}", method, clean_path);
+                        return -1;
+                    }
+                }
+            };
+
+            // Get the handler export before mutably borrowing caller
+            let handler_func = caller.get_export(&handler_name).and_then(|e| e.into_func());
+            let handler_func = match handler_func {
+                Some(f) => f,
+                None => {
+                    error!(
+                        "_test_http_request: handler export '{}' not found",
+                        handler_name
+                    );
+                    return -1;
+                }
+            };
+
+            // Parse query string into a map
+            let query: std::collections::HashMap<String, String> = if query_str.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                use url::form_urlencoded;
+                form_urlencoded::parse(query_str.as_bytes())
+                    .into_owned()
+                    .collect()
+            };
+
+            // Build request headers
+            let mut headers = vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ];
+            if !hkey.is_empty() {
+                headers.push((hkey, hval));
+            }
+
+            // Set test request context and clear pending response state
+            {
+                let state = caller.data_mut();
+                state.request_context = Some(crate::wasm::RequestContext {
+                    method: method.clone(),
+                    path: clean_path.clone(),
+                    headers,
+                    body,
+                    params: path_params,
+                    query,
+                });
+                state.pending_status = None;
+                state.pending_body = None;
+                state.pending_headers.clear();
+                state.pending_redirect = None;
+                state.auth_context = None;
+            }
+
+            // Determine result buffer size and call the handler
+            let result_count = handler_func.ty(&caller).results().len();
+            let mut results = vec![wasmtime::Val::I32(0); result_count];
+            let call_ok = handler_func.call(&mut caller, &[], &mut results).is_ok();
+
+            // Capture and store the response
+            let handle = {
+                let state = caller.data_mut();
+                let status = state.pending_status.unwrap_or(200) as i32;
+                let body = state.pending_body.clone().unwrap_or_default();
+                // Clear request state
+                state.request_context = None;
+                state.pending_status = None;
+                state.pending_body = None;
+                state.pending_headers.clear();
+                state.auth_context = None;
+
+                if !call_ok {
+                    debug!("_test_http_request: handler '{}' returned an error", handler_name);
+                    return -1;
+                }
+
+                let h = state.next_test_handle;
+                state.next_test_handle += 1;
+                state.test_responses.insert(h, TestResponse { status, body });
+                h
+            };
+
+            debug!(
+                "_test_http_request: {} {} -> handle {}",
+                method, clean_path, handle
+            );
+            handle
+        }
+    );
+
+    // _test_response_status - Get HTTP status from a test response handle
+    // Signature: (handle: i32) -> i32
+    // Returns: status code (e.g. 200), or -1 if handle unknown
+    register_bridge_fn!(
+        linker,
+        "_test_response_status",
+        |caller: Caller<'_, WasmState>, handle: i32| -> i32 {
+            let state = caller.data();
+            match state.test_responses.get(&handle) {
+                Some(r) => r.status,
+                None => {
+                    debug!("_test_response_status: unknown handle {}", handle);
+                    -1
+                }
+            }
+        }
+    );
+
+    // _test_response_body - Get response body JSON from a test response handle
+    // Signature: (handle: i32) -> i32 (length-prefixed pointer)
+    // Returns: empty string if handle unknown
+    register_bridge_fn!(
+        linker,
+        "_test_response_body",
+        |mut caller: Caller<'_, WasmState>, handle: i32| -> i32 {
+            let body = {
+                let state = caller.data();
+                match state.test_responses.get(&handle) {
+                    Some(r) => r.body.clone(),
+                    None => {
+                        debug!("_test_response_body: unknown handle {}", handle);
+                        String::new()
+                    }
+                }
+            };
+            write_string_to_caller(&mut caller, &body)
+        }
+    );
+
+    Ok(())
+}
+
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
 ///
 /// The Clean Language compiler (0.30.120+) generates WASM imports in both
@@ -2763,6 +2950,7 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         ("_json_decode",         "json.decode"),
         ("_json_get",            "json.get"),
         // Async aliases are registered by register_bridge_fn! macro in register_async_functions
+        // Test bridge aliases are registered by register_bridge_fn! macro in register_test_functions
     ];
 
     for (canonical, dot_alias) in ALIASES {

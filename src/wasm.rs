@@ -195,6 +195,10 @@ pub struct WasmState {
     pub pending_head_links: Vec<String>,
     /// MCP bridge state (transport mode, request queue, SSE clients)
     pub mcp: SharedMcpBridgeState,
+    /// Responses from in-process test requests, keyed by handle
+    pub test_responses: std::collections::HashMap<i32, TestResponse>,
+    /// Counter for the next test response handle
+    pub next_test_handle: i32,
 }
 
 /// Request context passed to handlers
@@ -214,6 +218,13 @@ pub struct AuthContext {
     pub user_id: i32,
     pub role: String,
     pub session_id: Option<String>,
+}
+
+/// Response captured from a `_test_http_request` in-process dispatch
+#[derive(Debug, Clone)]
+pub struct TestResponse {
+    pub status: i32,
+    pub body: String,
 }
 
 /// Response data from a handler call
@@ -274,6 +285,8 @@ impl WasmState {
             pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
             mcp: create_shared_mcp_bridge_state(),
+            test_responses: std::collections::HashMap::new(),
+            next_test_handle: 0,
         }
     }
 
@@ -301,6 +314,8 @@ impl WasmState {
             pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
             mcp: create_shared_mcp_bridge_state(),
+            test_responses: std::collections::HashMap::new(),
+            next_test_handle: 0,
         }
     }
 
@@ -336,6 +351,8 @@ impl WasmState {
             pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
             mcp: create_shared_mcp_bridge_state(),
+            test_responses: std::collections::HashMap::new(),
+            next_test_handle: 0,
         }
     }
 
