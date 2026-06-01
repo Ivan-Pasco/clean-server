@@ -375,20 +375,32 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
 
                 let value = {
                     let state = caller.data();
-                    state
-                        .request_context
-                        .as_ref()
-                        .and_then(|ctx| {
+                    if let Some(ctx) = state.request_context.as_ref() {
+                        let content_type = ctx.headers.iter()
+                            .find(|(k, _)| k.to_lowercase() == "content-type")
+                            .map(|(_, v)| v.to_lowercase())
+                            .unwrap_or_default();
+                        if content_type.contains("application/x-www-form-urlencoded") {
+                            use url::form_urlencoded;
+                            form_urlencoded::parse(ctx.body.as_bytes())
+                                .into_owned()
+                                .find(|(k, _)| k == &field_name)
+                                .map(|(_, v)| v)
+                                .unwrap_or_default()
+                        } else {
                             serde_json::from_str::<serde_json::Value>(&ctx.body).ok()
-                        })
-                        .and_then(|json| {
-                            json.get(&field_name).map(|v| match v {
-                                serde_json::Value::String(s) => s.clone(),
-                                serde_json::Value::Null => String::new(),
-                                other => other.to_string(),
-                            })
-                        })
-                        .unwrap_or_default()
+                                .and_then(|json| {
+                                    json.get(&field_name).map(|v| match v {
+                                        serde_json::Value::String(s) => s.clone(),
+                                        serde_json::Value::Null => String::new(),
+                                        other => other.to_string(),
+                                    })
+                                })
+                                .unwrap_or_default()
+                        }
+                    } else {
+                        String::new()
+                    }
                 };
 
                 debug!("_req_body_field({}): {}", field_name, value);
@@ -1913,7 +1925,25 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
                 })
             };
 
-            let rendered = substitute_template(&template, &data);
+            // Extract <page layout="..."> wrapper if present
+            let (page_content, layout_name) = extract_page_layout(&template);
+
+            // Substitute template variables ({key} format)
+            let substituted = substitute_template(&page_content, &data);
+
+            // Evaluate server-side directives (cl-if, cl-show, cl-iterate)
+            let with_directives = process_directives(&substituted, &data);
+
+            // Wrap in layout if specified
+            let rendered = match layout_name {
+                Some(ref name) => apply_layout(&with_directives, name, &cwd),
+                None => with_directives,
+            };
+
+            caller.data_mut().add_header(
+                "Content-Type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            );
             write_string_to_caller(&mut caller, &rendered)
         }
     );
@@ -1961,14 +1991,13 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     Ok(())
 }
 
-/// Replace all `{{ key }}` tokens in `template` with the corresponding value
-/// from `data`. Missing keys produce an empty string. Nested keys are not
-/// supported — only top-level JSON object fields.
+/// Replace `{key}` tokens in `template` with values from `data`.
+/// Missing keys are left as-is. Only top-level JSON object fields are supported.
 fn substitute_template(template: &str, data: &serde_json::Value) -> String {
     let mut result = template.to_string();
     if let Some(obj) = data.as_object() {
         for (key, value) in obj {
-            let placeholder = format!("{{{{ {} }}}}", key);
+            let placeholder = format!("{{{}}}", key);
             let replacement = match value {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Null => String::new(),
@@ -1977,30 +2006,348 @@ fn substitute_template(template: &str, data: &serde_json::Value) -> String {
             result = result.replace(&placeholder, &replacement);
         }
     }
-    // Replace any remaining {{ ... }} placeholders (unknown keys) with empty string
-    let mut cleaned = String::with_capacity(result.len());
-    let mut chars = result.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '{' && chars.peek() == Some(&'{') {
-            chars.next(); // consume second '{'
-            // skip until '}}'
-            let mut found_close = false;
-            while let Some(inner) = chars.next() {
-                if inner == '}' && chars.peek() == Some(&'}') {
-                    chars.next(); // consume second '}'
-                    found_close = true;
-                    break;
-                }
-            }
-            if !found_close {
-                cleaned.push('{');
-                cleaned.push('{');
-            }
-        } else {
-            cleaned.push(ch);
+    result
+}
+
+/// Extract `<page layout="name">...</page>` wrapper.
+/// Returns (inner_content, Some(layout_name)) or (full_html, None).
+fn extract_page_layout(html: &str) -> (String, Option<String>) {
+    const PAGE_TAG: &str = "<page";
+    let Some(tag_start) = html.find(PAGE_TAG) else {
+        return (html.to_string(), None);
+    };
+
+    let after_tag = &html[tag_start + PAGE_TAG.len()..];
+
+    let layout = after_tag.find(" layout=\"").map(|attr_pos| {
+        let val_start = attr_pos + " layout=\"".len();
+        let val_end = after_tag[val_start..].find('"').unwrap_or(0);
+        after_tag[val_start..val_start + val_end].to_string()
+    });
+
+    let open_end = html[tag_start..]
+        .find('>')
+        .map(|p| tag_start + p + 1)
+        .unwrap_or(tag_start);
+
+    let close_tag = "</page>";
+    let inner_end = html[open_end..].find(close_tag).map(|p| open_end + p).unwrap_or(html.len());
+    let inner = html[open_end..inner_end].trim().to_string();
+
+    (inner, layout)
+}
+
+/// Load a layout file and inject `content` into its `<slot>`.
+fn apply_layout(content: &str, layout_name: &str, cwd: &std::path::Path) -> String {
+    let candidates = [
+        cwd.join(format!("app/ui/layouts/{}.html", layout_name)),
+        cwd.join(format!("ui/layouts/{}.html", layout_name)),
+        cwd.join(format!("layouts/{}.html", layout_name)),
+        cwd.join(format!("{}.html", layout_name)),
+    ];
+
+    for path in &candidates {
+        if let Ok(layout_html) = std::fs::read_to_string(path) {
+            return layout_html
+                .replace("<slot />", content)
+                .replace("<slot/>", content)
+                .replace("<slot></slot>", content);
         }
     }
-    cleaned
+
+    debug!("apply_layout: layout '{}' not found, returning content as-is", layout_name);
+    content.to_string()
+}
+
+/// Evaluate server-side directives: cl-iterate, cl-if/cl-else, cl-show.
+fn process_directives(html: &str, data: &serde_json::Value) -> String {
+    let mut result = process_iterate_directive(html, data);
+    result = process_if_directive(&result, data);
+    result = process_show_directive(&result, data);
+    result
+}
+
+/// Look up a dot-separated path in a JSON value.
+fn get_nested_value<'a>(data: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = data;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+/// Evaluate a simple boolean condition against data (key path lookup).
+fn evaluate_condition(condition: &str, data: &serde_json::Value) -> bool {
+    match get_nested_value(data, condition.trim()) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Null) | None => false,
+        Some(serde_json::Value::String(s)) => !s.is_empty(),
+        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
+        Some(serde_json::Value::Array(arr)) => !arr.is_empty(),
+        Some(serde_json::Value::Object(obj)) => !obj.is_empty(),
+    }
+}
+
+/// Find the opening tag start (`<`) that contains position `attr_pos` inside `html`.
+fn find_tag_start(html: &str, attr_pos: usize) -> Option<usize> {
+    html[..attr_pos].rfind('<')
+}
+
+/// Extract the tag name from an opening tag starting at `tag_start` in `html`.
+fn extract_tag_name(html: &str, tag_start: usize) -> String {
+    let after = &html[tag_start + 1..];
+    let end = after
+        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .unwrap_or(after.len());
+    after[..end].to_string()
+}
+
+/// Find the end position (exclusive) of the element that begins with an opening tag at `tag_start`.
+/// Handles nesting by counting open/close pairs for `tag_name`.
+fn find_element_end(html: &str, tag_start: usize, tag_name: &str) -> Option<usize> {
+    let open_pattern = format!("<{}", tag_name);
+    let close_pattern = format!("</{}>", tag_name);
+
+    // Skip past the opening tag itself
+    let open_tag_end = html[tag_start..].find('>')? + tag_start + 1;
+    let mut depth = 1usize;
+    let mut pos = open_tag_end;
+
+    while pos < html.len() {
+        let rest = &html[pos..];
+        let next_open = rest.find(&open_pattern);
+        let next_close = rest.find(&close_pattern);
+
+        match (next_open, next_close) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                pos += o + open_pattern.len();
+            }
+            (_, Some(c)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(pos + c + close_pattern.len());
+                }
+                pos += c + close_pattern.len();
+            }
+            (Some(o), None) => {
+                depth += 1;
+                pos += o + open_pattern.len();
+            }
+            (None, None) => break,
+        }
+    }
+    None
+}
+
+/// Process `cl-iterate="item in array_path"` directives.
+fn process_iterate_directive(html: &str, data: &serde_json::Value) -> String {
+    const MARKER: &str = " cl-iterate=\"";
+    let mut result = html.to_string();
+
+    loop {
+        let attr_pos = match result.find(MARKER) {
+            Some(p) => p,
+            None => break,
+        };
+
+        let tag_start = match find_tag_start(&result, attr_pos) {
+            Some(p) => p,
+            None => break,
+        };
+        let tag_name = extract_tag_name(&result, tag_start);
+
+        // Extract attribute value
+        let val_start = attr_pos + MARKER.len();
+        let val_end = match result[val_start..].find('"') {
+            Some(p) => val_start + p,
+            None => break,
+        };
+        let attr_value = result[val_start..val_end].to_string();
+
+        // Parse "item in array_path"
+        let parts: Vec<&str> = attr_value.splitn(3, ' ').collect();
+        if parts.len() != 3 || parts[1] != "in" {
+            break;
+        }
+        let item_var = parts[0];
+        let array_path = parts[2];
+
+        // Find element end
+        let element_end = match find_element_end(&result, tag_start, &tag_name) {
+            Some(e) => e,
+            None => break,
+        };
+
+        // Extract inner HTML (between opening tag close and closing tag)
+        let open_tag_end = match result[tag_start..].find('>') {
+            Some(p) => tag_start + p + 1,
+            None => break,
+        };
+        let close_tag_len = tag_name.len() + 3; // </name>
+        let inner = result[open_tag_end..element_end - close_tag_len].to_string();
+
+        // Get array from data
+        let items: Vec<serde_json::Value> = match get_nested_value(data, array_path) {
+            Some(serde_json::Value::Array(arr)) => arr.clone(),
+            _ => vec![],
+        };
+
+        // Expand
+        let mut expanded = String::new();
+        for item in &items {
+            let mut item_html = inner.clone();
+            if let Some(obj) = item.as_object() {
+                for (field, value) in obj {
+                    let placeholder = format!("{{{}.{}}}", item_var, field);
+                    let replacement = match value {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => String::new(),
+                        other => other.to_string(),
+                    };
+                    item_html = item_html.replace(&placeholder, &replacement);
+                }
+            }
+            // Scalar items: {item_var}
+            let placeholder = format!("{{{}}}", item_var);
+            let scalar = match item {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            item_html = item_html.replace(&placeholder, &scalar);
+            expanded.push_str(&item_html);
+        }
+
+        result = format!("{}{}{}", &result[..tag_start], expanded, &result[element_end..]);
+    }
+
+    result
+}
+
+/// Process `cl-if="condition"` / `cl-else` directives.
+fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
+    const MARKER: &str = " cl-if=\"";
+    let mut result = html.to_string();
+
+    loop {
+        let attr_pos = match result.find(MARKER) {
+            Some(p) => p,
+            None => break,
+        };
+
+        let tag_start = match find_tag_start(&result, attr_pos) {
+            Some(p) => p,
+            None => break,
+        };
+        let tag_name = extract_tag_name(&result, tag_start);
+
+        let val_start = attr_pos + MARKER.len();
+        let val_end = match result[val_start..].find('"') {
+            Some(p) => val_start + p,
+            None => break,
+        };
+        let condition = result[val_start..val_end].to_string();
+        let is_truthy = evaluate_condition(&condition, data);
+
+        let element_end = match find_element_end(&result, tag_start, &tag_name) {
+            Some(e) => e,
+            None => break,
+        };
+        let open_tag_end = match result[tag_start..].find('>') {
+            Some(p) => tag_start + p + 1,
+            None => break,
+        };
+        let close_tag_len = tag_name.len() + 3;
+        let inner = result[open_tag_end..element_end - close_tag_len].to_string();
+
+        // Check for a cl-else element immediately following (ignoring whitespace)
+        let rest_trimmed_offset = element_end
+            + result[element_end..].len()
+            - result[element_end..].trim_start().len();
+        let rest = &result[rest_trimmed_offset..];
+        let has_else = rest.starts_with('<') && {
+            let tag_end = rest.find('>').unwrap_or(0);
+            rest[..tag_end].contains(" cl-else")
+        };
+
+        let (keep, total_end) = if has_else {
+            // Find the else element
+            let else_tag_start = rest_trimmed_offset;
+            let else_tag_name = extract_tag_name(&result, else_tag_start);
+            let else_element_end = find_element_end(&result, else_tag_start, &else_tag_name)
+                .unwrap_or(else_tag_start);
+            let else_open_tag_end = result[else_tag_start..].find('>').map(|p| else_tag_start + p + 1).unwrap_or(else_tag_start);
+            let else_close_tag_len = else_tag_name.len() + 3;
+            let else_inner = result[else_open_tag_end..else_element_end - else_close_tag_len].to_string();
+
+            if is_truthy {
+                (inner, else_element_end)
+            } else {
+                (else_inner, else_element_end)
+            }
+        } else {
+            if is_truthy {
+                (inner, element_end)
+            } else {
+                (String::new(), element_end)
+            }
+        };
+
+        result = format!("{}{}{}", &result[..tag_start], keep, &result[total_end..]);
+    }
+
+    result
+}
+
+/// Process `cl-show="condition"` directives (adds `display:none` when falsy).
+fn process_show_directive(html: &str, data: &serde_json::Value) -> String {
+    const MARKER: &str = " cl-show=\"";
+    let mut result = html.to_string();
+
+    loop {
+        let attr_pos = match result.find(MARKER) {
+            Some(p) => p,
+            None => break,
+        };
+
+        let val_start = attr_pos + MARKER.len();
+        let val_end = match result[val_start..].find('"') {
+            Some(p) => val_start + p,
+            None => break,
+        };
+        let condition = result[val_start..val_end].to_string();
+        let is_truthy = evaluate_condition(&condition, data);
+
+        // Remove the cl-show="..." attribute regardless
+        let attr_full = format!(" cl-show=\"{}\"", condition);
+        if is_truthy {
+            result = result.replacen(&attr_full, "", 1);
+        } else {
+            // Find the tag start and add display:none style
+            let tag_start = match find_tag_start(&result, attr_pos) {
+                Some(p) => p,
+                None => break,
+            };
+            let tag_end = match result[tag_start..].find('>') {
+                Some(p) => tag_start + p,
+                None => break,
+            };
+            let opening_tag = result[tag_start..tag_end + 1].to_string();
+            let new_tag = if opening_tag.contains("style=\"") {
+                opening_tag
+                    .replacen(&attr_full, "", 1)
+                    .replacen("style=\"", "style=\"display:none;", 1)
+            } else {
+                opening_tag
+                    .replacen(&attr_full, "", 1)
+                    .replacen('>', " style=\"display:none;\">", 1)
+            };
+            result = format!("{}{}{}", &result[..tag_start], new_tag, &result[tag_end + 1..]);
+        }
+    }
+
+    result
 }
 
 /// Register async bridge functions (_async_fire, _async_await, _server_sleep)

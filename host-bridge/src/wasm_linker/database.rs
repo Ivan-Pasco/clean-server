@@ -68,13 +68,28 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
-            // Execute query using tokio runtime
+            // Route write SQL to execute; SELECT/WITH goes to query
+            let sql_upper = sql.trim_start().to_uppercase();
+            let method = if sql_upper.starts_with("INSERT")
+                || sql_upper.starts_with("UPDATE")
+                || sql_upper.starts_with("DELETE")
+                || sql_upper.starts_with("CREATE")
+                || sql_upper.starts_with("DROP")
+                || sql_upper.starts_with("ALTER")
+                || sql_upper.starts_with("TRUNCATE")
+                || sql_upper.starts_with("REPLACE")
+            {
+                "execute"
+            } else {
+                "query"
+            };
+
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     let mut bridge = db_bridge.write().await;
                     bridge
                         .call(
-                            "query",
+                            method,
                             json!({
                                 "sql": sql,
                                 "params": params
