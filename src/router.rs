@@ -97,6 +97,8 @@ pub struct RouteHandler {
     pub protected: bool,
     /// Required role (if any)
     pub required_role: Option<String>,
+    /// Whether this is a Server-Sent Events (STREAM) route
+    pub is_sse: bool,
 }
 
 /// Key for route lookup
@@ -131,6 +133,7 @@ impl Router {
         handler_name: String,
         protected: bool,
         required_role: Option<String>,
+        is_sse: bool,
     ) -> RuntimeResult<()> {
         let key = RouteKey {
             method,
@@ -143,6 +146,7 @@ impl Router {
             handler_name,
             protected,
             required_role,
+            is_sse,
         };
 
         // Store in routes map
@@ -291,13 +295,13 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None)
+            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None, false)
             .unwrap();
         router
-            .register(HttpMethod::GET, "/api/users".to_string(), "__route_handler_1".to_string(), false, None)
+            .register(HttpMethod::GET, "/api/users".to_string(), "__route_handler_1".to_string(), false, None, false)
             .unwrap();
         router
-            .register(HttpMethod::POST, "/api/users".to_string(), "__route_handler_2".to_string(), false, None)
+            .register(HttpMethod::POST, "/api/users".to_string(), "__route_handler_2".to_string(), false, None, false)
             .unwrap();
 
         assert!(router.find(HttpMethod::GET, "/").is_some());
@@ -312,7 +316,7 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/users/:id".to_string(), "__route_handler_0".to_string(), false, None)
+            .register(HttpMethod::GET, "/users/:id".to_string(), "__route_handler_0".to_string(), false, None, false)
             .unwrap();
         router
             .register(
@@ -321,6 +325,7 @@ mod tests {
                 "__route_handler_1".to_string(),
                 false,
                 None,
+                false,
             )
             .unwrap();
 
@@ -341,10 +346,10 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/public".to_string(), "__route_handler_0".to_string(), false, None)
+            .register(HttpMethod::GET, "/public".to_string(), "__route_handler_0".to_string(), false, None, false)
             .unwrap();
         router
-            .register(HttpMethod::GET, "/protected".to_string(), "__route_handler_1".to_string(), true, None)
+            .register(HttpMethod::GET, "/protected".to_string(), "__route_handler_1".to_string(), true, None, false)
             .unwrap();
         router
             .register(
@@ -353,6 +358,7 @@ mod tests {
                 "__route_handler_2".to_string(),
                 true,
                 Some("admin".to_string()),
+                false,
             )
             .unwrap();
 
@@ -374,7 +380,7 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None)
+            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None, false)
             .unwrap();
         assert_eq!(router.len(), 1);
 
@@ -403,7 +409,7 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/api/users/:id".to_string(), "__route_handler_2".to_string(), false, None)
+            .register(HttpMethod::GET, "/api/users/:id".to_string(), "__route_handler_2".to_string(), false, None, false)
             .unwrap();
 
         // Test that the route matches and params are extracted

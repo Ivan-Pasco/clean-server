@@ -89,6 +89,8 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_async_functions(&mut linker)?;
     register_mcp_functions(&mut linker)?;
     register_test_functions(&mut linker)?;
+    register_sse_functions(&mut linker)?;
+    register_browser_stub_functions(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
     // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
@@ -163,7 +165,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 let router = state.router.clone();
                 // Not protected, no required role
                 if let Err(e) =
-                    router.register(method, path.clone(), handler_name, false, None)
+                    router.register(method, path.clone(), handler_name, false, None, false)
                 {
                     error!("Failed to register route {} {}: {}", method_str, path, e);
                     return -1; // Error
@@ -221,6 +223,7 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                     handler_name,
                     true,
                     required_role,
+                    false,
                 ) {
                     error!(
                         "Failed to register protected route {} {}: {}",
@@ -281,6 +284,53 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         .map_err(|e| {
             RuntimeError::wasm(format!("Failed to define _http_serve_static: {}", e))
         })?;
+
+    // _http_sse_route - Register a STREAM (SSE) route handler
+    // Signature: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len) -> i32
+    // Always registers as GET; the method param is accepted for API symmetry with _http_route.
+    register_bridge_fn!(
+        linker,
+        "_http_sse_route",
+        |mut caller: Caller<'_, WasmState>,
+         _method_ptr: i32,
+         _method_len: i32,
+         path_ptr: i32,
+         path_len: i32,
+         handler_ptr: i32,
+         handler_len: i32|
+         -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                Some(s) => s,
+                None => {
+                    error!("_http_sse_route: Failed to read path");
+                    return -1;
+                }
+            };
+            let handler_name = match read_raw_string(&mut caller, handler_ptr, handler_len) {
+                Some(s) => s,
+                None => {
+                    error!("_http_sse_route: Failed to read handler name");
+                    return -1;
+                }
+            };
+
+            info!("_http_sse_route: path={}, handler={}", path, handler_name);
+
+            let router = caller.data().router.clone();
+            if let Err(e) = router.register(
+                HttpMethod::GET,
+                path.clone(),
+                handler_name,
+                false,
+                None,
+                true,
+            ) {
+                error!("_http_sse_route: Failed to register SSE route {}: {}", path, e);
+                return -1;
+            }
+            0
+        }
+    );
 
     Ok(())
 }
@@ -2878,6 +2928,249 @@ fn register_test_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                 }
             };
             write_string_to_caller(&mut caller, &body)
+        }
+    );
+
+    Ok(())
+}
+
+/// Register SSE bridge functions for STREAM endpoint handlers.
+///
+/// These implement the SSE wire protocol on top of a per-request tokio channel.
+/// The server sets `WasmState::sse_sender` before calling the handler so these
+/// functions can write formatted SSE frames directly to the live HTTP response.
+fn register_sse_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // _sse_emit — write `data: {payload}\n\n`
+    register_bridge_fn!(
+        linker,
+        "_sse_emit",
+        |mut caller: Caller<'_, WasmState>, data_ptr: i32, data_len: i32| -> i32 {
+            let data = match read_raw_string(&mut caller, data_ptr, data_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let frame = format!("data: {}\n\n", data);
+            let tx = caller.data().sse_sender.clone();
+            match tx {
+                Some(tx) if tx.send(frame).is_ok() => 0,
+                _ => -1,
+            }
+        }
+    );
+
+    // _sse_emit_event — write `event: {name}\ndata: {payload}\n\n`
+    register_bridge_fn!(
+        linker,
+        "_sse_emit_event",
+        |mut caller: Caller<'_, WasmState>,
+         name_ptr: i32,
+         name_len: i32,
+         data_ptr: i32,
+         data_len: i32|
+         -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let data = match read_raw_string(&mut caller, data_ptr, data_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let frame = format!("event: {}\ndata: {}\n\n", name, data);
+            let tx = caller.data().sse_sender.clone();
+            match tx {
+                Some(tx) if tx.send(frame).is_ok() => 0,
+                _ => -1,
+            }
+        }
+    );
+
+    // _sse_close — drop the sender so the stream EOF is delivered to the client
+    register_bridge_fn!(
+        linker,
+        "_sse_close",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            caller.data_mut().sse_sender = None;
+            0
+        }
+    );
+
+    // _sse_retry — write `retry: {ms}\n\n`
+    register_bridge_fn!(
+        linker,
+        "_sse_retry",
+        |caller: Caller<'_, WasmState>, ms: i32| -> i32 {
+            let frame = format!("retry: {}\n\n", ms);
+            let tx = caller.data().sse_sender.clone();
+            match tx {
+                Some(tx) if tx.send(frame).is_ok() => 0,
+                _ => -1,
+            }
+        }
+    );
+
+    // _sse_is_connected — returns 1 if the client is still connected, 0 if not
+    register_bridge_fn!(
+        linker,
+        "_sse_is_connected",
+        |caller: Caller<'_, WasmState>| -> i32 {
+            match &caller.data().sse_sender {
+                Some(tx) if !tx.is_closed() => 1,
+                _ => 0,
+            }
+        }
+    );
+
+    Ok(())
+}
+
+/// Register browser-only no-op stubs.
+///
+/// These functions are implemented by the frame.ui browser runtime. The server
+/// registers no-op stubs so WASM modules that import them can instantiate on the
+/// server without trapping. String-returning stubs return LP empty string or the
+/// fixed JSON literals `"[]"` / `"{}"` as specified in FEXT-1/2/3/5.
+fn register_browser_stub_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    // ── DOM Query stubs (FEXT-2) ────────────────────────────────────────────
+
+    register_bridge_fn!(
+        linker,
+        "_ui_get_bounds",
+        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_get_offset_bounds",
+        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_get_scroll",
+        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_set_scroll",
+        |_caller: Caller<'_, WasmState>,
+         _sel_ptr: i32,
+         _sel_len: i32,
+         _x: f64,
+         _y: f64|
+         -> i32 { 0 }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_query_all",
+        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
+            write_string_to_caller(&mut caller, "[]")
+        }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_get_computed_style",
+        |mut caller: Caller<'_, WasmState>,
+         _sel_ptr: i32,
+         _sel_len: i32,
+         _prop_ptr: i32,
+         _prop_len: i32|
+         -> i32 {
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    // ── DOM Patching stub (FEXT-5) ──────────────────────────────────────────
+
+    register_bridge_fn!(
+        linker,
+        "_ui_patch",
+        |_caller: Caller<'_, WasmState>,
+         _sel_ptr: i32,
+         _sel_len: i32,
+         _html_ptr: i32,
+         _html_len: i32|
+         -> i32 { 0 }
+    );
+
+    // ── iframe Communication stubs (FEXT-3) ────────────────────────────────
+
+    register_bridge_fn!(
+        linker,
+        "_ui_iframe_send",
+        |_caller: Caller<'_, WasmState>,
+         _sel_ptr: i32,
+         _sel_len: i32,
+         _msg_ptr: i32,
+         _msg_len: i32|
+         -> i32 { 0 }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_iframe_on_message",
+        |_caller: Caller<'_, WasmState>, _handler_ptr: i32, _handler_len: i32| -> i32 { 0 }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_iframe_get_bounds",
+        |mut caller: Caller<'_, WasmState>,
+         _iframe_sel_ptr: i32,
+         _iframe_sel_len: i32,
+         _inner_sel_ptr: i32,
+         _inner_sel_len: i32|
+         -> i32 {
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_iframe_inject",
+        |_caller: Caller<'_, WasmState>,
+         _sel_ptr: i32,
+         _sel_len: i32,
+         _script_ptr: i32,
+         _script_len: i32|
+         -> i32 { 0 }
+    );
+
+    // ── Drag Data stubs (FEXT-1) ────────────────────────────────────────────
+
+    register_bridge_fn!(
+        linker,
+        "_ui_set_drag_data",
+        |_caller: Caller<'_, WasmState>,
+         _key_ptr: i32,
+         _key_len: i32,
+         _val_ptr: i32,
+         _val_len: i32|
+         -> i32 { 0 }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_get_drag_data",
+        |mut caller: Caller<'_, WasmState>, _key_ptr: i32, _key_len: i32| -> i32 {
+            write_string_to_caller(&mut caller, "")
+        }
+    );
+
+    register_bridge_fn!(
+        linker,
+        "_ui_event_data_json",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            write_string_to_caller(&mut caller, "{}")
         }
     );
 

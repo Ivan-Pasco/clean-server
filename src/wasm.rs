@@ -199,6 +199,8 @@ pub struct WasmState {
     pub test_responses: std::collections::HashMap<i32, TestResponse>,
     /// Counter for the next test response handle
     pub next_test_handle: i32,
+    /// SSE sender for STREAM route handlers — set by the server before calling the handler
+    pub sse_sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// Request context passed to handlers
@@ -287,6 +289,7 @@ impl WasmState {
             mcp: create_shared_mcp_bridge_state(),
             test_responses: std::collections::HashMap::new(),
             next_test_handle: 0,
+            sse_sender: None,
         }
     }
 
@@ -316,6 +319,7 @@ impl WasmState {
             mcp: create_shared_mcp_bridge_state(),
             test_responses: std::collections::HashMap::new(),
             next_test_handle: 0,
+            sse_sender: None,
         }
     }
 
@@ -353,6 +357,7 @@ impl WasmState {
             mcp: create_shared_mcp_bridge_state(),
             test_responses: std::collections::HashMap::new(),
             next_test_handle: 0,
+            sse_sender: None,
         }
     }
 
@@ -831,6 +836,44 @@ impl WasmInstance {
             head_css,
             head_links,
         })
+    }
+
+    /// Call a STREAM (SSE) route handler.
+    ///
+    /// Creates a fresh WASM instance, wires the SSE sender into `WasmState` so
+    /// the `_sse_emit*` bridge functions can write to the channel, then runs the
+    /// handler synchronously.  The caller is responsible for consuming the
+    /// receiver end of the channel and streaming it to the HTTP client.
+    ///
+    /// The SSE connection is considered closed when this method returns (the
+    /// sender is dropped with the store).
+    pub fn call_handler_sse(
+        &self,
+        handler_name: &str,
+        request: RequestContext,
+        auth_context: Option<AuthContext>,
+        sse_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> RuntimeResult<()> {
+        let (mut store, instance) = self.create_instance()?;
+        store.data_mut().set_request(request);
+        if let Some(auth) = auth_context {
+            store.data_mut().auth_context = Some(auth);
+        }
+        store.data_mut().sse_sender = Some(sse_tx);
+
+        if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
+            let _ = handler.call(&mut store, ()).map_err(|e| {
+                RuntimeError::wasm(format!("SSE handler {} failed: {}", handler_name, e))
+            });
+        } else {
+            return Err(RuntimeError::wasm(format!(
+                "Could not find or call SSE handler '{}'",
+                handler_name
+            )));
+        }
+
+        // Dropping the store drops sse_sender, closing the channel and signalling EOF to the stream.
+        Ok(())
     }
 
     /// Get the shared router

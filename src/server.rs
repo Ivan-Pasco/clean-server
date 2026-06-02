@@ -25,6 +25,29 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
+/// Adapter that turns a tokio unbounded-channel receiver into a `futures::Stream`
+/// of `Bytes` chunks — used to stream SSE frames as the WASM handler produces them.
+struct SseStream {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+impl futures::Stream for SseStream {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(s)) => {
+                std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(s))))
+            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
 /// Memory budget tier for WASM instances
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryTier {
@@ -626,6 +649,30 @@ async fn handle_request(
         query: query_params,
     };
     debug!("handle_request: RequestContext params: {:?}", request_ctx.params);
+
+    // SSE (STREAM) routes keep the connection open and stream frames as the handler emits them.
+    if route_handler.is_sse {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let wasm = state.wasm.clone();
+        let handler_name = route_handler.handler_name.clone();
+
+        // Run the WASM handler on a blocking thread so it can loop calling _sse_emit*.
+        // When the handler returns (or calls _sse_close), the sender is dropped and
+        // the stream EOF is delivered to the client.
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = wasm.call_handler_sse(&handler_name, request_ctx, auth_context, tx) {
+                error!("SSE handler {} error: {}", handler_name, e);
+            }
+        });
+
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .header("X-Accel-Buffering", "no")
+            .body(Body::from_stream(SseStream { rx }))
+            .expect("SSE response builder");
+    }
 
     // Call WASM handler with auth context
     match state
