@@ -375,7 +375,16 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     }
 
     // Collect static dirs registered during initialization
-    let static_dirs = wasm.static_dirs().read().expect("store lock poisoned").clone();
+    let mut static_dirs = wasm.static_dirs().read().expect("store lock poisoned").clone();
+
+    // Auto-mount ./public/ at /public if the directory exists and not already registered
+    if std::path::Path::new("public").is_dir()
+        && !static_dirs.iter().any(|(prefix, _)| prefix == "/public")
+    {
+        info!("Auto-mounting ./public/ at /public — link assets as /public/<filename>");
+        static_dirs.push(("/public".to_string(), "public".to_string()));
+    }
+
     for (prefix, dir) in &static_dirs {
         info!("Serving static files: {} -> {}", prefix, dir);
     }
@@ -646,14 +655,23 @@ async fn handle_request(
                 return builder.body(Body::empty()).expect("response builder");
             }
 
-            // Determine content type based on response
-            let content_type = if handler_response.body.starts_with('{') || handler_response.body.starts_with('[') {
-                "application/json"
-            } else if handler_response.body.starts_with("<!") || handler_response.body.starts_with("<html") {
-                "text/html; charset=utf-8"
-            } else {
-                "text/plain; charset=utf-8"
-            };
+            // Use caller-supplied Content-Type if present (e.g. from _http_respond),
+            // otherwise infer from the response body.
+            let explicit_content_type = handler_response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                .map(|(_, v)| v.clone());
+
+            let content_type = explicit_content_type.as_deref().unwrap_or_else(|| {
+                if handler_response.body.starts_with('{') || handler_response.body.starts_with('[') {
+                    "application/json"
+                } else if handler_response.body.starts_with("<!") || handler_response.body.starts_with("<html") {
+                    "text/html; charset=utf-8"
+                } else {
+                    "text/plain; charset=utf-8"
+                }
+            });
 
             let status = handler_response
                 .status
@@ -670,10 +688,12 @@ async fn handle_request(
                 builder = builder.header(header::SET_COOKIE, cookie);
             }
 
-            // Add custom headers
+            // Add custom headers, skipping Content-Type (already applied above)
             for (name, value) in handler_response.headers {
-                debug!("Setting header: {}={}", name, value);
-                builder = builder.header(name.as_str(), value.as_str());
+                if !name.eq_ignore_ascii_case("content-type") {
+                    debug!("Setting header: {}={}", name, value);
+                    builder = builder.header(name.as_str(), value.as_str());
+                }
             }
 
             // Inject accumulated <style> and <link> tags into HTML responses
