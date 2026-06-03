@@ -91,6 +91,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_test_functions(&mut linker)?;
     register_sse_functions(&mut linker)?;
     register_browser_stub_functions(&mut linker)?;
+    register_email_functions(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
     // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
@@ -1664,6 +1665,23 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_no_cache: {}", e)))?;
 
+    // _res_download - Set Content-Disposition: attachment header for file downloads
+    // Args: filename_ptr, filename_len
+    // Returns: void
+    register_bridge_fn!(linker, "_res_download",
+        |mut caller: Caller<'_, WasmState>, filename_ptr: i32, filename_len: i32| {
+            let filename = read_raw_string(&mut caller, filename_ptr, filename_len)
+                .unwrap_or_default();
+            let value = if filename.is_empty() {
+                "attachment".to_string()
+            } else {
+                format!("attachment; filename=\"{}\"", filename.replace('"', "\\\""))
+            };
+            debug!("_res_download: Content-Disposition: {}", value);
+            caller.data_mut().add_header("Content-Disposition".to_string(), value);
+        }
+    );
+
     Ok(())
 }
 
@@ -3177,6 +3195,139 @@ fn register_browser_stub_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     Ok(())
 }
 
+/// Register email bridge functions: _email_configure, _email_send, _email_last_error
+fn register_email_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    use crate::wasm::SmtpConfig;
+
+    // _email_configure — store SMTP settings during startup
+    // Args: host(ptr,len), port(i64), secure(i32), username(ptr,len), password(ptr,len), from(ptr,len)
+    register_bridge_fn!(linker, "_email_configure",
+        |mut caller: Caller<'_, WasmState>,
+         host_ptr: i32, host_len: i32,
+         port: i64,
+         secure: i32,
+         user_ptr: i32, user_len: i32,
+         pass_ptr: i32, pass_len: i32,
+         from_ptr: i32, from_len: i32| {
+            let host = read_raw_string(&mut caller, host_ptr, host_len).unwrap_or_default();
+            let username = read_raw_string(&mut caller, user_ptr, user_len).unwrap_or_default();
+            let password = read_raw_string(&mut caller, pass_ptr, pass_len).unwrap_or_default();
+            let from_address = read_raw_string(&mut caller, from_ptr, from_len).unwrap_or_default();
+            let port = port.clamp(1, 65535) as u16;
+            debug!("_email_configure: host={} port={} secure={}", host, port, secure != 0);
+            let config = SmtpConfig { host, port, secure: secure != 0, username, password, from_address };
+            caller.data().smtp_state.lock().config = Some(config);
+        }
+    );
+
+    // _email_send — send an email via SMTP
+    // Args: to(ptr,len), subject(ptr,len), html(ptr,len), text(ptr,len), from_override(ptr,len)
+    // Returns: 1 on success, 0 on failure
+    register_bridge_fn!(linker, "_email_send",
+        |mut caller: Caller<'_, WasmState>,
+         to_ptr: i32, to_len: i32,
+         subject_ptr: i32, subject_len: i32,
+         html_ptr: i32, html_len: i32,
+         text_ptr: i32, text_len: i32,
+         from_ptr: i32, from_len: i32|
+         -> i32 {
+            let to = read_raw_string(&mut caller, to_ptr, to_len).unwrap_or_default();
+            let subject = read_raw_string(&mut caller, subject_ptr, subject_len).unwrap_or_default();
+            let html = read_raw_string(&mut caller, html_ptr, html_len).unwrap_or_default();
+            let text = read_raw_string(&mut caller, text_ptr, text_len).unwrap_or_default();
+            let from_override = read_raw_string(&mut caller, from_ptr, from_len).unwrap_or_default();
+
+            let config = {
+                let guard = caller.data().smtp_state.lock();
+                match guard.config.clone() {
+                    Some(c) => c,
+                    None => {
+                        error!("_email_send: SMTP not configured — call email.configure first");
+                        caller.data().smtp_state.lock().last_error =
+                            "SMTP not configured".to_string();
+                        return 0;
+                    }
+                }
+            };
+
+            let from_addr = if from_override.is_empty() { &config.from_address } else { &from_override };
+
+            let result = tokio::task::block_in_place(|| {
+                use lettre::message::{header::ContentType, MultiPart, SinglePart};
+                use lettre::transport::smtp::authentication::Credentials;
+                use lettre::{Message, SmtpTransport, Transport};
+
+                let message = Message::builder()
+                    .from(match from_addr.parse() {
+                        Ok(m) => m,
+                        Err(e) => return Err(format!("Invalid from address '{}': {}", from_addr, e)),
+                    })
+                    .to(match to.parse() {
+                        Ok(m) => m,
+                        Err(e) => return Err(format!("Invalid to address '{}': {}", to, e)),
+                    })
+                    .subject(subject.clone())
+                    .multipart(
+                        MultiPart::alternative()
+                            .singlepart(
+                                SinglePart::builder()
+                                    .header(ContentType::TEXT_PLAIN)
+                                    .body(text.clone()),
+                            )
+                            .singlepart(
+                                SinglePart::builder()
+                                    .header(ContentType::TEXT_HTML)
+                                    .body(html.clone()),
+                            ),
+                    )
+                    .map_err(|e| format!("Failed to build email: {}", e))?;
+
+                let creds = Credentials::new(config.username.clone(), config.password.clone());
+
+                let transport = if config.secure {
+                    SmtpTransport::relay(&config.host)
+                        .map_err(|e| format!("SMTP relay error: {}", e))?
+                        .port(config.port)
+                        .credentials(creds)
+                        .build()
+                } else {
+                    SmtpTransport::builder_dangerous(&config.host)
+                        .port(config.port)
+                        .credentials(creds)
+                        .build()
+                };
+
+                transport.send(&message).map_err(|e| format!("SMTP send error: {}", e))?;
+                Ok(())
+            });
+
+            match result {
+                Ok(()) => {
+                    debug!("_email_send: sent to {}", to);
+                    caller.data().smtp_state.lock().last_error = String::new();
+                    1
+                }
+                Err(e) => {
+                    error!("_email_send: {}", e);
+                    caller.data().smtp_state.lock().last_error = e;
+                    0
+                }
+            }
+        }
+    );
+
+    // _email_last_error — return the last SMTP error string
+    // Returns: LP-encoded error string (empty if last send succeeded)
+    register_bridge_fn!(linker, "_email_last_error",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let err = caller.data().smtp_state.lock().last_error.clone();
+            write_string_to_caller(&mut caller, &err)
+        }
+    );
+
+    Ok(())
+}
+
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
 ///
 /// The Clean Language compiler (0.30.120+) generates WASM imports in both
@@ -3239,6 +3390,8 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         ("_res_json",            "res.json"),
         ("_http_set_cache",      "http.set_cache"),
         ("_http_no_cache",       "http.no_cache"),
+        // _res_download, _email_configure, _email_send, _email_last_error aliases are
+        // derived automatically by the register_bridge_fn! macro.
         ("_json_encode",         "json.encode"),
         ("_json_decode",         "json.decode"),
         ("_json_get",            "json.get"),

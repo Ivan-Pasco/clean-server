@@ -1,6 +1,6 @@
 [package]
 name = "clean-server"
-version = "1.9.29"
+version = "1.9.30"
 edition = "2024"
 authors = ["Ivan Pasco"]
 license = "MIT OR Apache-2.0"
@@ -57,6 +57,9 @@ wasmparser = "0.218"
 sha2 = "0.10"
 hex = "0.4"
 toml = "0.8"
+
+# Email (SMTP)
+lettre = { version = "0.11", features = ["smtp-transport", "native-tls", "builder"], default-features = false }
 
 # Local dependencies
 host-bridge = { path = "./host-bridge" }

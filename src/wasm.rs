@@ -148,6 +148,40 @@ pub fn create_shared_mcp_bridge_state() -> SharedMcpBridgeState {
     Arc::new(McpBridgeState::new())
 }
 
+/// SMTP configuration stored by _email_configure during startup
+#[derive(Debug, Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub secure: bool,
+    pub username: String,
+    pub password: String,
+    pub from_address: String,
+}
+
+/// Per-module email state: current config and last send error
+pub struct SmtpState {
+    pub config: Option<SmtpConfig>,
+    pub last_error: String,
+}
+
+impl SmtpState {
+    pub fn new() -> Self {
+        Self { config: None, last_error: String::new() }
+    }
+}
+
+impl Default for SmtpState {
+    fn default() -> Self { Self::new() }
+}
+
+/// Shared SMTP state — shared across all request handlers for this module
+pub type SharedSmtpState = Arc<parking_lot::Mutex<SmtpState>>;
+
+pub fn create_shared_smtp_state() -> SharedSmtpState {
+    Arc::new(parking_lot::Mutex::new(SmtpState::new()))
+}
+
 /// State held by each WASM store instance
 pub struct WasmState {
     /// Memory allocator
@@ -201,6 +235,8 @@ pub struct WasmState {
     pub next_test_handle: i32,
     /// SSE sender for STREAM route handlers — set by the server before calling the handler
     pub sse_sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// SMTP configuration and last-error state for email bridge functions
+    pub smtp_state: SharedSmtpState,
 }
 
 /// Request context passed to handlers
@@ -290,6 +326,7 @@ impl WasmState {
             test_responses: std::collections::HashMap::new(),
             next_test_handle: 0,
             sse_sender: None,
+            smtp_state: create_shared_smtp_state(),
         }
     }
 
@@ -320,6 +357,7 @@ impl WasmState {
             test_responses: std::collections::HashMap::new(),
             next_test_handle: 0,
             sse_sender: None,
+            smtp_state: create_shared_smtp_state(),
         }
     }
 
@@ -358,6 +396,7 @@ impl WasmState {
             test_responses: std::collections::HashMap::new(),
             next_test_handle: 0,
             sse_sender: None,
+            smtp_state: create_shared_smtp_state(),
         }
     }
 
