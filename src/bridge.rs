@@ -92,6 +92,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_sse_functions(&mut linker)?;
     register_browser_stub_functions(&mut linker)?;
     register_email_functions(&mut linker)?;
+    crate::bridge_canvas_stubs::register_canvas_stubs(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
     // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.

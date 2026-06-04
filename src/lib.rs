@@ -74,6 +74,7 @@
 //! - **auth**: Authentication (_auth_verify, _auth_create_session)
 
 pub mod bridge;
+pub mod bridge_canvas_stubs;
 pub mod error;
 pub mod error_reporting;
 pub mod memory;
