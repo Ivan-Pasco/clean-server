@@ -99,6 +99,9 @@ pub struct RouteHandler {
     pub required_role: Option<String>,
     /// Whether this is a Server-Sent Events (STREAM) route
     pub is_sse: bool,
+    /// If set, this route is a static redirect: (destination, status_code).
+    /// The server returns the redirect immediately without invoking any WASM handler.
+    pub redirect_destination: Option<(String, u16)>,
 }
 
 /// Key for route lookup
@@ -147,6 +150,7 @@ impl Router {
             protected,
             required_role,
             is_sse,
+            redirect_destination: None,
         };
 
         // Store in routes map
@@ -164,6 +168,46 @@ impl Router {
             let mut matcher = self.path_matcher.write();
             // matchit returns an error if the path is already registered,
             // which we ignore since we're replacing the route
+            let _ = matcher.insert(matchit_path, key);
+        }
+
+        Ok(())
+    }
+
+    /// Register a static redirect route.
+    ///
+    /// When matched, the server immediately returns an HTTP redirect to
+    /// `to_path` with `status` (301/302/…) without invoking any WASM handler.
+    pub fn register_redirect(
+        &self,
+        method: HttpMethod,
+        from_path: String,
+        to_path: String,
+        status: u16,
+    ) -> RuntimeResult<()> {
+        let key = RouteKey {
+            method,
+            path: from_path.clone(),
+        };
+
+        let handler = RouteHandler {
+            method,
+            path: from_path.clone(),
+            handler_name: String::new(),
+            protected: false,
+            required_role: None,
+            is_sse: false,
+            redirect_destination: Some((to_path, status)),
+        };
+
+        {
+            let mut routes = self.routes.write();
+            routes.insert(key.clone(), handler);
+        }
+
+        let matchit_path = convert_express_to_matchit(&from_path);
+        {
+            let mut matcher = self.path_matcher.write();
             let _ = matcher.insert(matchit_path, key);
         }
 

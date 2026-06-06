@@ -650,6 +650,16 @@ async fn handle_request(
     };
     debug!("handle_request: RequestContext params: {:?}", request_ctx.params);
 
+    // Static redirect routes: registered via _http_redirect_route, no WASM handler needed.
+    if let Some((to_path, status_code)) = &route_handler.redirect_destination {
+        debug!("Static redirect: {} -> {} ({})", request_ctx.path, to_path, status_code);
+        return Response::builder()
+            .status(StatusCode::from_u16(*status_code).unwrap_or(StatusCode::FOUND))
+            .header(header::LOCATION, to_path.as_str())
+            .body(Body::empty())
+            .expect("redirect response builder");
+    }
+
     // SSE (STREAM) routes keep the connection open and stream frames as the handler emits them.
     if route_handler.is_sse {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();

@@ -104,6 +104,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // error - Runtime error import emitted by compiler 0.30.244+
+    linker.func_wrap(
+        "env",
+        "error",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| {
+            if let Some(s) = read_raw_string(&mut caller, ptr, len) {
+                eprintln!("[ERROR] {}", s);
+            }
+        },
+    )?;
+
     // console_warn - Log warning (raw string)
     linker.func_wrap(
         "env",

@@ -177,6 +177,51 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_route: {}", e)))?;
 
+    // _http_redirect_route - Register a static redirect route (no WASM handler required)
+    // Signature: (method_ptr, method_len, from_ptr, from_len, to_ptr, to_len, status) -> i32
+    // The server returns the redirect immediately when the route is matched.
+    register_bridge_fn!(
+        linker,
+        "_http_redirect_route",
+        |mut caller: Caller<'_, WasmState>,
+         method_ptr: i32,
+         method_len: i32,
+         from_ptr: i32,
+         from_len: i32,
+         to_ptr: i32,
+         to_len: i32,
+         status: i32|
+         -> i32 {
+            let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+                .unwrap_or_else(|| "GET".to_string());
+            let from_path = read_raw_string(&mut caller, from_ptr, from_len)
+                .unwrap_or_else(|| "/".to_string());
+            let to_path = read_raw_string(&mut caller, to_ptr, to_len)
+                .unwrap_or_else(|| "/".to_string());
+            let status_code = status as u16;
+
+            debug!(
+                "_http_redirect_route: {} {} -> {} ({})",
+                method_str, from_path, to_path, status_code
+            );
+
+            let method = match HttpMethod::parse(&method_str) {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("Invalid HTTP method '{}': {}", method_str, e);
+                    return -1;
+                }
+            };
+
+            let router = caller.data().router.clone();
+            if let Err(e) = router.register_redirect(method, from_path.clone(), to_path, status_code) {
+                error!("Failed to register redirect route {}: {}", from_path, e);
+                return -1;
+            }
+            0
+        }
+    );
+
     // _http_route_protected - Register a protected route requiring authentication
     // Signature: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len, role_ptr, role_len) -> i32
     // Strings use raw ptr+len pairs; handler is the WASM export name (e.g. "__route_handler_0")
