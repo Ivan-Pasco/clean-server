@@ -5,7 +5,7 @@
 //!
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
-use super::helpers::{read_raw_string, write_string_to_caller};
+use super::helpers::{read_raw_string, read_string_from_caller, write_string_to_caller};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use tracing::info;
@@ -104,14 +104,15 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // error - Runtime error import emitted by compiler 0.30.244+
+    // error - LP-format (single ptr, 4-byte length prefix) per compiler 0.30.212+ signature
     linker.func_wrap(
         "env",
         "error",
-        |mut caller: Caller<'_, S>, ptr: i32, len: i32| {
-            if let Some(s) = read_raw_string(&mut caller, ptr, len) {
+        |mut caller: Caller<'_, S>, ptr: i32| -> i32 {
+            if let Some(s) = read_string_from_caller(&mut caller, ptr) {
                 eprintln!("[ERROR] {}", s);
             }
+            0
         },
     )?;
 
