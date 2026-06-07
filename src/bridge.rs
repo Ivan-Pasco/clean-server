@@ -2361,12 +2361,7 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
             Some(e) => e,
             None => break,
         };
-        let open_tag_end = match result[tag_start..].find('>') {
-            Some(p) => tag_start + p + 1,
-            None => break,
-        };
-        let close_tag_len = tag_name.len() + 3;
-        let inner = result[open_tag_end..element_end - close_tag_len].to_string();
+        let attr_full = format!(" cl-if=\"{}\"", condition);
 
         // Check for a cl-else element immediately following (ignoring whitespace)
         let rest_trimmed_offset = element_end
@@ -2379,22 +2374,21 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
         };
 
         let (keep, total_end) = if has_else {
-            // Find the else element
             let else_tag_start = rest_trimmed_offset;
             let else_tag_name = extract_tag_name(&result, else_tag_start);
             let else_element_end = find_element_end(&result, else_tag_start, &else_tag_name)
                 .unwrap_or(else_tag_start);
-            let else_open_tag_end = result[else_tag_start..].find('>').map(|p| else_tag_start + p + 1).unwrap_or(else_tag_start);
-            let else_close_tag_len = else_tag_name.len() + 3;
-            let else_inner = result[else_open_tag_end..else_element_end - else_close_tag_len].to_string();
 
             if is_truthy {
-                (inner, else_element_end)
+                let full_element = result[tag_start..element_end].replace(&attr_full, "");
+                (full_element, else_element_end)
             } else {
-                (else_inner, else_element_end)
+                let full_else = result[else_tag_start..else_element_end].replace(" cl-else", "");
+                (full_else, else_element_end)
             }
         } else if is_truthy {
-            (inner, element_end)
+            let full_element = result[tag_start..element_end].replace(&attr_full, "");
+            (full_element, element_end)
         } else {
             (String::new(), element_end)
         };
@@ -3515,6 +3509,32 @@ mod tests {
 
         // Missing key returns None
         assert!(json_get_by_path(&parsed, "data.missing").is_none());
+    }
+
+    #[test]
+    fn test_process_if_directive_preserves_element_structure() {
+        let data = serde_json::json!({"show": true, "hide": false});
+
+        // Truthy: full element (with tag, attributes, content) must be preserved; cl-if attr removed
+        let html = r#"<a href="/home" class="nav-link" cl-if="show">Home</a>"#;
+        let result = process_if_directive(html, &data);
+        assert_eq!(result, r#"<a href="/home" class="nav-link">Home</a>"#,
+            "truthy cl-if must keep full element, not just inner text");
+
+        // Falsy: entire element removed
+        let html = r#"<a href="/home" cl-if="hide">Home</a>"#;
+        let result = process_if_directive(html, &data);
+        assert_eq!(result, "", "falsy cl-if must remove the entire element");
+
+        // cl-if + cl-else truthy: keep if-element, remove else-element
+        let html = r#"<span cl-if="show">Yes</span> <span cl-else>No</span>"#;
+        let result = process_if_directive(html, &data);
+        assert_eq!(result, "<span>Yes</span>", "truthy: keep if-element, strip cl-else sibling");
+
+        // cl-if + cl-else falsy: remove if-element, keep else-element (cl-else attr stripped)
+        let html = r#"<span cl-if="hide">Yes</span> <span cl-else>No</span>"#;
+        let result = process_if_directive(html, &data);
+        assert_eq!(result, "<span>No</span>", "falsy: keep else-element without cl-else attr");
     }
 
     // --- Registry TOML types ---
