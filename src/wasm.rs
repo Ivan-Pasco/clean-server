@@ -94,6 +94,14 @@ impl IslandsStore {
 /// Shared islands store type — Arc<RwLock<...>> so it is accessible after initialization
 pub type SharedIslandsStore = Arc<RwLock<IslandsStore>>;
 
+/// Map of component tag name → server-side HTML template registered by _ui_register_component_html
+pub type ComponentRegistry = std::collections::HashMap<String, String>;
+pub type SharedComponentRegistry = Arc<RwLock<ComponentRegistry>>;
+
+pub fn create_shared_component_registry() -> SharedComponentRegistry {
+    Arc::new(RwLock::new(ComponentRegistry::new()))
+}
+
 /// Create a new empty shared islands store
 pub fn create_shared_islands_store() -> SharedIslandsStore {
     Arc::new(RwLock::new(IslandsStore::new()))
@@ -218,6 +226,8 @@ pub struct WasmState {
     pub static_dirs: SharedStaticDirs,
     /// Island components registered for client-side hydration
     pub islands_store: SharedIslandsStore,
+    /// Component HTML templates registered via _ui_register_component_html for SSR expansion
+    pub component_registry: SharedComponentRegistry,
     /// Bridge function permission gate derived from the `clean:permissions`
     /// custom section of the loaded WASM module.
     pub permission_gate: PermissionGate,
@@ -318,6 +328,7 @@ impl WasmState {
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
+            component_registry: create_shared_component_registry(),
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
             pending_head_css: Vec::new(),
@@ -349,6 +360,7 @@ impl WasmState {
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
+            component_registry: create_shared_component_registry(),
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
             pending_head_css: Vec::new(),
@@ -367,6 +379,7 @@ impl WasmState {
         session_store: SharedSessionStore,
         static_dirs: SharedStaticDirs,
         islands_store: SharedIslandsStore,
+        component_registry: SharedComponentRegistry,
         permission_gate: PermissionGate,
         memory_limit: usize,
     ) -> Self {
@@ -388,6 +401,7 @@ impl WasmState {
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs,
             islands_store,
+            component_registry,
             permission_gate,
             limits: build_store_limits(memory_limit),
             pending_head_css: Vec::new(),
@@ -530,6 +544,8 @@ pub struct WasmInstance {
     static_dirs: SharedStaticDirs,
     /// Island components registered for client-side hydration
     islands_store: SharedIslandsStore,
+    /// Component HTML templates registered via _ui_register_component_html
+    component_registry: SharedComponentRegistry,
     /// Bridge function permission gate parsed from the loaded WASM binary
     permission_gate: PermissionGate,
     /// Memory limit in bytes for each Store
@@ -674,6 +690,7 @@ impl WasmInstance {
             session_store,
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
+            component_registry: create_shared_component_registry(),
             permission_gate,
             memory_limit,
         })
@@ -687,6 +704,7 @@ impl WasmInstance {
             self.session_store.clone(),
             self.static_dirs.clone(),
             self.islands_store.clone(),
+            self.component_registry.clone(),
             self.permission_gate.clone(),
             self.memory_limit,
         );
@@ -719,6 +737,11 @@ impl WasmInstance {
     /// Get the registered island components for client-side hydration
     pub fn islands_store(&self) -> &SharedIslandsStore {
         &self.islands_store
+    }
+
+    /// Get the component HTML registry (populated by _ui_register_component_html during init)
+    pub fn component_registry(&self) -> &SharedComponentRegistry {
+        &self.component_registry
     }
 
     /// Initialize the module (calls main/start function to register routes)

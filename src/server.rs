@@ -202,6 +202,8 @@ pub struct AppState {
     router: SharedRouter,
     /// Island components registered for client-side hydration
     islands_store: SharedIslandsStore,
+    /// Content of the frame.ui runtime loader.js served at /loader.js
+    loader_js: Arc<String>,
 }
 
 impl AppState {
@@ -209,11 +211,30 @@ impl AppState {
         wasm: SharedWasmInstance,
         router: SharedRouter,
         islands_store: SharedIslandsStore,
+        loader_js: Arc<String>,
     ) -> Self {
         Self {
             wasm,
             router,
             islands_store,
+            loader_js,
+        }
+    }
+}
+
+/// Load the frame.ui runtime loader.js from the installed plugin.
+/// Falls back to the embedded stub when the plugin is not installed.
+fn load_runtime_loader_js() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let plugin_path = format!("{}/.cleen/plugins/frame.ui/runtime/loader.js", home);
+    match std::fs::read_to_string(&plugin_path) {
+        Ok(content) => {
+            info!("Serving frame.ui loader.js from plugin: {}", plugin_path);
+            content
+        }
+        Err(_) => {
+            info!("frame.ui plugin loader not found at {}; using embedded stub", plugin_path);
+            LOADER_JS.to_string()
         }
     }
 }
@@ -429,8 +450,11 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         }
     }
 
+    // Load the frame.ui runtime loader.js (plugin installation preferred over embedded stub)
+    let loader_js = Arc::new(load_runtime_loader_js());
+
     // Create app state
-    let state = AppState::new(wasm, router, islands_store);
+    let state = AppState::new(wasm, router, islands_store, loader_js);
 
     // Build Axum router
     let app = build_router(state, &config, static_dirs);
@@ -458,6 +482,7 @@ fn build_router(state: AppState, config: &ServerConfig, static_dirs: Vec<(String
         // Built-in islands routes — registered before the fallback so they always take priority
         .route("/islands-manifest.json", axum::routing::get(serve_islands_manifest))
         .route("/loader.js", axum::routing::get(serve_loader_js))
+        .route("/frontend.wasm", axum::routing::get(serve_frontend_wasm))
         // Catch-all handler that routes to WASM
         .fallback(handle_request)
         .with_state(state);
@@ -530,16 +555,42 @@ async fn serve_islands_manifest(State(state): State<AppState>) -> Response {
 
 /// Serve the client-side hydration loader JavaScript.
 ///
-/// The script automatically hydrates `[data-island][data-client]` elements
-/// after the page loads by fetching `/islands-manifest.json` and then
-/// downloading and instantiating each island's WASM module according to
-/// the element's `data-client` strategy ("on", "visible", "idle", or "only").
-async fn serve_loader_js() -> Response {
+/// Prefers the installed frame.ui runtime loader over the embedded stub.
+/// The script sets up the client bridge between the browser and frontend.wasm.
+async fn serve_loader_js(State(state): State<AppState>) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/javascript")
         .header(header::CACHE_CONTROL, "public, max-age=3600")
-        .body(Body::from(LOADER_JS))
+        .body(Body::from(state.loader_js.as_ref().clone()))
+        .expect("response builder")
+}
+
+/// Serve the compiled client-side WASM runtime at /frontend.wasm.
+///
+/// Looks for the file at `./frontend.wasm` (project root), then `./public/frontend.wasm`.
+/// Returns 404 if neither exists — the project must compile its client components first.
+async fn serve_frontend_wasm() -> Response {
+    let candidates = ["frontend.wasm", "public/frontend.wasm"];
+    for path in &candidates {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/wasm")
+                    .header(header::CACHE_CONTROL, "public, max-age=60")
+                    .body(Body::from(bytes))
+                    .expect("response builder");
+            }
+            Err(_) => continue,
+        }
+    }
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(
+            "frontend.wasm not found — compile client components to generate it",
+        ))
         .expect("response builder")
 }
 

@@ -19,7 +19,7 @@
 //! - Session management (_session_store, _session_get, _session_delete, _session_exists, _session_set_csrf, _session_get_csrf, _http_set_cookie)
 //! - Session auth (_auth_get_session, _auth_require_auth, _auth_require_role, _auth_can, _auth_has_any_role)
 //! - Roles (_roles_register, _role_has_permission, _role_get_permissions)
-//! - UI templates (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css, _ui_inject_head_link)
+//! - UI templates (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css, _ui_inject_head_link, _ui_register_component_html)
 
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
@@ -2049,10 +2049,17 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             // Evaluate server-side directives (cl-if, cl-show, cl-iterate)
             let with_directives = process_directives(&substituted, &data);
 
+            // Expand registered custom component tags to their server-side HTML
+            let component_map = {
+                let reg = caller.data().component_registry.clone();
+                reg.read().map(|m| m.clone()).unwrap_or_default()
+            };
+            let with_components = expand_component_tags(&with_directives, &component_map);
+
             // Wrap in layout if specified
             let rendered = match layout_name {
-                Some(ref name) => apply_layout(&with_directives, name, &cwd),
-                None => with_directives,
+                Some(ref name) => apply_layout(&with_components, name, &cwd),
+                None => with_components,
             };
 
             caller.data_mut().add_header(
@@ -2103,6 +2110,43 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         }
     );
 
+    // _ui_register_component_html - Register a component's server-side HTML template.
+    // Called during WASM init so that _ui_render_page can expand custom element tags.
+    // First arg: hyphenated tag name (e.g. "my-widget").
+    // Second arg: rendered HTML string for the component's default state.
+    // Returns 1 on success, 0 on error.
+    register_bridge_fn!(
+        linker,
+        "_ui_register_component_html",
+        |mut caller: Caller<'_, WasmState>,
+         tag_ptr: i32,
+         tag_len: i32,
+         html_ptr: i32,
+         html_len: i32|
+         -> i32 {
+            let tag = match read_raw_string(&mut caller, tag_ptr, tag_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    error!("_ui_register_component_html: empty or missing tag name");
+                    return 0;
+                }
+            };
+            let html = read_raw_string(&mut caller, html_ptr, html_len).unwrap_or_default();
+            let registry = caller.data().component_registry.clone();
+            match registry.write() {
+                Ok(mut map) => {
+                    info!("_ui_register_component_html: registered <{}>", tag);
+                    map.insert(tag, html);
+                    1
+                }
+                Err(e) => {
+                    error!("_ui_register_component_html: registry lock poisoned: {}", e);
+                    0
+                }
+            }
+        }
+    );
+
     Ok(())
 }
 
@@ -2122,6 +2166,102 @@ fn substitute_template(template: &str, data: &serde_json::Value) -> String {
         }
     }
     result
+}
+
+/// Replace custom component element tags with their registered server-side HTML.
+///
+/// For each `<tag-name [attrs]>...</tag-name>` where `tag-name` contains a hyphen:
+/// - If registered: emit `<div data-island="tag-name" data-client="MODE">HTML</div>`
+/// - If unregistered but has `client` attr: emit `<div data-island="tag-name" data-client="MODE"></div>`
+///
+/// Tags without a `client` attribute and without a registration are left unchanged.
+fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String, String>) -> String {
+    let mut result = html.to_string();
+    let mut offset = 0;
+
+    loop {
+        // Find next '<' that starts a potential custom element (must contain a hyphen before '>')
+        let remaining = &result[offset..];
+        let rel_open = match remaining.find('<') {
+            Some(pos) => pos,
+            None => break,
+        };
+        let abs_open = offset + rel_open;
+
+        // Extract tag name: must contain '-' (custom element convention)
+        let after_open = &result[abs_open + 1..];
+        let tag_end_in_name = after_open.find(|c: char| c == ' ' || c == '>' || c == '/');
+        let tag_name = match tag_end_in_name {
+            Some(n) => after_open[..n].trim().to_string(),
+            None => { offset = abs_open + 1; continue; }
+        };
+
+        if !tag_name.contains('-') || tag_name.starts_with('/') {
+            offset = abs_open + 1;
+            continue;
+        }
+
+        // Find end of opening tag
+        let close_bracket = match result[abs_open..].find('>') {
+            Some(pos) => abs_open + pos,
+            None => { offset = abs_open + 1; continue; }
+        };
+
+        let opening_tag = &result[abs_open..=close_bracket];
+        let self_closing = opening_tag.ends_with("/>");
+
+        // Extract `client` attribute value
+        let client_val = extract_attr_value_from_tag(opening_tag, "client");
+
+        // Find closing tag if not self-closing
+        let close_tag = format!("</{}>", tag_name);
+        let (inner_html, element_end) = if self_closing {
+            (String::new(), close_bracket + 1)
+        } else {
+            match result[close_bracket + 1..].find(close_tag.as_str()) {
+                Some(rel) => {
+                    let inner_start = close_bracket + 1;
+                    let inner_end = inner_start + rel;
+                    let end = inner_end + close_tag.len();
+                    (result[inner_start..inner_end].to_string(), end)
+                }
+                None => { offset = abs_open + 1; continue; }
+            }
+        };
+
+        // Decide what to emit
+        let replacement = if let Some(registered_html) = registry.get(&tag_name) {
+            let mode = client_val.as_deref().unwrap_or("on");
+            format!(
+                "<div data-island=\"{}\" data-client=\"{}\">{}</div>",
+                tag_name, mode, registered_html
+            )
+        } else if let Some(mode) = client_val {
+            // Unregistered but has client attr — emit island wrapper with inner content
+            format!(
+                "<div data-island=\"{}\" data-client=\"{}\">{}</div>",
+                tag_name, mode, inner_html
+            )
+        } else {
+            // No registration, no client attr — leave unchanged
+            offset = abs_open + 1;
+            continue;
+        };
+
+        result.replace_range(abs_open..element_end, &replacement);
+        offset = abs_open + replacement.len();
+    }
+
+    result
+}
+
+/// Extract attribute value from an HTML tag string, e.g. `client="on"` → `Some("on")`.
+fn extract_attr_value_from_tag(tag: &str, attr: &str) -> Option<String> {
+    let search = format!("{}=\"", attr);
+    let start = tag.find(search.as_str())?;
+    let val_start = start + search.len();
+    let val_end = tag[val_start..].find('"')? + val_start;
+    Some(tag[val_start..val_end].to_string())
 }
 
 /// Extract `<page layout="name">...</page>` wrapper.
