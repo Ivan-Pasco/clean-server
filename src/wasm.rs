@@ -373,6 +373,7 @@ impl WasmState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_session_store(
         router: SharedRouter,
         db_bridge: SharedDbBridge,

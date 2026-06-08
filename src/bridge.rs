@@ -2190,7 +2190,7 @@ fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String
 
         // Extract tag name: must contain '-' (custom element convention)
         let after_open = &result[abs_open + 1..];
-        let tag_end_in_name = after_open.find(|c: char| c == ' ' || c == '>' || c == '/');
+        let tag_end_in_name = after_open.find([' ', '>', '/']);
         let tag_name = match tag_end_in_name {
             Some(n) => after_open[..n].trim().to_string(),
             None => { offset = abs_open + 1; continue; }
