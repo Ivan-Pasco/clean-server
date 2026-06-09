@@ -2057,10 +2057,14 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             let with_components = expand_component_tags(&with_directives, &component_map);
 
             // Wrap in layout if specified
-            let rendered = match layout_name {
+            let wrapped = match layout_name {
                 Some(ref name) => apply_layout(&with_components, name, &cwd),
                 None => with_components,
             };
+
+            // SRV003: If the final document contains hydration islands, inject the
+            // frame.ui loader.js <script> tag so the client runtime mounts components.
+            let rendered = inject_loader_script(&wrapped);
 
             caller.data_mut().add_header(
                 "Content-Type".to_string(),
@@ -2253,6 +2257,37 @@ fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String
     }
 
     result
+}
+
+/// Inject the frame.ui runtime loader `<script src="/loader.js" defer></script>`
+/// into the rendered document when at least one hydration island is present.
+///
+/// Idempotent: if the document already references `/loader.js`, this is a no-op.
+/// Placement: inserted before the last `</body>` tag (case-insensitive). If no
+/// `</body>` exists, the script is appended to the end of the document.
+fn inject_loader_script(html: &str) -> String {
+    if !html.contains("data-island=\"") {
+        return html.to_string();
+    }
+    if html.contains("/loader.js") {
+        return html.to_string();
+    }
+
+    const SCRIPT_TAG: &str = "<script src=\"/loader.js\" defer></script>";
+
+    let lower = html.to_ascii_lowercase();
+    if let Some(pos) = lower.rfind("</body>") {
+        let mut out = String::with_capacity(html.len() + SCRIPT_TAG.len());
+        out.push_str(&html[..pos]);
+        out.push_str(SCRIPT_TAG);
+        out.push_str(&html[pos..]);
+        out
+    } else {
+        let mut out = String::with_capacity(html.len() + SCRIPT_TAG.len());
+        out.push_str(html);
+        out.push_str(SCRIPT_TAG);
+        out
+    }
 }
 
 /// Extract attribute value from an HTML tag string, e.g. `client="on"` → `Some("on")`.
@@ -3649,6 +3684,41 @@ mod tests {
 
         // Missing key returns None
         assert!(json_get_by_path(&parsed, "data.missing").is_none());
+    }
+
+    #[test]
+    fn test_inject_loader_script_for_islands() {
+        // SRV003: page with a data-island wrapper must get the loader script tag
+        let html = r#"<html><body><div data-island="my-toolbar" data-client="on"><button>x</button></div></body></html>"#;
+        let result = inject_loader_script(html);
+        assert!(
+            result.contains(r#"<script src="/loader.js" defer></script>"#),
+            "loader script must be injected when islands are present, got: {}",
+            result
+        );
+        assert!(
+            result.contains(r#"</script></body>"#),
+            "loader script must be inserted before </body>, got: {}",
+            result
+        );
+
+        // No islands → no injection
+        let plain = "<html><body><p>hello</p></body></html>";
+        assert_eq!(inject_loader_script(plain), plain);
+
+        // Idempotent: page that already references /loader.js is left untouched
+        let already = r#"<html><body><div data-island="x" data-client="on"></div><script src="/loader.js"></script></body></html>"#;
+        assert_eq!(inject_loader_script(already), already);
+
+        // No </body> tag: script is appended at the end
+        let fragment = r#"<div data-island="x" data-client="on"></div>"#;
+        let result = inject_loader_script(fragment);
+        assert!(result.ends_with(r#"<script src="/loader.js" defer></script>"#));
+
+        // Case-insensitive </body> matching
+        let upper = r#"<HTML><BODY><div data-island="x" data-client="on"></div></BODY></HTML>"#;
+        let result = inject_loader_script(upper);
+        assert!(result.contains(r#"<script src="/loader.js" defer></script></BODY>"#));
     }
 
     #[test]
