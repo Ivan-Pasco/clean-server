@@ -41,6 +41,7 @@ impl Default for HttpClientConfig {
 struct HttpLastResponse {
     status_code: i32,
     headers_json: String,
+    body: String,
 }
 
 impl Default for HttpLastResponse {
@@ -48,6 +49,7 @@ impl Default for HttpLastResponse {
         Self {
             status_code: 0,
             headers_json: "{}".to_string(),
+            body: String::new(),
         }
     }
 }
@@ -96,6 +98,10 @@ fn store_last_response(result: &serde_json::Value) {
             last.headers_json = data.get("headers")
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| "{}".to_string());
+            last.body = data.get("body")
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_string();
         }
     });
 }
@@ -584,6 +590,16 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // http_get_response_body - Return body string from the last HTTP response
+    linker.func_wrap(
+        "env",
+        "http_get_response_body",
+        |mut caller: Caller<'_, S>| -> i32 {
+            let body = HTTP_LAST_RESPONSE.with(|last| last.borrow().body.clone());
+            write_string_to_caller(&mut caller, &body)
+        },
+    )?;
+
     // http_encode_url - URL-encode a string
     linker.func_wrap(
         "env",
@@ -749,6 +765,159 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
                 Err(e) => {
                     error!("http_post_with_headers: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
+            }
+        },
+    )?;
+
+    // http_put_with_headers - PUT request with body and custom headers
+    linker.func_wrap(
+        "env",
+        "http_put_with_headers",
+        |mut caller: Caller<'_, S>,
+         url_ptr: i32,
+         url_len: i32,
+         body_ptr: i32,
+         body_len: i32,
+         headers_ptr: i32,
+         headers_len: i32|
+         -> i32 {
+            let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
+            let headers_json = read_raw_string(&mut caller, headers_ptr, headers_len)
+                .unwrap_or_else(|| "{}".to_string());
+            let parsed: serde_json::Value =
+                serde_json::from_str(&headers_json).unwrap_or_default();
+            let timeout = get_timeout_ms();
+            let max_redirects = get_max_redirects();
+            let merged_headers = build_request_headers(Some(parsed));
+
+            let result = HTTP_BRIDGE.with(|bridge| {
+                let bridge = bridge.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut b = bridge.write().await;
+                        b.call("request", json!({ "method": "PUT", "url": url, "body": body, "headers": merged_headers, "timeout": timeout, "max_redirects": max_redirects })).await
+                    })
+                })
+            });
+
+            match result {
+                Ok(v) => {
+                    store_last_response(&v);
+                    let resp_body = v.get("data")
+                        .and_then(|d| d.get("body"))
+                        .and_then(|b| b.as_str())
+                        .unwrap_or("");
+                    write_string_to_caller(&mut caller, resp_body)
+                }
+                Err(e) => {
+                    error!("http_put_with_headers: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
+            }
+        },
+    )?;
+
+    // http_patch_with_headers - PATCH request with body and custom headers
+    linker.func_wrap(
+        "env",
+        "http_patch_with_headers",
+        |mut caller: Caller<'_, S>,
+         url_ptr: i32,
+         url_len: i32,
+         body_ptr: i32,
+         body_len: i32,
+         headers_ptr: i32,
+         headers_len: i32|
+         -> i32 {
+            let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
+            let headers_json = read_raw_string(&mut caller, headers_ptr, headers_len)
+                .unwrap_or_else(|| "{}".to_string());
+            let parsed: serde_json::Value =
+                serde_json::from_str(&headers_json).unwrap_or_default();
+            let timeout = get_timeout_ms();
+            let max_redirects = get_max_redirects();
+            let merged_headers = build_request_headers(Some(parsed));
+
+            let result = HTTP_BRIDGE.with(|bridge| {
+                let bridge = bridge.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut b = bridge.write().await;
+                        b.call("request", json!({ "method": "PATCH", "url": url, "body": body, "headers": merged_headers, "timeout": timeout, "max_redirects": max_redirects })).await
+                    })
+                })
+            });
+
+            match result {
+                Ok(v) => {
+                    store_last_response(&v);
+                    let resp_body = v.get("data")
+                        .and_then(|d| d.get("body"))
+                        .and_then(|b| b.as_str())
+                        .unwrap_or("");
+                    write_string_to_caller(&mut caller, resp_body)
+                }
+                Err(e) => {
+                    error!("http_patch_with_headers: Request failed: {}", e);
+                    write_string_to_caller(&mut caller, "")
+                }
+            }
+        },
+    )?;
+
+    // http_delete_with_headers - DELETE request with custom headers
+    linker.func_wrap(
+        "env",
+        "http_delete_with_headers",
+        |mut caller: Caller<'_, S>,
+         url_ptr: i32,
+         url_len: i32,
+         headers_ptr: i32,
+         headers_len: i32|
+         -> i32 {
+            let url = match read_raw_string(&mut caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let headers_json = read_raw_string(&mut caller, headers_ptr, headers_len)
+                .unwrap_or_else(|| "{}".to_string());
+            let parsed: serde_json::Value =
+                serde_json::from_str(&headers_json).unwrap_or_default();
+            let timeout = get_timeout_ms();
+            let max_redirects = get_max_redirects();
+            let merged_headers = build_request_headers(Some(parsed));
+
+            let result = HTTP_BRIDGE.with(|bridge| {
+                let bridge = bridge.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut b = bridge.write().await;
+                        b.call("request", json!({ "method": "DELETE", "url": url, "headers": merged_headers, "timeout": timeout, "max_redirects": max_redirects })).await
+                    })
+                })
+            });
+
+            match result {
+                Ok(v) => {
+                    store_last_response(&v);
+                    let resp_body = v.get("data")
+                        .and_then(|d| d.get("body"))
+                        .and_then(|b| b.as_str())
+                        .unwrap_or("");
+                    write_string_to_caller(&mut caller, resp_body)
+                }
+                Err(e) => {
+                    error!("http_delete_with_headers: Request failed: {}", e);
                     write_string_to_caller(&mut caller, "")
                 }
             }
