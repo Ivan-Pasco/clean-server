@@ -75,6 +75,7 @@
 
 pub mod bridge;
 pub mod bridge_canvas_stubs;
+pub mod build_manifest;
 pub mod error;
 pub mod error_reporting;
 pub mod memory;

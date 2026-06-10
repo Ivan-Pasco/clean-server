@@ -2,6 +2,7 @@
 //!
 //! Uses Axum to serve HTTP requests and route them to WASM handlers.
 
+use crate::build_manifest::{BuildManifest, ResolvedArtifact, purpose as artifact_purpose};
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
 use crate::session::{SharedSessionStore, parse_cookies};
@@ -204,6 +205,10 @@ pub struct AppState {
     islands_store: SharedIslandsStore,
     /// Content of the frame.ui runtime loader.js served at /loader.js
     loader_js: Arc<String>,
+    /// Resolved path to the client-hydration artifact (`frontend.wasm`) when
+    /// the build manifest declared one. `None` triggers the legacy CWD +
+    /// `public/` probe for Phase B compatibility (manifest absent).
+    frontend_wasm_path: Option<Arc<PathBuf>>,
 }
 
 impl AppState {
@@ -212,12 +217,14 @@ impl AppState {
         router: SharedRouter,
         islands_store: SharedIslandsStore,
         loader_js: Arc<String>,
+        frontend_wasm_path: Option<Arc<PathBuf>>,
     ) -> Self {
         Self {
             wasm,
             router,
             islands_store,
             loader_js,
+            frontend_wasm_path,
         }
     }
 }
@@ -453,11 +460,51 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     // Load the frame.ui runtime loader.js (plugin installation preferred over embedded stub)
     let loader_js = Arc::new(load_runtime_loader_js());
 
+    // Read the build manifest (Plugin Contracts v2 — see contracts/artifacts.md §5).
+    // The manifest sits next to the WASM and tells us where each artifact lives
+    // (`frontend.wasm`, future `theme.css`, etc.). When the manifest is absent
+    // we fall back to legacy CWD/public probing for Phase B compatibility.
+    let main_wasm_dir = wasm_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let resolved_artifacts: Vec<ResolvedArtifact> = match BuildManifest::load_alongside(&wasm_path) {
+        Ok(Some(manifest)) => {
+            info!(
+                "Loaded build manifest (compiler {}, {} artifact(s))",
+                manifest.compiler_version,
+                manifest.artifacts.len()
+            );
+            manifest.resolve_artifacts(&main_wasm_dir)
+        }
+        Ok(None) => {
+            debug!(
+                "No build-manifest.json next to {:?}; using legacy artifact discovery",
+                wasm_path
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            warn!(
+                "Build manifest present but unreadable; falling back to legacy lookup: {}",
+                e
+            );
+            Vec::new()
+        }
+    };
+    let frontend_wasm_path: Option<Arc<PathBuf>> = resolved_artifacts
+        .iter()
+        .find(|a| a.purpose == artifact_purpose::CLIENT_HYDRATION)
+        .map(|a| Arc::new(a.absolute_path.clone()));
+    if let Some(p) = &frontend_wasm_path {
+        info!("Manifest-resolved frontend.wasm at {:?}", p.as_ref());
+    }
+
     // Create app state
-    let state = AppState::new(wasm, router, islands_store, loader_js);
+    let state = AppState::new(wasm, router, islands_store, loader_js, frontend_wasm_path);
 
     // Build Axum router
-    let app = build_router(state, &config, static_dirs);
+    let app = build_router(state, &config, static_dirs, &resolved_artifacts);
 
     // Start server
     let addr = config.socket_addr();
@@ -477,12 +524,54 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
 }
 
 /// Build the Axum router with middleware
-fn build_router(state: AppState, config: &ServerConfig, static_dirs: Vec<(String, String)>) -> Router {
+fn build_router(
+    state: AppState,
+    config: &ServerConfig,
+    static_dirs: Vec<(String, String)>,
+    resolved_artifacts: &[ResolvedArtifact],
+) -> Router {
+    // Reserved routes that already have explicit handlers below. Manifest
+    // artifacts targeting these paths fall back to the dedicated handler
+    // rather than registering a duplicate route.
+    const RESERVED_ARTIFACT_NAMES: &[&str] =
+        &["frontend.wasm", "loader.js", "islands-manifest.json"];
+
     let mut app = Router::new()
         // Built-in islands routes — registered before the fallback so they always take priority
         .route("/islands-manifest.json", axum::routing::get(serve_islands_manifest))
         .route("/loader.js", axum::routing::get(serve_loader_js))
-        .route("/frontend.wasm", axum::routing::get(serve_frontend_wasm))
+        .route("/frontend.wasm", axum::routing::get(serve_frontend_wasm));
+
+    // Register routes for every public artifact the manifest declared (other
+    // than the ones with dedicated handlers above). Today this covers
+    // future plugin-declared assets like `theme.css` (frame.ui) without
+    // requiring per-plugin code in the server.
+    // See contracts/artifacts.md §8.2.
+    for artifact in resolved_artifacts {
+        if !artifact.public {
+            continue;
+        }
+        if RESERVED_ARTIFACT_NAMES.contains(&artifact.name.as_str()) {
+            continue;
+        }
+        let route_path = format!("/{}", artifact.name);
+        let absolute_path = artifact.absolute_path.clone();
+        let content_type = artifact.content_type.clone();
+        info!(
+            "Manifest artifact route: {} -> {:?} ({})",
+            route_path, absolute_path, content_type
+        );
+        app = app.route(
+            &route_path,
+            axum::routing::get(move || {
+                let absolute_path = absolute_path.clone();
+                let content_type = content_type.clone();
+                async move { serve_manifest_artifact(absolute_path, content_type).await }
+            }),
+        );
+    }
+
+    let mut app = app
         // Catch-all handler that routes to WASM
         .fallback(handle_request)
         .with_state(state);
@@ -568,9 +657,42 @@ async fn serve_loader_js(State(state): State<AppState>) -> Response {
 
 /// Serve the compiled client-side WASM runtime at /frontend.wasm.
 ///
-/// Looks for the file at `./frontend.wasm` (project root), then `./public/frontend.wasm`.
-/// Returns 404 if neither exists — the project must compile its client components first.
-async fn serve_frontend_wasm() -> Response {
+/// Manifest-first per contracts/artifacts.md §5: when the build manifest
+/// declared a `client_hydration` artifact, serve the file at the resolved
+/// path. When the manifest is absent (Phase B compatibility), fall back to
+/// the legacy CWD + `public/` probe. When the manifest IS present but the
+/// resolved file is missing, return 404 immediately rather than searching
+/// ambient directories — the manifest is the source of truth.
+async fn serve_frontend_wasm(State(state): State<AppState>) -> Response {
+    if let Some(path) = &state.frontend_wasm_path {
+        match std::fs::read(path.as_ref()) {
+            Ok(bytes) => {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/wasm")
+                    .header(header::CACHE_CONTROL, "public, max-age=60")
+                    .body(Body::from(bytes))
+                    .expect("response builder");
+            }
+            Err(e) => {
+                error!(
+                    "Manifest-declared frontend.wasm missing at {:?}: {}",
+                    path.as_ref(),
+                    e
+                );
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from(format!(
+                        "frontend.wasm declared in build-manifest.json but not found at {:?}",
+                        path.as_ref()
+                    )))
+                    .expect("response builder");
+            }
+        }
+    }
+
+    // Phase B fallback: no manifest entry — probe legacy locations.
     let candidates = ["frontend.wasm", "public/frontend.wasm"];
     for path in &candidates {
         match std::fs::read(path) {
@@ -592,6 +714,36 @@ async fn serve_frontend_wasm() -> Response {
             "frontend.wasm not found — compile client components to generate it",
         ))
         .expect("response builder")
+}
+
+/// Serve a manifest-declared public artifact (e.g. `theme.css`).
+///
+/// Reads the file from the manifest-resolved absolute path and returns it
+/// with the declared `Content-Type`. Returns 404 when the file is missing —
+/// the manifest is authoritative, no ambient-directory search.
+async fn serve_manifest_artifact(absolute_path: PathBuf, content_type: String) -> Response {
+    match std::fs::read(&absolute_path) {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CACHE_CONTROL, "public, max-age=60")
+            .body(Body::from(bytes))
+            .expect("response builder"),
+        Err(e) => {
+            error!(
+                "Manifest-declared artifact missing at {:?}: {}",
+                absolute_path, e
+            );
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from(format!(
+                    "artifact declared in build-manifest.json but not found at {:?}",
+                    absolute_path
+                )))
+                .expect("response builder")
+        }
+    }
 }
 
 /// Handle all incoming requests
@@ -972,5 +1124,73 @@ mod tests {
         let config = ServerConfig::default().with_port(8080);
         let addr = config.socket_addr();
         assert_eq!(addr.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn serve_manifest_artifact_returns_file_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let css_path = dir.path().join("theme.css");
+        std::fs::write(&css_path, b":root{--c:0}").unwrap();
+
+        let response =
+            serve_manifest_artifact(css_path.clone(), "text/css".to_string()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/css")
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_manifest_artifact_returns_404_when_missing() {
+        // Manifest-declared artifact is missing on disk. Spec §5: NO ambient
+        // search — must return 404 instead of probing CWD or public/.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.css");
+
+        let response =
+            serve_manifest_artifact(missing.clone(), "text/css".to_string()).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn build_manifest_resolves_frontend_wasm_to_main_wasm_dir() {
+        // End-to-end check that the loader resolves frontend.wasm against the
+        // WASM directory (not CWD) — the SRV004 contract guarantee.
+        let dir = tempfile::tempdir().unwrap();
+        let dist = dir.path().join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        let main_wasm = dist.join("app.wasm");
+        std::fs::write(&main_wasm, b"WASM").unwrap();
+        std::fs::write(dist.join("frontend.wasm"), b"FRONTEND").unwrap();
+        std::fs::write(
+            dist.join(crate::build_manifest::BUILD_MANIFEST_FILENAME),
+            r#"{
+                "schema_version": "1.0.0",
+                "compiler_version": "0.30.257",
+                "artifacts": [
+                    {
+                        "name": "frontend.wasm",
+                        "path_relative": "frontend.wasm",
+                        "purpose": "client_hydration",
+                        "public": true,
+                        "content_type": "application/wasm"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = BuildManifest::load_alongside(&main_wasm).unwrap().unwrap();
+        let resolved = manifest.resolve_artifacts(&dist);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "frontend.wasm");
+        assert_eq!(resolved[0].absolute_path, dist.join("frontend.wasm"));
+        assert!(resolved[0].public);
     }
 }
