@@ -228,6 +228,19 @@ pub struct WasmState {
     pub islands_store: SharedIslandsStore,
     /// Component HTML templates registered via _ui_register_component_html for SSR expansion
     pub component_registry: SharedComponentRegistry,
+    /// Resolved `[bridge.functions.callback]` contracts from the build manifest.
+    /// Populated by `WasmInstance::set_callbacks` at startup and copied into
+    /// each fresh state in `create_instance`. Empty when the manifest didn't
+    /// declare any (e.g. older compiler / no v2 plugins loaded). See
+    /// `foundation/spec/plugins/contracts/bridge-host-classes.md` §4.
+    pub callbacks: Arc<Vec<crate::build_manifest::CallbackContract>>,
+    /// JSON-encoded attribute map for the custom component tag currently
+    /// being dispatched by `_ui_render_page`. Set by the host immediately
+    /// before calling `<tagname>_render` and cleared afterwards so a future
+    /// bridge function (`_ui_component_attrs`) can surface attrs to the
+    /// export. Today's export contract takes no args; this field is the
+    /// hook for the spec's documented attribute-marshaling convention.
+    pub pending_component_attrs: Option<String>,
     /// Bridge function permission gate derived from the `clean:permissions`
     /// custom section of the loaded WASM module.
     pub permission_gate: PermissionGate,
@@ -329,6 +342,8 @@ impl WasmState {
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
             component_registry: create_shared_component_registry(),
+            callbacks: Arc::new(Vec::new()),
+            pending_component_attrs: None,
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
             pending_head_css: Vec::new(),
@@ -361,6 +376,8 @@ impl WasmState {
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
             component_registry: create_shared_component_registry(),
+            callbacks: Arc::new(Vec::new()),
+            pending_component_attrs: None,
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
             pending_head_css: Vec::new(),
@@ -403,6 +420,8 @@ impl WasmState {
             static_dirs,
             islands_store,
             component_registry,
+            callbacks: Arc::new(Vec::new()),
+            pending_component_attrs: None,
             permission_gate,
             limits: build_store_limits(memory_limit),
             pending_head_css: Vec::new(),
@@ -547,6 +566,12 @@ pub struct WasmInstance {
     islands_store: SharedIslandsStore,
     /// Component HTML templates registered via _ui_register_component_html
     component_registry: SharedComponentRegistry,
+    /// Resolved callback contracts from `build-manifest.json`. Set once at
+    /// startup via `set_callbacks` then copied into every fresh `WasmState`
+    /// in `create_instance`. Interior mutability lets the server install
+    /// callbacks after the `WasmInstance` is constructed (build manifest is
+    /// loaded after the WASM module). See contracts/bridge-host-classes.md §4.
+    callbacks: parking_lot::Mutex<Arc<Vec<crate::build_manifest::CallbackContract>>>,
     /// Bridge function permission gate parsed from the loaded WASM binary
     permission_gate: PermissionGate,
     /// Memory limit in bytes for each Store
@@ -692,9 +717,21 @@ impl WasmInstance {
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
             component_registry: create_shared_component_registry(),
+            callbacks: parking_lot::Mutex::new(Arc::new(Vec::new())),
             permission_gate,
             memory_limit,
         })
+    }
+
+    /// Install the resolved callback contracts after construction. Called
+    /// once at startup by `start_server` once the build manifest is loaded.
+    /// Subsequent `create_instance` calls hand the same `Arc` to every
+    /// fresh `WasmState`.
+    pub fn set_callbacks(
+        &self,
+        callbacks: Arc<Vec<crate::build_manifest::CallbackContract>>,
+    ) {
+        *self.callbacks.lock() = callbacks;
     }
 
     /// Create a fresh WASM instance for request handling
@@ -711,6 +748,9 @@ impl WasmInstance {
         );
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
+        // Copy the resolved callback contracts into the fresh state so bridge
+        // functions like `_ui_render_page` can look up their dispatch rules.
+        store.data_mut().callbacks = self.callbacks.lock().clone();
 
         let instance = self
             .linker

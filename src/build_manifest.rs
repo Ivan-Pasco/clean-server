@@ -38,7 +38,9 @@ pub mod purpose {
 }
 
 /// Subset of the compiler's `BuildManifest` shape we consume. Extra fields
-/// (callbacks, build_state, etc.) are tolerated and ignored.
+/// (build_state, etc.) are tolerated and ignored. Callbacks are the v2
+/// dispatch contract surface — see
+/// `foundation/spec/plugins/contracts/bridge-host-classes.md` §4.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuildManifest {
     #[serde(default)]
@@ -47,6 +49,53 @@ pub struct BuildManifest {
     pub compiler_version: String,
     #[serde(default)]
     pub artifacts: Vec<BuildArtifact>,
+    /// Resolved `[bridge.functions.callback]` declarations from every
+    /// loaded plugin. The host scans this list at startup to learn which
+    /// bridge functions need to dispatch back into the WASM module and how.
+    /// See bridge-host-classes.md §4.
+    #[serde(default)]
+    pub callbacks: Vec<CallbackContract>,
+}
+
+/// One resolved callback contract — the host-facing view of a
+/// `[bridge.functions.callback]` block. Closes SRV001 for clean-server when
+/// `purpose == "component_tag_render"`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallbackContract {
+    /// Bridge function the callback is attached to (e.g. `_ui_render_page`).
+    pub bridge: String,
+    /// Documented purpose. Values from bridge-host-classes.md §4.1.
+    pub purpose: String,
+    /// Plugin whose exports the host should look up (e.g. `"frame.ui"`).
+    pub plugin_target: String,
+    /// How the host finds the right export.
+    /// Values: `"exports_matching"`, `"manifest_lookup"`, `"explicit_argument"`.
+    pub discovery: String,
+    /// Symbol pattern with `{placeholder}` substitution when
+    /// `discovery == "exports_matching"`.
+    #[serde(default)]
+    pub export_pattern: Option<String>,
+    /// Fallback when no matching export is found.
+    /// Values: `"passthrough"`, `"error"`, `"empty"`.
+    pub fallback: String,
+    /// Plugin that declared this callback (e.g. `"frame.ui"`).
+    #[serde(default)]
+    pub declared_by_plugin: String,
+}
+
+/// Documented `purpose` values for callbacks. Mirror of §4.1.
+pub mod callback_purpose {
+    pub const COMPONENT_TAG_RENDER: &str = "component_tag_render";
+    pub const ROUTE_DISPATCH: &str = "route_dispatch";
+    pub const MIGRATION_APPLY: &str = "migration_apply";
+    pub const EVENT_DISPATCH: &str = "event_dispatch";
+}
+
+/// Documented `fallback` values for callbacks. Mirror of §4 fallback field.
+pub mod callback_fallback {
+    pub const PASSTHROUGH: &str = "passthrough";
+    pub const ERROR: &str = "error";
+    pub const EMPTY: &str = "empty";
 }
 
 /// Subset of `BuildArtifact` the host needs. Unknown fields are ignored.
@@ -369,6 +418,53 @@ mod tests {
         assert_eq!(infer_content_type("loader.js"), "application/javascript");
         assert_eq!(infer_content_type("components.json"), "application/json");
         assert_eq!(infer_content_type("UNKNOWN.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn callbacks_parse_when_present() {
+        let dir = tempdir().unwrap();
+        let main = dir.path().join("app.wasm");
+        std::fs::write(&main, b"WASM").unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{
+                "schema_version": "1.0.0",
+                "compiler_version": "0.30.260",
+                "artifacts": [],
+                "callbacks": [
+                    {
+                        "bridge": "_ui_render_page",
+                        "purpose": "component_tag_render",
+                        "plugin_target": "frame.ui",
+                        "discovery": "exports_matching",
+                        "export_pattern": "{tagname}_render",
+                        "fallback": "passthrough",
+                        "declared_by_plugin": "frame.ui"
+                    }
+                ]
+            }"#,
+        );
+        let manifest = BuildManifest::load_alongside(&main).unwrap().unwrap();
+        assert_eq!(manifest.callbacks.len(), 1);
+        let cb = &manifest.callbacks[0];
+        assert_eq!(cb.bridge, "_ui_render_page");
+        assert_eq!(cb.purpose, callback_purpose::COMPONENT_TAG_RENDER);
+        assert_eq!(cb.discovery, "exports_matching");
+        assert_eq!(cb.export_pattern.as_deref(), Some("{tagname}_render"));
+        assert_eq!(cb.fallback, callback_fallback::PASSTHROUGH);
+    }
+
+    #[test]
+    fn callbacks_default_to_empty_when_absent() {
+        let dir = tempdir().unwrap();
+        let main = dir.path().join("app.wasm");
+        std::fs::write(&main, b"WASM").unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{ "schema_version": "1.0.0", "artifacts": [] }"#,
+        );
+        let manifest = BuildManifest::load_alongside(&main).unwrap().unwrap();
+        assert!(manifest.callbacks.is_empty());
     }
 
     #[test]

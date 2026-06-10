@@ -26,7 +26,7 @@ use crate::router::HttpMethod;
 use crate::session::parse_cookies;
 use crate::wasm::{IslandEntry, McpBridgeState, McpPendingRequest, McpTransport, TestResponse, WasmState};
 use host_bridge::{read_string_from_caller, read_raw_string, write_string_to_caller};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use wasmtime::{Caller, Engine, Linker};
 
 /// Register a Layer 3 bridge function under its canonical `_namespace_fn` name
@@ -2056,10 +2056,46 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             };
             let with_components = expand_component_tags(&with_directives, &component_map);
 
+            // SRV001: v2 callback-based dispatch. If a plugin declared
+            // `callback = { purpose = "component_tag_render", ... }` on
+            // `_ui_render_page` in its plugin.toml, scan the HTML for
+            // remaining custom (kebab-case) tags and substitute each one
+            // with the output of the matching `<tagname>_render` export.
+            // See foundation/spec/plugins/contracts/bridge-host-classes.md §4.1.
+            let contract = {
+                let cbs = caller.data().callbacks.clone();
+                cbs.iter()
+                    .find(|c| {
+                        c.bridge == "_ui_render_page"
+                            && c.purpose
+                                == crate::build_manifest::callback_purpose::COMPONENT_TAG_RENDER
+                    })
+                    .cloned()
+            };
+            let dispatched = match contract {
+                // Only `exports_matching` is implemented here. The spec
+                // (§4) reserves `manifest_lookup` and `explicit_argument`
+                // for future discovery modes — handling them silently with
+                // an exports_matching loop would mis-route their dispatch,
+                // so skip with a warning instead.
+                Some(c) if c.discovery == "exports_matching" => {
+                    dispatch_component_tags(&mut caller, &with_components, &c)
+                }
+                Some(c) => {
+                    warn!(
+                        "_ui_render_page: unsupported callback discovery '{}' for purpose '{}' \
+                         (declared by '{}'); skipping dispatch",
+                        c.discovery, c.purpose, c.declared_by_plugin
+                    );
+                    with_components
+                }
+                None => with_components,
+            };
+
             // Wrap in layout if specified
             let wrapped = match layout_name {
-                Some(ref name) => apply_layout(&with_components, name, &cwd),
-                None => with_components,
+                Some(ref name) => apply_layout(&dispatched, name, &cwd),
+                None => dispatched,
             };
 
             // SRV003: If the final document contains hydration islands, inject the
@@ -2254,6 +2290,260 @@ fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String
 
         result.replace_range(abs_open..element_end, &replacement);
         offset = abs_open + replacement.len();
+    }
+
+    result
+}
+
+/// Resolve a custom HTML tag name to the WASM export name declared by the
+/// callback's `export_pattern`. The pattern's `{tagname}` placeholder is
+/// substituted with the tag name with hyphens removed — matching the
+/// compiler's convention for `<tagname>_render` exports
+/// (see contracts/bridge-host-classes.md §4 + frame.ui plugin.toml).
+fn resolve_render_export_name(tag_name: &str, pattern: &str) -> String {
+    let normalized = tag_name.replace('-', "");
+    pattern.replace("{tagname}", &normalized)
+}
+
+/// Build a JSON object string from the attributes inside an opening tag.
+/// Used for the prompt's documented attribute-marshaling convention. Stashed
+/// on `WasmState.pending_component_attrs` so a future bridge function can
+/// surface it to the export — today the export receives no args (signature
+/// `() -> i32`) so this is informational only.
+fn marshal_attrs_as_json(opening_tag: &str, tag_name: &str) -> String {
+    // Strip `<tag_name` prefix and trailing `>` (or `/>`)
+    let after_name = match opening_tag.find(tag_name) {
+        Some(p) => &opening_tag[p + tag_name.len()..],
+        None => opening_tag,
+    };
+    let attrs_section = after_name
+        .trim_start()
+        .trim_end_matches('>')
+        .trim_end_matches('/')
+        .trim();
+    if attrs_section.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut map = serde_json::Map::new();
+    let bytes = attrs_section.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Read attribute name (up to '=', whitespace, or end)
+        let name_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name = String::from_utf8_lossy(&bytes[name_start..i]).to_string();
+        // Read optional value
+        let value = if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                let val_start = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                let v = String::from_utf8_lossy(&bytes[val_start..i]).to_string();
+                if i < bytes.len() {
+                    i += 1;
+                }
+                v
+            } else {
+                let val_start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                String::from_utf8_lossy(&bytes[val_start..i]).to_string()
+            }
+        } else {
+            // HTML boolean attribute — empty string per the prompt convention
+            String::new()
+        };
+        if !name.is_empty() {
+            map.insert(name, serde_json::Value::String(value));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+/// Scan `html` for custom (kebab-case) element tags and dispatch each one to
+/// the matching `<tagname>_render` export, substituting the tag with the
+/// returned HTML.
+///
+/// Implements `purpose = "component_tag_render"` from
+/// `foundation/spec/plugins/contracts/bridge-host-classes.md` §4.1.
+///
+/// Resolution rules:
+/// - Custom = the tag name contains a hyphen (HTML custom-element convention).
+/// - The export name is built from the contract's `export_pattern` (default
+///   `"{tagname}_render"`) with hyphens stripped from the tag name.
+/// - If the export exists with signature `() -> i32`, call it; the result is
+///   a length-prefixed UTF-8 string pointer (Clean Language string ABI).
+/// - If the export is missing OR has an unexpected signature OR traps, apply
+///   the contract's `fallback`:
+///   - `"passthrough"`: leave the original tag in place (default; matches
+///     today's behavior — no regression).
+///   - `"empty"`: substitute an empty string.
+///   - `"error"`: substitute an HTML comment marker noting the failure.
+///
+/// Single-pass: the rendered HTML is NOT re-scanned, so a component whose
+/// output contains another custom tag will not see that inner tag dispatched.
+/// This is deliberate — multi-pass dispatch invites infinite loops and adds
+/// per-request cost. Future revisions may add a bounded-depth iteration.
+///
+/// Attribute marshaling: the JSON-encoded attributes are stashed on
+/// `WasmState.pending_component_attrs` for the duration of the call so a
+/// future bridge function (`_ui_component_attrs`) can retrieve them. Today's
+/// export contract takes no args.
+fn dispatch_component_tags(
+    caller: &mut Caller<'_, WasmState>,
+    html: &str,
+    contract: &crate::build_manifest::CallbackContract,
+) -> String {
+    let pattern = contract
+        .export_pattern
+        .as_deref()
+        .unwrap_or("{tagname}_render");
+    let fallback = contract.fallback.as_str();
+
+    let mut result = html.to_string();
+    let mut offset = 0;
+
+    loop {
+        let remaining = &result[offset..];
+        let rel_open = match remaining.find('<') {
+            Some(pos) => pos,
+            None => break,
+        };
+        let abs_open = offset + rel_open;
+
+        let after_open = &result[abs_open + 1..];
+        let name_end = match after_open.find([' ', '>', '/', '\t', '\n']) {
+            Some(n) => n,
+            None => {
+                offset = abs_open + 1;
+                continue;
+            }
+        };
+        let tag_name = after_open[..name_end].trim().to_string();
+
+        // Skip closing tags, comments, DOCTYPE, processing instructions,
+        // and non-custom tags (no hyphen).
+        if tag_name.is_empty()
+            || tag_name.starts_with('/')
+            || tag_name.starts_with('!')
+            || tag_name.starts_with('?')
+            || !tag_name.contains('-')
+        {
+            offset = abs_open + 1;
+            continue;
+        }
+
+        let close_bracket = match result[abs_open..].find('>') {
+            Some(rel) => abs_open + rel,
+            None => {
+                offset = abs_open + 1;
+                continue;
+            }
+        };
+        let opening_tag = result[abs_open..=close_bracket].to_string();
+        let self_closing = opening_tag.ends_with("/>");
+
+        let close_tag = format!("</{}>", tag_name);
+        let element_end = if self_closing {
+            close_bracket + 1
+        } else {
+            match result[close_bracket + 1..].find(close_tag.as_str()) {
+                Some(rel) => close_bracket + 1 + rel + close_tag.len(),
+                None => {
+                    // Unclosed custom tag — leave it alone.
+                    offset = abs_open + 1;
+                    continue;
+                }
+            }
+        };
+
+        let export_name = resolve_render_export_name(&tag_name, pattern);
+        let attrs_json = marshal_attrs_as_json(&opening_tag, &tag_name);
+
+        // Stash attrs for future arg-passing convention; clear afterward so
+        // an unrelated subsequent call doesn't observe stale state.
+        caller.data_mut().pending_component_attrs = Some(attrs_json.clone());
+
+        let func_opt = caller.get_export(&export_name).and_then(|e| e.into_func());
+        let replacement: Option<String> = match func_opt {
+            Some(func) => match func.typed::<(), i32>(&*caller) {
+                Ok(typed) => match typed.call(&mut *caller, ()) {
+                    Ok(lp_ptr) if lp_ptr > 0 => host_bridge::read_string_from_caller(
+                        caller, lp_ptr,
+                    ),
+                    Ok(lp_ptr) => {
+                        debug!(
+                            "dispatch_component_tags: export '{}' returned invalid pointer {}",
+                            export_name, lp_ptr
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        error!(
+                            "dispatch_component_tags: export '{}' trapped: {}",
+                            export_name, e
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    debug!(
+                        "dispatch_component_tags: export '{}' has unexpected signature (expected `() -> i32`): {}",
+                        export_name, e
+                    );
+                    None
+                }
+            },
+            None => {
+                debug!(
+                    "dispatch_component_tags: no export '{}' for <{}>; applying fallback '{}'",
+                    export_name, tag_name, fallback
+                );
+                None
+            }
+        };
+
+        caller.data_mut().pending_component_attrs = None;
+
+        match replacement {
+            Some(rendered) => {
+                result.replace_range(abs_open..element_end, &rendered);
+                offset = abs_open + rendered.len();
+            }
+            None => match fallback {
+                crate::build_manifest::callback_fallback::EMPTY => {
+                    result.replace_range(abs_open..element_end, "");
+                    offset = abs_open;
+                }
+                crate::build_manifest::callback_fallback::ERROR => {
+                    let marker = format!(
+                        "<!-- component-tag-render: no export '{}' for <{}> -->",
+                        export_name, tag_name
+                    );
+                    result.replace_range(abs_open..element_end, &marker);
+                    offset = abs_open + marker.len();
+                }
+                // PASSTHROUGH or any unknown fallback — leave tag in place.
+                _ => {
+                    offset = abs_open + 1;
+                }
+            },
+        }
     }
 
     result
@@ -3895,5 +4185,85 @@ mod tests {
             "Layer 3 spec compliance PASSED: {} canonical + aliases = {} total imports",
             layer3_funcs.len(), import_count
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SRV001 — component_tag_render dispatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_render_export_name_strips_hyphens() {
+        // Default pattern from frame.ui plugin.toml.
+        assert_eq!(
+            resolve_render_export_name("my-component", "{tagname}_render"),
+            "mycomponent_render"
+        );
+        assert_eq!(
+            resolve_render_export_name("user-badge", "{tagname}_render"),
+            "userbadge_render"
+        );
+        // No hyphen ⇒ no change to the base name.
+        assert_eq!(
+            resolve_render_export_name("counter", "{tagname}_render"),
+            "counter_render"
+        );
+        // Multiple hyphens collapsed.
+        assert_eq!(
+            resolve_render_export_name("very-long-tag-name", "{tagname}_render"),
+            "verylongtagname_render"
+        );
+        // Alternate pattern still substitutes.
+        assert_eq!(
+            resolve_render_export_name("my-thing", "render_{tagname}"),
+            "render_mything"
+        );
+    }
+
+    #[test]
+    fn marshal_attrs_as_json_handles_no_attrs() {
+        assert_eq!(marshal_attrs_as_json("<my-tag>", "my-tag"), "{}");
+        assert_eq!(marshal_attrs_as_json("<my-tag/>", "my-tag"), "{}");
+        assert_eq!(marshal_attrs_as_json("<my-tag />", "my-tag"), "{}");
+    }
+
+    // `serde_json::Map` (BTreeMap-backed without `preserve_order` feature)
+    // outputs keys in lexicographic order. The export consumes the JSON by
+    // key lookup, so the on-the-wire order is irrelevant — these tests pin
+    // the deterministic output for regression-detection.
+
+    #[test]
+    fn marshal_attrs_as_json_double_quoted() {
+        let json = marshal_attrs_as_json(r#"<my-tag name="bob" count="3">"#, "my-tag");
+        assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
+    }
+
+    #[test]
+    fn marshal_attrs_as_json_single_quoted_and_boolean() {
+        let json = marshal_attrs_as_json(
+            "<my-tag name='alice' disabled count='7'>",
+            "my-tag",
+        );
+        assert_eq!(json, r#"{"count":"7","disabled":"","name":"alice"}"#);
+    }
+
+    #[test]
+    fn marshal_attrs_as_json_self_closing() {
+        let json = marshal_attrs_as_json(r#"<my-tag label="x" />"#, "my-tag");
+        assert_eq!(json, r#"{"label":"x"}"#);
+    }
+
+    #[test]
+    fn marshal_attrs_as_json_unquoted_value() {
+        let json = marshal_attrs_as_json("<my-tag count=3 name=bob>", "my-tag");
+        assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
+    }
+
+    #[test]
+    fn marshal_attrs_as_json_with_extra_whitespace() {
+        let json = marshal_attrs_as_json(
+            "<my-tag   name=\"bob\"   count=\"3\"  >",
+            "my-tag",
+        );
+        assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
     }
 }

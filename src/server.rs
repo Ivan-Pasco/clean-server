@@ -2,7 +2,7 @@
 //!
 //! Uses Axum to serve HTTP requests and route them to WASM handlers.
 
-use crate::build_manifest::{BuildManifest, ResolvedArtifact, purpose as artifact_purpose};
+use crate::build_manifest::{BuildManifest, CallbackContract, ResolvedArtifact, purpose as artifact_purpose};
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
 use crate::session::{SharedSessionStore, parse_cookies};
@@ -468,30 +468,39 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let resolved_artifacts: Vec<ResolvedArtifact> = match BuildManifest::load_alongside(&wasm_path) {
-        Ok(Some(manifest)) => {
-            info!(
-                "Loaded build manifest (compiler {}, {} artifact(s))",
-                manifest.compiler_version,
-                manifest.artifacts.len()
-            );
-            manifest.resolve_artifacts(&main_wasm_dir)
-        }
-        Ok(None) => {
-            debug!(
-                "No build-manifest.json next to {:?}; using legacy artifact discovery",
-                wasm_path
-            );
-            Vec::new()
-        }
-        Err(e) => {
-            warn!(
-                "Build manifest present but unreadable; falling back to legacy lookup: {}",
-                e
-            );
-            Vec::new()
-        }
-    };
+    let (resolved_artifacts, manifest_callbacks): (Vec<ResolvedArtifact>, Vec<CallbackContract>) =
+        match BuildManifest::load_alongside(&wasm_path) {
+            Ok(Some(manifest)) => {
+                info!(
+                    "Loaded build manifest (compiler {}, {} artifact(s), {} callback(s))",
+                    manifest.compiler_version,
+                    manifest.artifacts.len(),
+                    manifest.callbacks.len()
+                );
+                (
+                    manifest.resolve_artifacts(&main_wasm_dir),
+                    manifest.callbacks,
+                )
+            }
+            Ok(None) => {
+                debug!(
+                    "No build-manifest.json next to {:?}; using legacy artifact discovery",
+                    wasm_path
+                );
+                (Vec::new(), Vec::new())
+            }
+            Err(e) => {
+                warn!(
+                    "Build manifest present but unreadable; falling back to legacy lookup: {}",
+                    e
+                );
+                (Vec::new(), Vec::new())
+            }
+        };
+    // Install the callbacks on the WASM instance so every fresh request-store
+    // sees them via `WasmState.callbacks` — bridges like `_ui_render_page`
+    // look them up at request time. See contracts/bridge-host-classes.md §4.
+    wasm.set_callbacks(Arc::new(manifest_callbacks));
     let frontend_wasm_path: Option<Arc<PathBuf>> = resolved_artifacts
         .iter()
         .find(|a| a.purpose == artifact_purpose::CLIENT_HYDRATION)
