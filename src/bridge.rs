@@ -2564,7 +2564,7 @@ fn inject_loader_script(html: &str) -> String {
         return html.to_string();
     }
 
-    const SCRIPT_TAG: &str = "<script src=\"/loader.js\" defer></script>";
+    const SCRIPT_TAG: &str = "<script src=\"/loader.js\" defer data-wasm=\"/frontend.wasm\"></script>";
 
     let lower = html.to_ascii_lowercase();
     if let Some(pos) = lower.rfind("</body>") {
@@ -3983,7 +3983,7 @@ mod tests {
         let html = r#"<html><body><div data-island="my-toolbar" data-client="on"><button>x</button></div></body></html>"#;
         let result = inject_loader_script(html);
         assert!(
-            result.contains(r#"<script src="/loader.js" defer></script>"#),
+            result.contains(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script>"#),
             "loader script must be injected when islands are present, got: {}",
             result
         );
@@ -4004,12 +4004,12 @@ mod tests {
         // No </body> tag: script is appended at the end
         let fragment = r#"<div data-island="x" data-client="on"></div>"#;
         let result = inject_loader_script(fragment);
-        assert!(result.ends_with(r#"<script src="/loader.js" defer></script>"#));
+        assert!(result.ends_with(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script>"#));
 
         // Case-insensitive </body> matching
         let upper = r#"<HTML><BODY><div data-island="x" data-client="on"></div></BODY></HTML>"#;
         let result = inject_loader_script(upper);
-        assert!(result.contains(r#"<script src="/loader.js" defer></script></BODY>"#));
+        assert!(result.contains(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script></BODY>"#));
     }
 
     #[test]
