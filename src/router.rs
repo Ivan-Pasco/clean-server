@@ -99,6 +99,8 @@ pub struct RouteHandler {
     pub required_role: Option<String>,
     /// Whether this is a Server-Sent Events (STREAM) route
     pub is_sse: bool,
+    /// Whether this is a WebSocket (LIVE) route
+    pub is_ws: bool,
     /// If set, this route is a static redirect: (destination, status_code).
     /// The server returns the redirect immediately without invoking any WASM handler.
     pub redirect_destination: Option<(String, u16)>,
@@ -150,6 +152,7 @@ impl Router {
             protected,
             required_role,
             is_sse,
+            is_ws: false,
             redirect_destination: None,
         };
 
@@ -197,6 +200,7 @@ impl Router {
             protected: false,
             required_role: None,
             is_sse: false,
+            is_ws: false,
             redirect_destination: Some((to_path, status)),
         };
 
@@ -206,6 +210,46 @@ impl Router {
         }
 
         let matchit_path = convert_express_to_matchit(&from_path);
+        {
+            let mut matcher = self.path_matcher.write();
+            let _ = matcher.insert(matchit_path, key);
+        }
+
+        Ok(())
+    }
+
+    /// Register a WebSocket (LIVE) route handler.
+    ///
+    /// The path is stored in the route registry with `is_ws = true`.  The
+    /// server's fallback handler recognises this flag and performs the WebSocket
+    /// upgrade instead of calling a regular WASM handler.
+    pub fn register_ws(
+        &self,
+        path: String,
+        handler_name: String,
+    ) -> RuntimeResult<()> {
+        let key = RouteKey {
+            method: HttpMethod::GET,
+            path: path.clone(),
+        };
+
+        let handler = RouteHandler {
+            method: HttpMethod::GET,
+            path: path.clone(),
+            handler_name,
+            protected: false,
+            required_role: None,
+            is_sse: false,
+            is_ws: true,
+            redirect_destination: None,
+        };
+
+        {
+            let mut routes = self.routes.write();
+            routes.insert(key.clone(), handler);
+        }
+
+        let matchit_path = convert_express_to_matchit(&path);
         {
             let mut matcher = self.path_matcher.write();
             let _ = matcher.insert(matchit_path, key);

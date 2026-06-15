@@ -260,6 +260,9 @@ pub struct WasmState {
     pub sse_sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// SMTP configuration and last-error state for email bridge functions
     pub smtp_state: SharedSmtpState,
+    /// Shared WebSocket server state (connections, rooms, route registry).
+    /// Populated once at server startup and shared across all WASM instances.
+    pub ws_state: crate::websocket::SharedWsState,
 }
 
 /// Request context passed to handlers
@@ -353,6 +356,7 @@ impl WasmState {
             next_test_handle: 0,
             sse_sender: None,
             smtp_state: create_shared_smtp_state(),
+            ws_state: crate::websocket::create_shared_ws_state(),
         }
     }
 
@@ -387,6 +391,7 @@ impl WasmState {
             next_test_handle: 0,
             sse_sender: None,
             smtp_state: create_shared_smtp_state(),
+            ws_state: crate::websocket::create_shared_ws_state(),
         }
     }
 
@@ -431,6 +436,7 @@ impl WasmState {
             next_test_handle: 0,
             sse_sender: None,
             smtp_state: create_shared_smtp_state(),
+            ws_state: crate::websocket::create_shared_ws_state(),
         }
     }
 
@@ -576,6 +582,10 @@ pub struct WasmInstance {
     permission_gate: PermissionGate,
     /// Memory limit in bytes for each Store
     memory_limit: usize,
+    /// Shared WebSocket state (connections, rooms, route registry).
+    /// A single instance is shared with the server so bridge functions can
+    /// find and update live WebSocket connections.
+    pub ws_state: crate::websocket::SharedWsState,
 }
 
 impl WasmInstance {
@@ -720,6 +730,7 @@ impl WasmInstance {
             callbacks: parking_lot::Mutex::new(Arc::new(Vec::new())),
             permission_gate,
             memory_limit,
+            ws_state: crate::websocket::create_shared_ws_state(),
         })
     }
 
@@ -736,7 +747,7 @@ impl WasmInstance {
 
     /// Create a fresh WASM instance for request handling
     fn create_instance(&self) -> RuntimeResult<(Store<WasmState>, Instance)> {
-        let state = WasmState::with_session_store(
+        let mut state = WasmState::with_session_store(
             self.router.clone(),
             self.db_bridge.clone(),
             self.session_store.clone(),
@@ -746,6 +757,7 @@ impl WasmInstance {
             self.permission_gate.clone(),
             self.memory_limit,
         );
+        state.ws_state = self.ws_state.clone();
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         // Copy the resolved callback contracts into the fresh state so bridge
@@ -977,6 +989,61 @@ impl WasmInstance {
 
         // Dropping the store drops sse_sender, closing the channel and signalling EOF to the stream.
         Ok(())
+    }
+
+    /// Call a WebSocket handler (onConnect / onMessage / onClose).
+    ///
+    /// Creates a fresh WASM instance, sets the request context and auth context,
+    /// then calls the named export synchronously.  The WebSocket client ID and
+    /// the current message payload are provided via `websocket::WS_CLIENT_ID` and
+    /// `websocket::WS_MESSAGE` task-locals that the caller must have set before
+    /// invoking this method (see `websocket::call_wasm_ws_handler`).
+    ///
+    /// Returns `Ok(())` on success.  The handler's return value is ignored
+    /// because WebSocket handlers communicate back to clients via bridge functions
+    /// (`_ws_send`, `_ws_broadcast`, etc.) rather than returning a response body.
+    pub fn call_handler_ws(
+        &self,
+        handler_name: &str,
+        request: RequestContext,
+        auth_context: Option<AuthContext>,
+        _client_id: i64,
+    ) -> RuntimeResult<()> {
+        let (mut store, instance) = self.create_instance()?;
+
+        store.data_mut().set_request(request);
+        if let Some(auth) = auth_context {
+            store.data_mut().auth_context = Some(auth);
+        }
+
+        debug!("Calling WebSocket handler: {}", handler_name);
+
+        // WebSocket handlers may export as () -> i32 or () -> ().
+        // Try both signatures; the return value is discarded.
+        if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
+            let _ = handler.call(&mut store, ()).map_err(|e| {
+                crate::error::RuntimeError::wasm(format!(
+                    "WebSocket handler {} failed: {}",
+                    handler_name, e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        if let Ok(handler) = instance.get_typed_func::<(), ()>(&mut store, handler_name) {
+            handler.call(&mut store, ()).map_err(|e| {
+                crate::error::RuntimeError::wasm(format!(
+                    "WebSocket handler {} failed: {}",
+                    handler_name, e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        Err(crate::error::RuntimeError::wasm(format!(
+            "Could not find or call WebSocket handler '{}'",
+            handler_name
+        )))
     }
 
     /// Get the shared router

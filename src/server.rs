@@ -7,10 +7,11 @@ use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::router::{HttpMethod, SharedRouter};
 use crate::session::{SharedSessionStore, parse_cookies};
 use crate::wasm::{AuthContext, RequestContext, SharedDbBridge, SharedIslandsStore, SharedWasmInstance};
+use crate::websocket::{SharedWsState, WsRouteHandlers, ws_handle_connection};
 use axum::{
     Router,
     body::Body,
-    extract::State,
+    extract::{State, WebSocketUpgrade},
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
@@ -209,6 +210,8 @@ pub struct AppState {
     /// the build manifest declared one. `None` triggers the legacy CWD +
     /// `public/` probe for Phase B compatibility (manifest absent).
     frontend_wasm_path: Option<Arc<PathBuf>>,
+    /// Shared WebSocket state (connections, rooms, route registry).
+    ws_state: SharedWsState,
 }
 
 impl AppState {
@@ -218,6 +221,7 @@ impl AppState {
         islands_store: SharedIslandsStore,
         loader_js: Arc<String>,
         frontend_wasm_path: Option<Arc<PathBuf>>,
+        ws_state: SharedWsState,
     ) -> Self {
         Self {
             wasm,
@@ -225,6 +229,7 @@ impl AppState {
             islands_store,
             loader_js,
             frontend_wasm_path,
+            ws_state,
         }
     }
 }
@@ -509,8 +514,16 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         info!("Manifest-resolved frontend.wasm at {:?}", p.as_ref());
     }
 
+    // Wire the shared WebSocket state from the WASM instance into the server.
+    // The WASM instance uses it during initialization (_http_ws_route calls);
+    // the server uses it to look up handlers when a WS connection arrives.
+    let ws_state = wasm.ws_state.clone();
+
+    // Start the WebSocket heartbeat task (pings every 30s, closes dead after 60s).
+    crate::websocket::start_heartbeat_task(ws_state.clone(), wasm.clone());
+
     // Create app state
-    let state = AppState::new(wasm, router, islands_store, loader_js, frontend_wasm_path);
+    let state = AppState::new(wasm, router, islands_store, loader_js, frontend_wasm_path, ws_state);
 
     // Build Axum router
     let app = build_router(state, &config, static_dirs, &resolved_artifacts);
@@ -755,9 +768,10 @@ async fn serve_manifest_artifact(absolute_path: PathBuf, content_type: String) -
     }
 }
 
-/// Handle all incoming requests
+/// Handle all incoming requests (HTTP, SSE, and WebSocket)
 async fn handle_request(
     State(state): State<AppState>,
+    ws_upgrade: Option<WebSocketUpgrade>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -870,6 +884,58 @@ async fn handle_request(
             .header(header::LOCATION, to_path.as_str())
             .body(Body::empty())
             .expect("redirect response builder");
+    }
+
+    // WebSocket (LIVE) routes: perform the HTTP→WebSocket upgrade and hand off to
+    // the connection handler.
+    if route_handler.is_ws {
+        // Look up the handler names from the WebSocket route registry.
+        let handlers: Option<WsRouteHandlers> = {
+            let ws_read = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(state.ws_state.read())
+            });
+            ws_read.routes.get(&route_handler.path).cloned()
+        };
+
+        let handlers = match handlers {
+            Some(h) => h,
+            None => {
+                error!(
+                    "WebSocket route {} is registered but has no handlers in ws_state",
+                    route_handler.path
+                );
+                return (StatusCode::INTERNAL_SERVER_ERROR, "WebSocket route misconfigured")
+                    .into_response();
+            }
+        };
+
+        let upgrade = match ws_upgrade {
+            Some(u) => u,
+            None => {
+                // The client did not send an Upgrade: websocket header.
+                return Response::builder()
+                    .status(StatusCode::UPGRADE_REQUIRED)
+                    .header("Upgrade", "websocket")
+                    .body(Body::from("This endpoint requires a WebSocket connection."))
+                    .expect("response builder");
+            }
+        };
+
+        let client_id = crate::websocket::next_client_id();
+        let wasm = state.wasm.clone();
+        let ws_state = state.ws_state.clone();
+
+        return upgrade.on_upgrade(move |ws_socket| {
+            ws_handle_connection(
+                ws_socket,
+                client_id,
+                handlers,
+                request_ctx,
+                auth_context,
+                wasm,
+                ws_state,
+            )
+        });
     }
 
     // SSE (STREAM) routes keep the connection open and stream frames as the handler emits them.

@@ -90,6 +90,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_mcp_functions(&mut linker)?;
     register_test_functions(&mut linker)?;
     register_sse_functions(&mut linker)?;
+    register_websocket_functions(&mut linker)?;
     register_browser_stub_functions(&mut linker)?;
     register_email_functions(&mut linker)?;
     crate::bridge_canvas_stubs::register_canvas_stubs(&mut linker)?;
@@ -3834,6 +3835,288 @@ fn register_email_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
     Ok(())
 }
 
+/// Register WebSocket bridge functions for LIVE endpoint handlers.
+///
+/// These 9 functions implement the WebSocket server contract defined in
+/// `foundation/management/cross-component-prompts/websocket-server-runtime-implementation.md`.
+///
+/// ## Parameter conventions
+///
+/// - String parameters use raw `(ptr: i32, len: i32)` pairs — consistent with all
+///   other Layer 3 bridge functions.
+/// - `clientId` is `i32` (the public WASM surface) even though the internal
+///   type is `i64`, because the spec table says `integer` maps to `i32` in this
+///   context (WebSocket client IDs fit well within i32 range).
+/// - Return strings use the length-prefixed format via `write_string_to_caller`.
+fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    use crate::websocket;
+
+    // -----------------------------------------------------------------------
+    // _http_ws_route — register a WebSocket route with its three WASM handlers
+    // Signature: (method_ptr, method_len, path_ptr, path_len,
+    //             onConnect_ptr, onConnect_len,
+    //             onMessage_ptr, onMessage_len,
+    //             onClose_ptr, onClose_len) -> void
+    // The method parameter is always "LIVE" and is accepted for API symmetry.
+    // -----------------------------------------------------------------------
+    linker
+        .func_wrap(
+            "env",
+            "_http_ws_route",
+            |mut caller: Caller<'_, WasmState>,
+             _method_ptr: i32,
+             _method_len: i32,
+             path_ptr: i32,
+             path_len: i32,
+             on_connect_ptr: i32,
+             on_connect_len: i32,
+             on_message_ptr: i32,
+             on_message_len: i32,
+             on_close_ptr: i32,
+             on_close_len: i32| {
+                let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_http_ws_route: Failed to read path");
+                        return;
+                    }
+                };
+                let on_connect = match read_raw_string(&mut caller, on_connect_ptr, on_connect_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_http_ws_route: Failed to read onConnect");
+                        return;
+                    }
+                };
+                let on_message = match read_raw_string(&mut caller, on_message_ptr, on_message_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_http_ws_route: Failed to read onMessage");
+                        return;
+                    }
+                };
+                let on_close = match read_raw_string(&mut caller, on_close_ptr, on_close_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_http_ws_route: Failed to read onClose");
+                        return;
+                    }
+                };
+
+                info!(
+                    "_http_ws_route: path={}, onConnect={}, onMessage={}, onClose={}",
+                    path, on_connect, on_message, on_close
+                );
+
+                // Register the path in the HTTP router so the server's fallback
+                // handler can detect it as a WebSocket route.
+                let router = caller.data().router.clone();
+                if let Err(e) = router.register_ws(path.clone(), on_connect.clone()) {
+                    error!("_http_ws_route: Failed to register WS route {}: {}", path, e);
+                    return;
+                }
+
+                // Register handler names in the shared WebSocket state so the
+                // server can look them up when a connection arrives.
+                let ws_state = caller.data().ws_state.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(websocket::register_ws_route(
+                        &ws_state,
+                        path,
+                        on_connect,
+                        on_message,
+                        on_close,
+                    ))
+                });
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_ws_route: {}", e)))?;
+
+    // -----------------------------------------------------------------------
+    // _ws_send — send a text message to a specific client
+    // Signature: (clientId: i32, msg_ptr: i32, msg_len: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_send",
+        |mut caller: Caller<'_, WasmState>, client_id: i32, msg_ptr: i32, msg_len: i32| {
+            let message = match read_raw_string(&mut caller, msg_ptr, msg_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_send: Failed to read message");
+                    return;
+                }
+            };
+            let ws_state = caller.data().ws_state.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(websocket::ws_send(
+                    &ws_state,
+                    client_id as i64,
+                    message,
+                ))
+            });
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_broadcast — broadcast a message to all clients in a room
+    // Signature: (room_ptr: i32, room_len: i32, msg_ptr: i32, msg_len: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_broadcast",
+        |mut caller: Caller<'_, WasmState>,
+         room_ptr: i32,
+         room_len: i32,
+         msg_ptr: i32,
+         msg_len: i32| {
+            let room = match read_raw_string(&mut caller, room_ptr, room_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_broadcast: Failed to read room");
+                    return;
+                }
+            };
+            let message = match read_raw_string(&mut caller, msg_ptr, msg_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_broadcast: Failed to read message");
+                    return;
+                }
+            };
+            let ws_state = caller.data().ws_state.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(websocket::ws_room_broadcast(&ws_state, &room, message))
+            });
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_close — close a specific client connection (code 1000)
+    // Signature: (clientId: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_close",
+        |caller: Caller<'_, WasmState>, client_id: i32| {
+            let ws_state = caller.data().ws_state.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(websocket::ws_close(&ws_state, client_id as i64))
+            });
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_client_id — get the current WebSocket client ID from task-local context
+    // Signature: () -> i32
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_client_id",
+        |_caller: Caller<'_, WasmState>| -> i32 {
+            websocket::current_client_id() as i32
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_message — get the incoming message payload from task-local context
+    // Signature: () -> i32 (LP string pointer)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_message",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let msg = websocket::current_message();
+            write_string_to_caller(&mut caller, &msg)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_room_join — add a client to a room
+    // Signature: (clientId: i32, room_ptr: i32, room_len: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_room_join",
+        |mut caller: Caller<'_, WasmState>, client_id: i32, room_ptr: i32, room_len: i32| {
+            let room = match read_raw_string(&mut caller, room_ptr, room_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_room_join: Failed to read room name");
+                    return;
+                }
+            };
+            let ws_state = caller.data().ws_state.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(websocket::ws_room_join(&ws_state, client_id as i64, room))
+            });
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_room_leave — remove a client from a room
+    // Signature: (clientId: i32, room_ptr: i32, room_len: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_room_leave",
+        |mut caller: Caller<'_, WasmState>, client_id: i32, room_ptr: i32, room_len: i32| {
+            let room = match read_raw_string(&mut caller, room_ptr, room_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_room_leave: Failed to read room name");
+                    return;
+                }
+            };
+            let ws_state = caller.data().ws_state.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(websocket::ws_room_leave(&ws_state, client_id as i64, &room))
+            });
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _ws_room_broadcast — broadcast to all clients in a room (alias for _ws_broadcast)
+    // Registered separately so both `ws.broadcast` and `ws.roomBroadcast` resolve.
+    // Signature: (room_ptr: i32, room_len: i32, msg_ptr: i32, msg_len: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_ws_room_broadcast",
+        |mut caller: Caller<'_, WasmState>,
+         room_ptr: i32,
+         room_len: i32,
+         msg_ptr: i32,
+         msg_len: i32| {
+            let room = match read_raw_string(&mut caller, room_ptr, room_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_room_broadcast: Failed to read room");
+                    return;
+                }
+            };
+            let message = match read_raw_string(&mut caller, msg_ptr, msg_len) {
+                Some(s) => s,
+                None => {
+                    error!("_ws_room_broadcast: Failed to read message");
+                    return;
+                }
+            };
+            let ws_state = caller.data().ws_state.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(websocket::ws_room_broadcast(&ws_state, &room, message))
+            });
+        }
+    );
+
+    Ok(())
+}
+
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
 ///
 /// The Clean Language compiler (0.30.120+) generates WASM imports in both
@@ -3903,6 +4186,9 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         ("_json_get",            "json.get"),
         // Async aliases are registered by register_bridge_fn! macro in register_async_functions
         // Test bridge aliases are registered by register_bridge_fn! macro in register_test_functions
+        // WebSocket aliases (_ws_*) are registered by register_bridge_fn! macro in
+        // register_websocket_functions — they do not need manual entries here.
+        // _http_ws_route has no dot alias per spec (registration-only function).
     ];
 
     for (canonical, dot_alias) in ALIASES {
