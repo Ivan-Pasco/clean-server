@@ -699,6 +699,19 @@ impl DbBridge {
 		Ok(())
 	}
 
+	/// Return the underlying SQLite pool when the configured driver is SQLite.
+	///
+	/// Returns `None` when no database is configured, or when the driver is
+	/// PostgreSQL or MySQL.  Used by the jobs runtime to write-through job
+	/// records to the same pool without introducing a second connection.
+	pub async fn get_sqlite_pool(&self) -> Option<sqlx::SqlitePool> {
+		let guard = self.driver.read().await;
+		match guard.as_ref()? {
+			DatabaseDriver::Sqlite(pool) => Some(pool.clone()),
+			_ => None,
+		}
+	}
+
 	/// Get the database driver
 	async fn get_driver(&self) -> Result<DatabaseDriver> {
 		let driver_guard = self.driver.read().await;

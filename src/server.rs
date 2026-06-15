@@ -523,7 +523,7 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     crate::websocket::start_heartbeat_task(ws_state.clone(), wasm.clone());
 
     // Start the background job worker loop (polls every second for due jobs).
-    crate::jobs::start_worker_loop(wasm.jobs_state.clone(), wasm.clone());
+    crate::jobs::start_worker_loop(wasm.jobs_state.clone(), wasm.clone(), Some(wasm.db_bridge().clone()));
 
     // Start the cron scheduler monitor (spawns per-schedule tasks as registered).
     crate::jobs::start_cron_scheduler(wasm.jobs_state.clone(), wasm.clone());
