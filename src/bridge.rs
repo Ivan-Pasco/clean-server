@@ -2104,7 +2104,22 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
 
             // SRV003: If the final document contains hydration islands, inject the
             // frame.ui loader.js <script> tag so the client runtime mounts components.
-            let rendered = inject_loader_script(&wrapped);
+            let with_loader = inject_loader_script(&wrapped);
+
+            // SRV004: Inject the full translation bundle as `window.__CLEAN_I18N__`
+            // so the browser-side i18n runtime (frame.ui/runtime/loader.js) can
+            // resolve translation keys without an additional network round-trip.
+            // Reads are done under a blocking lock since this bridge function is
+            // synchronous (not an async wasmtime func_wrap_async).
+            let locale_state = caller.data().locale_state.clone();
+            let i18n_json = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async { locale_state.read().await.bundle_as_json() })
+            });
+            let rendered = match i18n_json {
+                Some(json) => inject_i18n_bundle(&with_loader, &json),
+                None => with_loader,
+            };
 
             caller.data_mut().add_header(
                 "Content-Type".to_string(),
@@ -2581,6 +2596,48 @@ fn inject_loader_script(html: &str) -> String {
         out.push_str(html);
         out.push_str(SCRIPT_TAG);
         out
+    }
+}
+
+/// Inject a `<script id="cl-i18n-bundle">window.__CLEAN_I18N__ = {...};</script>` tag into
+/// `html` so the browser-side i18n runtime (`frame.ui/runtime/loader.js`) has the full
+/// translation bundle available without a separate network request.
+///
+/// Insertion point: immediately after the first `<head>` or `<head ...>` opening tag
+/// (matched case-insensitively with a simple scan rather than a regex, avoiding the
+/// `regex` crate dependency). If no `<head>` tag is present (fragment rendering), the
+/// script tag is appended at the very end of the string.
+///
+/// The `json` argument must already be HTML-safe (produced by `LocaleState::bundle_as_json`).
+fn inject_i18n_bundle(html: &str, json: &str) -> String {
+    let script = format!(
+        r#"<script id="cl-i18n-bundle">window.__CLEAN_I18N__ = {};</script>"#,
+        json
+    );
+
+    // Find `<head` in a case-insensitive manner by scanning the lowercased copy, then
+    // use the original string for the actual slicing so we preserve the original casing.
+    let lower = html.to_ascii_lowercase();
+    let insert_pos: Option<usize> = lower.find("<head").and_then(|head_start| {
+        // Advance past the `>` that closes the opening tag (handles `<head class="...">`).
+        html[head_start..].find('>').map(|rel| head_start + rel + 1)
+    });
+
+    match insert_pos {
+        Some(pos) => {
+            let mut out = String::with_capacity(html.len() + script.len());
+            out.push_str(&html[..pos]);
+            out.push_str(&script);
+            out.push_str(&html[pos..]);
+            out
+        }
+        None => {
+            // Fragment (no <head>): append at the end.
+            let mut out = String::with_capacity(html.len() + script.len());
+            out.push_str(html);
+            out.push_str(&script);
+            out
+        }
     }
 }
 

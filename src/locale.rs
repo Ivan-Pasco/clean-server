@@ -125,6 +125,59 @@ impl LocaleState {
         interpolate(&template, params_json)
     }
 
+    /// Serialize all loaded translation bundles as a compact JSON object suitable
+    /// for SSR injection as `window.__CLEAN_I18N__`.
+    ///
+    /// The shape is `{ "en": { "key": "value", ... }, "fr": { ... } }`,
+    /// matching the flat-key lookup pattern expected by the browser-side loader.
+    ///
+    /// Returns `None` when no translations have been loaded yet (fresh state or
+    /// all-empty maps), so callers can skip injection rather than emit an empty object.
+    ///
+    /// The returned string is HTML-safe: `</` is escaped to `<\/` and the
+    /// Unicode line separator (U+2028) and paragraph separator (U+2029) are
+    /// replaced with their `\uXXXX` JSON escape sequences so the payload is
+    /// safe to embed directly inside a `<script>` element.
+    pub fn bundle_as_json(&self) -> Option<String> {
+        if self.translations.is_empty() {
+            return None;
+        }
+
+        // Build a deterministic JSON value from the flat translation maps.
+        // Using serde_json::Map preserves insertion order; sort keys for
+        // reproducibility and easier inspection in DevTools.
+        let mut outer = serde_json::Map::new();
+        let mut locales: Vec<&String> = self.translations.keys().collect();
+        locales.sort_unstable();
+
+        for locale in locales {
+            let flat = &self.translations[locale];
+            let mut inner = serde_json::Map::new();
+            let mut keys: Vec<&String> = flat.keys().collect();
+            keys.sort_unstable();
+            for k in keys {
+                inner.insert(k.clone(), serde_json::Value::String(flat[k].clone()));
+            }
+            outer.insert(locale.clone(), serde_json::Value::Object(inner));
+        }
+
+        let raw = serde_json::to_string(&serde_json::Value::Object(outer))
+            .expect("serde_json::to_string of a Value::Object cannot fail");
+
+        // HTML-safety escaping for embedding inside a <script> element:
+        //   1. `</`  → `<\/`  prevents a `</script>` from closing the tag early
+        //   2. U+2028 (line separator) and U+2029 (paragraph separator) are
+        //      technically valid in JSON strings but break JS parsers when
+        //      embedded in a <script> block because they are treated as
+        //      line-terminators in ECMAScript.
+        let safe = raw
+            .replace("</", r"<\/")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029");
+
+        Some(safe)
+    }
+
     pub fn translate_count(&self, key: &str, count: i32, locale: &str, params_json: &str) -> String {
         let merged = inject_count(params_json, count);
 
@@ -813,5 +866,98 @@ mod tests {
         assert_eq!(plural_category(11, "ru", "k", &state), "many");
         assert_eq!(plural_category(2, "ru", "k", &state), "few");
         assert_eq!(plural_category(5, "ru", "k", &state), "many");
+    }
+
+    // -----------------------------------------------------------------------
+    // bundle_as_json tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bundle_as_json_empty_returns_none() {
+        let state = LocaleState::new("en");
+        assert!(
+            state.bundle_as_json().is_none(),
+            "fresh LocaleState with no loaded translations must return None"
+        );
+    }
+
+    #[test]
+    fn bundle_as_json_contains_loaded_translations() {
+        let mut state = LocaleState::new("en");
+        state
+            .load_json("en", r#"{"greeting": "Hello", "farewell": "Goodbye"}"#)
+            .unwrap();
+        state
+            .load_json("fr", r#"{"greeting": "Bonjour", "farewell": "Au revoir"}"#)
+            .unwrap();
+
+        let json_str = state
+            .bundle_as_json()
+            .expect("bundle_as_json must return Some when translations are loaded");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("bundle_as_json output must be valid JSON");
+
+        // Both locales present
+        assert!(parsed.get("en").is_some(), "JSON must contain 'en' locale");
+        assert!(parsed.get("fr").is_some(), "JSON must contain 'fr' locale");
+
+        // Key lookup for English
+        assert_eq!(
+            parsed["en"]["greeting"],
+            serde_json::json!("Hello"),
+            "en.greeting must be 'Hello'"
+        );
+        assert_eq!(
+            parsed["en"]["farewell"],
+            serde_json::json!("Goodbye"),
+            "en.farewell must be 'Goodbye'"
+        );
+
+        // Key lookup for French
+        assert_eq!(
+            parsed["fr"]["greeting"],
+            serde_json::json!("Bonjour"),
+            "fr.greeting must be 'Bonjour'"
+        );
+        assert_eq!(
+            parsed["fr"]["farewell"],
+            serde_json::json!("Au revoir"),
+            "fr.farewell must be 'Au revoir'"
+        );
+    }
+
+    #[test]
+    fn bundle_as_json_html_safe() {
+        let mut state = LocaleState::new("en");
+        // Value contains `</script>` (script-injection attempt) and U+2028 (line separator)
+        state
+            .load_json(
+                "en",
+                "{ \"xss\": \"</script><script>alert(1)</script>\", \"ls\": \"\u{2028}\" }",
+            )
+            .unwrap();
+
+        let json_str = state
+            .bundle_as_json()
+            .expect("bundle_as_json must return Some");
+
+        // The raw `</script>` sequence must not appear in the output
+        assert!(
+            !json_str.contains("</script>"),
+            "bundle_as_json must not emit raw </script> — got: {}",
+            json_str
+        );
+
+        // U+2028 must not appear as a raw character
+        assert!(
+            !json_str.contains('\u{2028}'),
+            "bundle_as_json must not emit a raw U+2028 line separator — got: {}",
+            json_str
+        );
+
+        // The output must still be valid JSON after the escaping
+        let _parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .expect("bundle_as_json output must remain valid JSON after HTML-safety escaping");
     }
 }
