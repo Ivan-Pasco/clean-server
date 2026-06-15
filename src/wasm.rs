@@ -266,6 +266,9 @@ pub struct WasmState {
     /// Shared background job queue state (configs, records, cron schedules).
     /// Populated once at server startup and shared across all WASM instances.
     pub jobs_state: crate::jobs::SharedJobsState,
+    /// Shared locale/i18n state (translation maps, default locale).
+    /// Populated once at server startup and shared across all WASM instances.
+    pub locale_state: crate::locale::SharedLocaleState,
 }
 
 /// Request context passed to handlers
@@ -361,6 +364,7 @@ impl WasmState {
             smtp_state: create_shared_smtp_state(),
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
+            locale_state: crate::locale::create_shared_locale_state(),
         }
     }
 
@@ -397,6 +401,7 @@ impl WasmState {
             smtp_state: create_shared_smtp_state(),
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
+            locale_state: crate::locale::create_shared_locale_state(),
         }
     }
 
@@ -443,6 +448,7 @@ impl WasmState {
             smtp_state: create_shared_smtp_state(),
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
+            locale_state: crate::locale::create_shared_locale_state(),
         }
     }
 
@@ -596,6 +602,10 @@ pub struct WasmInstance {
     /// Shared with the server so the worker loop and bridge functions see the
     /// same job registry.
     pub jobs_state: crate::jobs::SharedJobsState,
+    /// Shared locale/i18n state (translation maps, default locale).
+    /// Shared with the server so WASM init (locale: blocks) and request handlers see
+    /// the same translation maps.
+    pub locale_state: crate::locale::SharedLocaleState,
 }
 
 impl WasmInstance {
@@ -742,6 +752,7 @@ impl WasmInstance {
             memory_limit,
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
+            locale_state: crate::locale::create_shared_locale_state(),
         })
     }
 
@@ -770,6 +781,7 @@ impl WasmInstance {
         );
         state.ws_state = self.ws_state.clone();
         state.jobs_state = self.jobs_state.clone();
+        state.locale_state = self.locale_state.clone();
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         // Copy the resolved callback contracts into the fresh state so bridge

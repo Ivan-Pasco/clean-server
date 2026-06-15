@@ -77,6 +77,7 @@ pub mod bridge;
 pub mod bridge_canvas_stubs;
 pub mod bridge_ui_stubs;
 pub mod jobs;
+pub mod locale;
 pub mod websocket;
 pub mod build_manifest;
 pub mod error;

@@ -94,6 +94,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_browser_stub_functions(&mut linker)?;
     register_email_functions(&mut linker)?;
     register_jobs_functions(&mut linker)?;
+    register_locale_functions(&mut linker)?;
     crate::bridge_canvas_stubs::register_canvas_stubs(&mut linker)?;
     crate::bridge_ui_stubs::register_ui_stubs(&mut linker)?;
 
@@ -4484,6 +4485,311 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     Ok(())
 }
 
+/// Register i18n / locale bridge functions (8 functions, frame.locale contract).
+///
+/// All 7 "all-host" functions are registered plus `_i18n_load` (server-only).
+/// `register_bridge_fn!` automatically creates the `i18n.*` dot-notation aliases.
+/// Additional spec-defined aliases (`t`, `tc`, `locale.*`) are added in `register_dot_aliases`.
+///
+/// Translation data is stored in `WasmState.locale_state` (a `SharedLocaleState`).
+/// The active locale for each request is stored in `crate::locale::LOCALE` task-local;
+/// `_i18n_set_locale` writes it and all lookup functions read it.
+fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    use crate::locale;
+
+    // -----------------------------------------------------------------------
+    // _i18n_load — load translation JSON for a locale from a file path
+    // Signature: (locale_ptr, locale_len, path_ptr, path_len) -> void
+    // Server-only: reads the path from disk relative to the working directory.
+    // -----------------------------------------------------------------------
+    linker
+        .func_wrap(
+            "env",
+            "_i18n_load",
+            |mut caller: Caller<'_, WasmState>,
+             locale_ptr: i32, locale_len: i32,
+             path_ptr: i32,   path_len: i32| {
+                let locale_tag = match read_raw_string(&mut caller, locale_ptr, locale_len) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => { error!("_i18n_load: failed to read locale tag"); return; }
+                };
+                let file_path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => { error!("_i18n_load: failed to read file path"); return; }
+                };
+
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let abs_path = cwd.join(&file_path);
+                let json_str = match std::fs::read_to_string(&abs_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("_i18n_load: cannot read '{}': {}", abs_path.display(), e);
+                        return;
+                    }
+                };
+
+                let locale_state = caller.data().locale_state.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut state = locale_state.write().await;
+                        if let Err(e) = state.load_json(&locale_tag, &json_str) {
+                            error!("{}", e);
+                        } else {
+                            info!("_i18n_load: loaded {} translations for locale '{}'",
+                                  state.translations.get(&locale_tag).map_or(0, |m| m.len()),
+                                  locale_tag);
+                        }
+                    })
+                });
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _i18n_load: {}", e)))?;
+    // _i18n_load has no dot alias (internal function per spec).
+
+    // -----------------------------------------------------------------------
+    // _i18n_set_locale — set the active locale for the current request
+    // Signature: (locale_ptr, locale_len) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_set_locale",
+        |mut caller: Caller<'_, WasmState>, locale_ptr: i32, locale_len: i32| {
+            let locale_tag = match read_raw_string(&mut caller, locale_ptr, locale_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    error!("_i18n_set_locale: failed to read locale");
+                    return;
+                }
+            };
+            if !locale::set_current_locale(locale_tag.clone()) {
+                // Called outside a LOCALE task-local scope — fall back to storing
+                // the locale in a request header slot so middleware can retrieve it.
+                warn!("_i18n_set_locale: called outside LOCALE scope; storing in state");
+                // Store as a synthetic pending header so the router middleware can
+                // access it on the next lookup. The store field is used as a scratchpad.
+                caller.data_mut().pending_headers.push(
+                    ("x-cl-locale-requested".to_string(), locale_tag.clone())
+                );
+            }
+            let is_rtl = locale::is_rtl(&locale_tag);
+            if is_rtl {
+                // Server-side RTL: schedule data-locale-dir="rtl" header for the renderer.
+                caller.data_mut().pending_headers.push(
+                    ("x-cl-locale-dir".to_string(), "rtl".to_string())
+                );
+            }
+            debug!("_i18n_set_locale: locale='{}' rtl={}", locale_tag, is_rtl);
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _i18n_locale — get the currently active locale
+    // Signature: () -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_locale",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            // Read from task-local first.
+            let locale_tag = locale::current_locale();
+            if !locale_tag.is_empty() {
+                return write_string_to_caller(&mut caller, &locale_tag);
+            }
+            // Fall back to the configured default locale.
+            let default = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    caller.data().locale_state.read().await.default_locale.clone()
+                })
+            });
+            write_string_to_caller(&mut caller, &default)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _i18n_t — translate a key with optional {placeholder} substitution
+    // Signature: (key_ptr, key_len, params_ptr, params_len) -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_t",
+        |mut caller: Caller<'_, WasmState>,
+         key_ptr: i32, key_len: i32,
+         params_ptr: i32, params_len: i32| -> i32 {
+            let key = match read_raw_string(&mut caller, key_ptr, key_len) {
+                Some(s) => s,
+                None => { error!("_i18n_t: failed to read key"); return write_string_to_caller(&mut caller, ""); }
+            };
+            let params = read_raw_string(&mut caller, params_ptr, params_len)
+                .unwrap_or_else(|| "{}".to_string());
+
+            let active_locale = locale::current_locale();
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let state = caller.data().locale_state.read().await;
+                    let locale = if active_locale.is_empty() {
+                        state.default_locale.clone()
+                    } else {
+                        active_locale.clone()
+                    };
+                    state.translate(&key, &locale, &params)
+                })
+            });
+            write_string_to_caller(&mut caller, &result)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _i18n_t_count — translate a key with plural form selection
+    // Signature: (key_ptr, key_len, count: i32, params_ptr, params_len) -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_t_count",
+        |mut caller: Caller<'_, WasmState>,
+         key_ptr: i32, key_len: i32,
+         count: i32,
+         params_ptr: i32, params_len: i32| -> i32 {
+            let key = match read_raw_string(&mut caller, key_ptr, key_len) {
+                Some(s) => s,
+                None => { error!("_i18n_t_count: failed to read key"); return write_string_to_caller(&mut caller, ""); }
+            };
+            let params = read_raw_string(&mut caller, params_ptr, params_len)
+                .unwrap_or_else(|| "{}".to_string());
+
+            let active_locale = locale::current_locale();
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let state = caller.data().locale_state.read().await;
+                    let locale = if active_locale.is_empty() {
+                        state.default_locale.clone()
+                    } else {
+                        active_locale.clone()
+                    };
+                    state.translate_count(&key, count, &locale, &params)
+                })
+            });
+            write_string_to_caller(&mut caller, &result)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _i18n_format_number — format a number with locale-specific separators
+    // Signature: (value: f64, locale_ptr, locale_len, options_ptr, options_len) -> i32
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_format_number",
+        |mut caller: Caller<'_, WasmState>,
+         value: f64,
+         locale_ptr: i32, locale_len: i32,
+         options_ptr: i32, options_len: i32| -> i32 {
+            let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len)
+                .unwrap_or_default();
+            let options = read_raw_string(&mut caller, options_ptr, options_len)
+                .unwrap_or_else(|| "{}".to_string());
+
+            let effective_locale = if locale_arg.is_empty() {
+                let active = locale::current_locale();
+                if active.is_empty() {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            caller.data().locale_state.read().await.default_locale.clone()
+                        })
+                    })
+                } else {
+                    active
+                }
+            } else {
+                locale_arg
+            };
+
+            let (decimals, use_grouping) = locale::parse_number_options(&options);
+            let result = locale::format_number(value, &effective_locale, decimals, use_grouping);
+            write_string_to_caller(&mut caller, &result)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _i18n_format_currency — format a monetary amount
+    // Signature: (value: f64, currency_ptr, currency_len, locale_ptr, locale_len) -> i32
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_format_currency",
+        |mut caller: Caller<'_, WasmState>,
+         value: f64,
+         currency_ptr: i32, currency_len: i32,
+         locale_ptr: i32, locale_len: i32| -> i32 {
+            let currency = match read_raw_string(&mut caller, currency_ptr, currency_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => { error!("_i18n_format_currency: empty currency code"); return write_string_to_caller(&mut caller, ""); }
+            };
+            let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len)
+                .unwrap_or_default();
+
+            let effective_locale = if locale_arg.is_empty() {
+                let active = locale::current_locale();
+                if active.is_empty() {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            caller.data().locale_state.read().await.default_locale.clone()
+                        })
+                    })
+                } else {
+                    active
+                }
+            } else {
+                locale_arg
+            };
+
+            let result = locale::format_currency(value, &currency, &effective_locale);
+            write_string_to_caller(&mut caller, &result)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _i18n_format_date — format a Unix timestamp as a locale-aware date string
+    // Signature: (timestamp: f64, style_ptr, style_len, locale_ptr, locale_len) -> i32
+    // `timestamp` is Unix seconds (f64). HOST_BRIDGE.md § i18n states seconds;
+    // the spec cross-reference in the task says milliseconds for Intl.DateTimeFormat —
+    // server-side we use seconds (chrono) which is what the spec says for Rust.
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_i18n_format_date",
+        |mut caller: Caller<'_, WasmState>,
+         timestamp: f64,
+         style_ptr: i32, style_len: i32,
+         locale_ptr: i32, locale_len: i32| -> i32 {
+            let style = read_raw_string(&mut caller, style_ptr, style_len)
+                .unwrap_or_else(|| "medium".to_string());
+            let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len)
+                .unwrap_or_default();
+
+            let effective_locale = if locale_arg.is_empty() {
+                let active = locale::current_locale();
+                if active.is_empty() {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            caller.data().locale_state.read().await.default_locale.clone()
+                        })
+                    })
+                } else {
+                    active
+                }
+            } else {
+                locale_arg
+            };
+
+            let result = locale::format_date(timestamp, &style, &effective_locale);
+            write_string_to_caller(&mut caller, &result)
+        }
+    );
+
+    Ok(())
+}
+
+
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
 ///
 /// The Clean Language compiler (0.30.120+) generates WASM imports in both
@@ -4573,6 +4879,20 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         // match the spec (job.retry_after, job.fail, job.succeed, schedule.cancel) —
         // no manual entry needed; register_bridge_fn! handles them.
         // _job_register and _schedule_cron have no dot alias per spec (setup-only).
+        // i18n / locale aliases (register_locale_functions uses register_bridge_fn! for most,
+        // but the spec also defines clean aliases: t(), tc(), locale.current, locale.set,
+        // locale.formatNumber, locale.formatCurrency, locale.formatDate).
+        // The register_bridge_fn! macro already derives: i18n.t, i18n.t_count,
+        // i18n.locale, i18n.set_locale, i18n.format_number, i18n.format_currency,
+        // i18n.format_date, i18n.load.
+        // The entries below add the spec-defined locale.* and bare t/tc aliases.
+        ("_i18n_t",              "t"),
+        ("_i18n_t_count",        "tc"),
+        ("_i18n_locale",         "locale.current"),
+        ("_i18n_set_locale",     "locale.set"),
+        ("_i18n_format_number",  "locale.formatNumber"),
+        ("_i18n_format_currency","locale.formatCurrency"),
+        ("_i18n_format_date",    "locale.formatDate"),
     ];
 
     for (canonical, dot_alias) in ALIASES {
