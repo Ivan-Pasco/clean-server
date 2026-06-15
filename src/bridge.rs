@@ -4220,7 +4220,10 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
 
     // -----------------------------------------------------------------------
     // _job_enqueue_at — schedule a job for a specific future time
-    // Signature: (name_ptr, name_len, argsJson_ptr, argsJson_len, runAtUnixMs: i32) -> i32 (LP string)
+    // Signature: (name_ptr, name_len, argsJson_ptr, argsJson_len, runAtUnixMs: f64) -> i32 (LP string)
+    // plugin.toml declares the 3rd param as "number" which expands to WASM f64.
+    // f64 can represent Unix epoch milliseconds with 53-bit integer precision —
+    // sufficient for any realistic scheduling horizon.
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
@@ -4228,7 +4231,7 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
         |mut caller: Caller<'_, WasmState>,
          name_ptr: i32, name_len: i32,
          args_ptr: i32, args_len: i32,
-         run_at_ms: i32| -> i32 {
+         run_at_ms: f64| -> i32 {
             let name = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) => s,
                 None => { error!("_job_enqueue_at: failed to read name"); return 0; }
@@ -4236,10 +4239,13 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
             let args = read_raw_string(&mut caller, args_ptr, args_len)
                 .unwrap_or_else(|| "{}".to_string());
 
-            // run_at_ms is i32 on the WASM boundary; treat as unsigned milliseconds
-            // since epoch (values within ~24 days fit in i32 ms range from now).
-            // For long-range scheduling use the current time + offset interpretation.
-            let run_at_u64 = run_at_ms as u64;
+            // Cast f64 Unix-epoch milliseconds to u64 for internal storage.
+            // Negative or NaN values are clamped to 0 (enqueue immediately).
+            let run_at_u64 = if run_at_ms.is_nan() || run_at_ms < 0.0 {
+                0u64
+            } else {
+                run_at_ms as u64
+            };
 
             let jobs_state = caller.data().jobs_state.clone();
             let job_id = tokio::task::block_in_place(|| {

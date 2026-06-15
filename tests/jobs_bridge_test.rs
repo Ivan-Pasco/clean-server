@@ -59,8 +59,9 @@ fn job_bridge_functions_are_all_registered() {
     // _job_enqueue(name_ptr, name_len, args_ptr, args_len) -> i32
     probe!("_job_enqueue", "(param i32 i32 i32 i32)", "(result i32)");
 
-    // _job_enqueue_at(name_ptr, name_len, args_ptr, args_len, run_at_ms) -> i32
-    probe!("_job_enqueue_at", "(param i32 i32 i32 i32 i32)", "(result i32)");
+    // _job_enqueue_at(name_ptr, name_len, args_ptr, args_len, run_at_ms: f64) -> i32
+    // plugin.toml declares the timestamp param as "number" (= WASM f64).
+    probe!("_job_enqueue_at", "(param i32 i32 i32 i32 f64)", "(result i32)");
 
     // _job_cancel(id_ptr, id_len) -> i32
     probe!("_job_cancel", "(param i32 i32)", "(result i32)");
@@ -100,7 +101,7 @@ fn job_bridge_functions_are_all_registered() {
     // -----------------------------------------------------------------------
 
     probe!("queue.enqueue",    "(param i32 i32 i32 i32)", "(result i32)");
-    probe!("queue.enqueue_at", "(param i32 i32 i32 i32 i32)", "(result i32)");
+    probe!("queue.enqueue_at", "(param i32 i32 i32 i32 f64)", "(result i32)");
     probe!("queue.cancel",     "(param i32 i32)", "(result i32)");
     probe!("queue.status",     "(param i32 i32)", "(result i32)");
     probe!("queue.result",     "(param i32 i32)", "(result i32)");
@@ -117,7 +118,7 @@ fn job_bridge_functions_are_all_registered() {
     // -----------------------------------------------------------------------
 
     probe!("job.enqueue",         "(param i32 i32 i32 i32)", "(result i32)");
-    probe!("job.enqueue_at",      "(param i32 i32 i32 i32 i32)", "(result i32)");
+    probe!("job.enqueue_at",      "(param i32 i32 i32 i32 f64)", "(result i32)");
     probe!("job.cancel",          "(param i32 i32)", "(result i32)");
     probe!("job.status",          "(param i32 i32)", "(result i32)");
     probe!("job.result",          "(param i32 i32)", "(result i32)");
