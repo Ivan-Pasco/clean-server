@@ -159,6 +159,24 @@ pub fn register_ui_stubs(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     register_bridge_fn!(linker, "_ui_current_path",
         |mut caller: Caller<'_, WasmState>| -> i32 { write_string_to_caller(&mut caller, "") });
 
+    // ── Compiler-owned build_state keystore (no-op at runtime) ──
+    // Registered at compile time by the WasmPluginAdapter; runtime stub exists
+    // only so WASM modules referencing them can instantiate.
+    register_bridge_fn!(linker, "_build_state_get",
+        |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
+    register_bridge_fn!(linker, "_build_state_set",
+        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| { });
+
+    // ── Component / slot stubs (browser-only; SSR cannot dispatch component events) ──
+    register_bridge_fn!(linker, "_ui_register_component",
+        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i64 { 0 });
+    register_bridge_fn!(linker, "_ui_get_component",
+        |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
+    register_bridge_fn!(linker, "_ui_set_slot",
+        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i64 { 0 });
+    register_bridge_fn!(linker, "_ui_get_slot",
+        |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
+
     // ── Storage (localStorage / sessionStorage) ───────────────────────────────
     register_bridge_fn!(linker, "_storage_local_get",
         |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
