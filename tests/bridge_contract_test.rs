@@ -51,6 +51,10 @@ struct FunctionEntry {
     aliases: Vec<String>,
     #[allow(dead_code)]
     description: String,
+    // Empty = unrestricted (backward compat with pre-2026-06 entries).
+    // See registry header "HOST SCOPING" section.
+    #[serde(default)]
+    hosts: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +146,10 @@ fn bridge_covers_registry() {
 
     let mut missing: Vec<String> = Vec::new();
 
-    for func in registry.functions.iter().filter(|f| f.layer == 2 || f.layer == 3) {
+    for func in registry.functions.iter().filter(|f| {
+        (f.layer == 2 || f.layer == 3)
+            && (f.hosts.is_empty() || f.hosts.iter().any(|h| h == "server"))
+    }) {
         // Probe canonical name.
         let wat = single_import_wat(&func.module, &func.name, &func.params, &func.returns);
         if let Ok(module) = Module::new(&engine, &wat) {
