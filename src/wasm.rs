@@ -263,6 +263,9 @@ pub struct WasmState {
     /// Shared WebSocket server state (connections, rooms, route registry).
     /// Populated once at server startup and shared across all WASM instances.
     pub ws_state: crate::websocket::SharedWsState,
+    /// Shared background job queue state (configs, records, cron schedules).
+    /// Populated once at server startup and shared across all WASM instances.
+    pub jobs_state: crate::jobs::SharedJobsState,
 }
 
 /// Request context passed to handlers
@@ -357,6 +360,7 @@ impl WasmState {
             sse_sender: None,
             smtp_state: create_shared_smtp_state(),
             ws_state: crate::websocket::create_shared_ws_state(),
+            jobs_state: crate::jobs::create_shared_jobs_state(),
         }
     }
 
@@ -392,6 +396,7 @@ impl WasmState {
             sse_sender: None,
             smtp_state: create_shared_smtp_state(),
             ws_state: crate::websocket::create_shared_ws_state(),
+            jobs_state: crate::jobs::create_shared_jobs_state(),
         }
     }
 
@@ -437,6 +442,7 @@ impl WasmState {
             sse_sender: None,
             smtp_state: create_shared_smtp_state(),
             ws_state: crate::websocket::create_shared_ws_state(),
+            jobs_state: crate::jobs::create_shared_jobs_state(),
         }
     }
 
@@ -586,6 +592,10 @@ pub struct WasmInstance {
     /// A single instance is shared with the server so bridge functions can
     /// find and update live WebSocket connections.
     pub ws_state: crate::websocket::SharedWsState,
+    /// Shared background job queue state (configs, records, cron schedules).
+    /// Shared with the server so the worker loop and bridge functions see the
+    /// same job registry.
+    pub jobs_state: crate::jobs::SharedJobsState,
 }
 
 impl WasmInstance {
@@ -731,6 +741,7 @@ impl WasmInstance {
             permission_gate,
             memory_limit,
             ws_state: crate::websocket::create_shared_ws_state(),
+            jobs_state: crate::jobs::create_shared_jobs_state(),
         })
     }
 
@@ -758,6 +769,7 @@ impl WasmInstance {
             self.memory_limit,
         );
         state.ws_state = self.ws_state.clone();
+        state.jobs_state = self.jobs_state.clone();
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         // Copy the resolved callback contracts into the fresh state so bridge
@@ -1049,6 +1061,58 @@ impl WasmInstance {
     /// Get the shared router
     pub fn router(&self) -> &SharedRouter {
         &self.router
+    }
+
+    /// Call a job handler function (invoked by the background worker loop).
+    ///
+    /// Creates a fresh WASM instance, sets the request context to a synthetic
+    /// JOB request, and calls the named export.  The handler return value is
+    /// discarded because job handlers communicate outcomes through bridge
+    /// functions (job_succeed, job_fail, job_retry_after) rather than return values.
+    ///
+    /// Returns Ok(()) on normal completion or Err(RuntimeError) on WASM trap
+    /// or missing export.
+    pub fn call_handler_job(
+        &self,
+        handler_name: &str,
+        request: RequestContext,
+        auth_context: Option<AuthContext>,
+    ) -> crate::error::RuntimeResult<()> {
+        let (mut store, instance) = self.create_instance()?;
+
+        store.data_mut().set_request(request);
+        if let Some(auth) = auth_context {
+            store.data_mut().auth_context = Some(auth);
+        }
+
+        tracing::debug!("Calling job handler: {}", handler_name);
+
+        // Job handlers may export as () -> i32 or () -> ().
+        // Try both signatures; the return value is discarded.
+        if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
+            let _ = handler.call(&mut store, ()).map_err(|e| {
+                crate::error::RuntimeError::wasm(format!(
+                    "Job handler {} failed: {}",
+                    handler_name, e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        if let Ok(handler) = instance.get_typed_func::<(), ()>(&mut store, handler_name) {
+            handler.call(&mut store, ()).map_err(|e| {
+                crate::error::RuntimeError::wasm(format!(
+                    "Job handler {} failed: {}",
+                    handler_name, e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        Err(crate::error::RuntimeError::wasm(format!(
+            "Could not find or call job handler '{}'",
+            handler_name
+        )))
     }
 
     /// Get export names (for debugging)

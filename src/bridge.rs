@@ -93,6 +93,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_websocket_functions(&mut linker)?;
     register_browser_stub_functions(&mut linker)?;
     register_email_functions(&mut linker)?;
+    register_jobs_functions(&mut linker)?;
     crate::bridge_canvas_stubs::register_canvas_stubs(&mut linker)?;
     crate::bridge_ui_stubs::register_ui_stubs(&mut linker)?;
 
@@ -4117,6 +4118,366 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
     Ok(())
 }
 
+
+/// Register background job queue bridge functions (14 functions, frame.jobs contract).
+///
+/// ## Dual naming
+///
+/// These functions follow the standard dual-name convention (underscore + dot).
+/// The `register_bridge_fn!` macro registers both forms automatically for
+/// functions whose names follow the `_namespace_fn` pattern.
+///
+/// Functions with no dot alias per spec:
+/// - `_job_register` (setup-only)
+/// - `_schedule_cron` (setup-only)
+///
+/// ## Parameter conventions
+///
+/// - String inputs use raw `(ptr: i32, len: i32)` pairs.
+/// - Return strings use the length-prefixed format via `write_string_to_caller`.
+/// - Integer parameters are `i32` (matching Clean Language `integer` which maps
+///   to `i32` in this context — job IDs, attempt counts, and delay values all
+///   fit within i32 range).
+fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    use crate::jobs;
+
+    // -----------------------------------------------------------------------
+    // _job_register — register a job handler with retry policy (no dot alias)
+    // Signature: (name_ptr, name_len, handler_ptr, handler_len,
+    //             maxAttempts: i32, backoff_ptr, backoff_len,
+    //             delay: i32, timeout: i32, queue_ptr, queue_len) -> void
+    // -----------------------------------------------------------------------
+    linker
+        .func_wrap(
+            "env",
+            "_job_register",
+            |mut caller: Caller<'_, WasmState>,
+             name_ptr: i32, name_len: i32,
+             handler_ptr: i32, handler_len: i32,
+             max_attempts: i32,
+             backoff_ptr: i32, backoff_len: i32,
+             delay: i32,
+             timeout: i32,
+             queue_ptr: i32, queue_len: i32| {
+                let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => { error!("_job_register: failed to read name"); return; }
+                };
+                let handler = match read_raw_string(&mut caller, handler_ptr, handler_len) {
+                    Some(s) => s,
+                    None => { error!("_job_register: failed to read handler"); return; }
+                };
+                let backoff_str = read_raw_string(&mut caller, backoff_ptr, backoff_len)
+                    .unwrap_or_else(|| "fixed".to_string());
+                let queue = read_raw_string(&mut caller, queue_ptr, queue_len)
+                    .unwrap_or_else(|| "default".to_string());
+
+                let backoff = jobs::BackoffStrategy::parse(&backoff_str);
+                let jobs_state = caller.data().jobs_state.clone();
+
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(jobs::register_job(
+                        &jobs_state,
+                        name,
+                        handler,
+                        max_attempts.max(1) as u32,
+                        backoff,
+                        delay.max(0) as u64,
+                        timeout.max(0) as u64,
+                        queue,
+                    ))
+                });
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _job_register: {}", e)))?;
+
+    // -----------------------------------------------------------------------
+    // _job_enqueue — enqueue a job for immediate execution
+    // Signature: (name_ptr, name_len, argsJson_ptr, argsJson_len) -> i32 (LP string job ID)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_enqueue",
+        |mut caller: Caller<'_, WasmState>,
+         name_ptr: i32, name_len: i32,
+         args_ptr: i32, args_len: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => { error!("_job_enqueue: failed to read name"); return 0; }
+            };
+            let args = read_raw_string(&mut caller, args_ptr, args_len)
+                .unwrap_or_else(|| "{}".to_string());
+
+            let jobs_state = caller.data().jobs_state.clone();
+            let job_id = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jobs::enqueue_job(&jobs_state, name, args))
+            });
+
+            write_string_to_caller(&mut caller, &job_id)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_enqueue_at — schedule a job for a specific future time
+    // Signature: (name_ptr, name_len, argsJson_ptr, argsJson_len, runAtUnixMs: i32) -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_enqueue_at",
+        |mut caller: Caller<'_, WasmState>,
+         name_ptr: i32, name_len: i32,
+         args_ptr: i32, args_len: i32,
+         run_at_ms: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => { error!("_job_enqueue_at: failed to read name"); return 0; }
+            };
+            let args = read_raw_string(&mut caller, args_ptr, args_len)
+                .unwrap_or_else(|| "{}".to_string());
+
+            // run_at_ms is i32 on the WASM boundary; treat as unsigned milliseconds
+            // since epoch (values within ~24 days fit in i32 ms range from now).
+            // For long-range scheduling use the current time + offset interpretation.
+            let run_at_u64 = run_at_ms as u64;
+
+            let jobs_state = caller.data().jobs_state.clone();
+            let job_id = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(jobs::enqueue_job_at(
+                    &jobs_state,
+                    name,
+                    args,
+                    run_at_u64,
+                ))
+            });
+
+            write_string_to_caller(&mut caller, &job_id)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_cancel — cancel a pending job
+    // Signature: (id_ptr, id_len) -> i32  (0 = ok / cancelled, -1 = not found / not pending)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_cancel",
+        |mut caller: Caller<'_, WasmState>,
+         id_ptr: i32, id_len: i32| -> i32 {
+            let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+                Some(s) => s,
+                None => { error!("_job_cancel: failed to read job id"); return -1; }
+            };
+
+            let jobs_state = caller.data().jobs_state.clone();
+            let cancelled = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jobs::cancel_job(&jobs_state, &job_id))
+            });
+
+            if cancelled { 0 } else { -1 }
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_status — get the current status string for a job ID
+    // Signature: (id_ptr, id_len) -> i32 (LP string: "pending"|"running"|
+    //            "succeeded"|"failed"|"cancelled")
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_status",
+        |mut caller: Caller<'_, WasmState>,
+         id_ptr: i32, id_len: i32| -> i32 {
+            let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+                Some(s) => s,
+                None => { error!("_job_status: failed to read job id"); return 0; }
+            };
+
+            let jobs_state = caller.data().jobs_state.clone();
+            let status = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jobs::job_status(&jobs_state, &job_id))
+            });
+
+            write_string_to_caller(&mut caller, &status)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_result — get the result or error string for a job
+    // Signature: (id_ptr, id_len) -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_result",
+        |mut caller: Caller<'_, WasmState>,
+         id_ptr: i32, id_len: i32| -> i32 {
+            let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+                Some(s) => s,
+                None => { error!("_job_result: failed to read job id"); return 0; }
+            };
+
+            let jobs_state = caller.data().jobs_state.clone();
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jobs::job_result(&jobs_state, &job_id))
+            });
+
+            write_string_to_caller(&mut caller, &result)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_current_id — get the job ID of the currently executing job
+    // Signature: () -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_current_id",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let id = jobs::current_job_id();
+            write_string_to_caller(&mut caller, &id)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_current_args — get the args JSON of the currently executing job
+    // Signature: () -> i32 (LP string)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_current_args",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let args = jobs::current_job_args();
+            write_string_to_caller(&mut caller, &args)
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_current_attempt — get the 1-based attempt number of the current job
+    // Signature: () -> i32
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_current_attempt",
+        |_caller: Caller<'_, WasmState>| -> i32 {
+            jobs::current_job_attempt()
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_retry_after — request retry after a custom delay (overrides backoff)
+    // Signature: (delayMs: i32) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_retry_after",
+        |_caller: Caller<'_, WasmState>, delay_ms: i32| {
+            jobs::request_retry_after_ms(delay_ms as i64);
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_fail — explicitly fail this job (no more retries)
+    // Signature: (reason_ptr, reason_len) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_fail",
+        |mut caller: Caller<'_, WasmState>,
+         reason_ptr: i32, reason_len: i32| {
+            let reason = read_raw_string(&mut caller, reason_ptr, reason_len)
+                .unwrap_or_else(|| "unknown".to_string());
+            jobs::mark_explicit_fail(reason);
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _job_succeed — explicitly mark the job as succeeded with a result
+    // Signature: (result_ptr, result_len) -> void
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_job_succeed",
+        |mut caller: Caller<'_, WasmState>,
+         result_ptr: i32, result_len: i32| {
+            let result = read_raw_string(&mut caller, result_ptr, result_len)
+                .unwrap_or_default();
+            jobs::mark_explicit_succeed(result);
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // _schedule_cron — register a cron-scheduled handler (no dot alias)
+    // Signature: (name_ptr, name_len, cron_ptr, cron_len, handler_ptr, handler_len) -> i32
+    // Returns 1 on success, 0 if the cron expression is invalid.
+    // -----------------------------------------------------------------------
+    linker
+        .func_wrap(
+            "env",
+            "_schedule_cron",
+            |mut caller: Caller<'_, WasmState>,
+             name_ptr: i32, name_len: i32,
+             cron_ptr: i32, cron_len: i32,
+             handler_ptr: i32, handler_len: i32| -> i32 {
+                let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                    Some(s) => s,
+                    None => { error!("_schedule_cron: failed to read name"); return 0; }
+                };
+                let cron_expr = match read_raw_string(&mut caller, cron_ptr, cron_len) {
+                    Some(s) => s,
+                    None => { error!("_schedule_cron: failed to read cron expr"); return 0; }
+                };
+                let handler = match read_raw_string(&mut caller, handler_ptr, handler_len) {
+                    Some(s) => s,
+                    None => { error!("_schedule_cron: failed to read handler"); return 0; }
+                };
+
+                debug!("_schedule_cron: name={}, expr={}, handler={}", name, cron_expr, handler);
+
+                let jobs_state = caller.data().jobs_state.clone();
+                let ok = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(jobs::schedule_cron(
+                        &jobs_state,
+                        name,
+                        cron_expr,
+                        handler,
+                    ))
+                });
+
+                if ok { 1 } else { 0 }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _schedule_cron: {}", e)))?;
+
+    // -----------------------------------------------------------------------
+    // _schedule_cancel — cancel a named cron schedule
+    // Signature: (name_ptr, name_len) -> i32  (1 = cancelled, 0 = not found / already inactive)
+    // -----------------------------------------------------------------------
+    register_bridge_fn!(
+        linker,
+        "_schedule_cancel",
+        |mut caller: Caller<'_, WasmState>,
+         name_ptr: i32, name_len: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => { error!("_schedule_cancel: failed to read name"); return 0; }
+            };
+
+            let jobs_state = caller.data().jobs_state.clone();
+            let cancelled = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jobs::schedule_cancel(&jobs_state, &name))
+            });
+
+            if cancelled { 1 } else { 0 }
+        }
+    );
+
+    Ok(())
+}
+
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
 ///
 /// The Clean Language compiler (0.30.120+) generates WASM imports in both
@@ -4189,6 +4550,23 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         // WebSocket aliases (_ws_*) are registered by register_bridge_fn! macro in
         // register_websocket_functions — they do not need manual entries here.
         // _http_ws_route has no dot alias per spec (registration-only function).
+        // Jobs — spec-defined aliases that differ from the auto-derived job.* forms.
+        // register_bridge_fn! already creates: job.enqueue, job.enqueue_at, job.cancel,
+        // job.status, job.result, job.current_id, job.current_args, job.current_attempt,
+        // job.retry_after, job.fail, job.succeed, schedule.cancel.
+        // The entries below add the additional spec aliases with different namespaces.
+        ("_job_enqueue",          "queue.enqueue"),
+        ("_job_enqueue_at",       "queue.enqueue_at"),
+        ("_job_cancel",           "queue.cancel"),
+        ("_job_status",           "queue.status"),
+        ("_job_result",           "queue.result"),
+        ("_job_current_id",       "job.id"),
+        ("_job_current_args",     "job.args"),
+        ("_job_current_attempt",  "job.attempt"),
+        // _job_retry_after, _job_fail, _job_succeed, _schedule_cancel auto-aliases
+        // match the spec (job.retry_after, job.fail, job.succeed, schedule.cancel) —
+        // no manual entry needed; register_bridge_fn! handles them.
+        // _job_register and _schedule_cron have no dot alias per spec (setup-only).
     ];
 
     for (canonical, dot_alias) in ALIASES {

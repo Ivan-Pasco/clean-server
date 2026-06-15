@@ -76,6 +76,7 @@
 pub mod bridge;
 pub mod bridge_canvas_stubs;
 pub mod bridge_ui_stubs;
+pub mod jobs;
 pub mod websocket;
 pub mod build_manifest;
 pub mod error;
@@ -95,6 +96,7 @@ pub use session::{
     SessionConfig, SessionData, SessionStore, SharedSessionStore, create_session_store,
     parse_cookies,
 };
+pub use jobs::{SharedJobsState, create_shared_jobs_state};
 pub use wasm::{
     AuthContext, RequestContext, SharedDbBridge, SharedWasmInstance, WasmInstance, WasmState,
     create_shared_instance_with_db,
