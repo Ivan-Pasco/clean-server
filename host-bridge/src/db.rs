@@ -723,7 +723,15 @@ impl DbBridge {
 			"query_in_tx" => self.query_in_tx(params).await,
 			"execute_in_tx" => self.execute_in_tx(params).await,
 			"config" => self.config_call(params).await,
+			"configure" => self.config_call(params).await,
 			"register_migration" => self.register_migration(params).await,
+			"paginate" => self.paginate(params).await,
+			"cursor_page" => self.cursor_page(params).await,
+			"migration_diff" => self.migration_diff(params).await,
+			"migration_status" => self.migration_status().await,
+			"rollback_migration" => self.rollback_migration(params).await,
+			"run_migrations" => self.run_migrations_call(params).await,
+			"valid_field" => self.valid_field(params).await,
 			_ => {
 				Ok(json!({
 					"ok": false,
@@ -1399,6 +1407,532 @@ impl DbBridge {
 		}
 	}
 
+
+	// ============================================================================
+	// NEW BRIDGE METHODS — frame.data plugin bridge functions
+	// ============================================================================
+
+	/// Configure the connection pool from a JSON config string.
+	///
+	/// The JSON must contain at minimum a `database_url` field.  Optional fields:
+	/// `max_connections`, `min_connections`, `connection_timeout`, `query_timeout`.
+	///
+	/// Returns `{"ok": true, "data": null}` on success.
+	/// The WASM bridge function (`_db_configure`) converts this to `0` / `-1`.
+	pub async fn configure_from_json(&mut self, config_json: &str) -> Result<Value> {
+		let config: DbConfig = match serde_json::from_str(config_json) {
+			Ok(cfg) => cfg,
+			Err(e) => {
+				return Ok(json!({
+					"ok": false,
+					"err": {
+						"code": "VALIDATION_ERROR",
+						"message": format!("Invalid JSON config: {}", e),
+						"details": {}
+					}
+				}));
+			}
+		};
+
+		self.config_call(serde_json::to_value(config)?).await
+	}
+
+	/// Offset-based paginated query.
+	///
+	/// Expected `params` keys:
+	/// - `table` (string, required) — table name
+	/// - `where` (object, optional) — field => value equality filters
+	/// - `page` (integer, default 1, 1-based)
+	/// - `per_page` (integer, default 20)
+	///
+	/// Returns PagedResult JSON envelope.
+	async fn paginate(&self, params: Value) -> Result<Value> {
+		let table = match params.get("table").and_then(|v| v.as_str()) {
+			Some(t) => t.to_string(),
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "VALIDATION_ERROR", "message": "paginate requires table", "details": {} }
+				}));
+			}
+		};
+		let where_json = params.get("where").cloned().unwrap_or(json!({}));
+		let page = params.get("page").and_then(|v| v.as_i64()).unwrap_or(1).max(1);
+		let per_page = params.get("per_page").and_then(|v| v.as_i64()).unwrap_or(20).max(1);
+
+		if !is_safe_identifier(&table) {
+			return Ok(json!({
+				"ok": false,
+				"err": { "code": "VALIDATION_ERROR", "message": "Invalid table name", "details": {} }
+			}));
+		}
+
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(e) => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "CONNECTION_ERROR", "message": format!("{}", e), "details": {} }
+				}));
+			}
+		};
+
+		let timeout = {
+			let cfg = self.config.read().await;
+			cfg.as_ref().map(|c| c.query_timeout).unwrap_or(30000)
+		};
+
+		let (where_clause, bind_params) = build_where_clause(&where_json);
+
+		let count_sql = if where_clause.is_empty() {
+			format!("SELECT COUNT(*) AS __total FROM {}", table)
+		} else {
+			format!("SELECT COUNT(*) AS __total FROM {} WHERE {}", table, where_clause)
+		};
+
+		let count_result = tokio::time::timeout(
+			Duration::from_millis(timeout),
+			driver.query(&count_sql, &bind_params),
+		)
+		.await;
+
+		let total: i64 = match count_result {
+			Ok(Ok(ref rows)) => rows
+				.first()
+				.and_then(|r| r.get("__total"))
+				.and_then(|v| v.as_i64())
+				.unwrap_or(0),
+			Ok(Err(e)) => {
+				let (code, msg) = self.categorize_error(&e.to_string());
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": code, "message": msg, "details": {} }
+				}));
+			}
+			Err(_) => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "TIMEOUT", "message": "Count query timed out", "details": {} }
+				}));
+			}
+		};
+
+		let offset = (page - 1) * per_page;
+		let total_pages = if per_page > 0 { (total + per_page - 1) / per_page } else { 0 };
+
+		let data_sql = if where_clause.is_empty() {
+			format!("SELECT * FROM {} LIMIT {} OFFSET {}", table, per_page, offset)
+		} else {
+			format!(
+				"SELECT * FROM {} WHERE {} LIMIT {} OFFSET {}",
+				table, where_clause, per_page, offset
+			)
+		};
+
+		let data_result = tokio::time::timeout(
+			Duration::from_millis(timeout),
+			driver.query(&data_sql, &bind_params),
+		)
+		.await;
+
+		match data_result {
+			Ok(Ok(rows)) => Ok(json!({
+				"ok": true,
+				"data": {
+					"data": rows,
+					"total": total,
+					"page": page,
+					"per_page": per_page,
+					"total_pages": total_pages
+				}
+			})),
+			Ok(Err(e)) => {
+				let (code, msg) = self.categorize_error(&e.to_string());
+				Ok(json!({
+					"ok": false,
+					"err": { "code": code, "message": msg, "details": {} }
+				}))
+			}
+			Err(_) => Ok(json!({
+				"ok": false,
+				"err": { "code": "TIMEOUT", "message": "Page query timed out", "details": {} }
+			})),
+		}
+	}
+
+	/// Cursor-based paginated query.
+	///
+	/// Expected `params` keys:
+	/// - `table` (string, required)
+	/// - `where` (object, optional)
+	/// - `per_page` (integer, default 20)
+	/// - `after` (string, optional) — opaque cursor (last seen `by_field` value)
+	/// - `by_field` (string, default "id")
+	///
+	/// Returns CursorResult JSON envelope.
+	async fn cursor_page(&self, params: Value) -> Result<Value> {
+		let table = match params.get("table").and_then(|v| v.as_str()) {
+			Some(t) => t.to_string(),
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "VALIDATION_ERROR", "message": "cursor_page requires table", "details": {} }
+				}));
+			}
+		};
+		let where_json = params.get("where").cloned().unwrap_or(json!({}));
+		let per_page = params.get("per_page").and_then(|v| v.as_i64()).unwrap_or(20).max(1);
+		let after = params.get("after").and_then(|v| v.as_str()).unwrap_or("").to_string();
+		let by_field = params.get("by_field").and_then(|v| v.as_str()).unwrap_or("id").to_string();
+
+		if !is_safe_identifier(&table) {
+			return Ok(json!({
+				"ok": false,
+				"err": { "code": "VALIDATION_ERROR", "message": "Invalid table name", "details": {} }
+			}));
+		}
+		if !is_safe_identifier(&by_field) {
+			return Ok(json!({
+				"ok": false,
+				"err": { "code": "VALIDATION_ERROR", "message": "Invalid cursor field name", "details": {} }
+			}));
+		}
+
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(e) => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "CONNECTION_ERROR", "message": format!("{}", e), "details": {} }
+				}));
+			}
+		};
+
+		let timeout = {
+			let cfg = self.config.read().await;
+			cfg.as_ref().map(|c| c.query_timeout).unwrap_or(30000)
+		};
+
+		let (where_clause, mut bind_params) = build_where_clause(&where_json);
+
+		let full_where = if after.is_empty() {
+			where_clause.clone()
+		} else {
+			bind_params.push(Value::String(after.clone()));
+			let cursor_cond = format!("{} > ?", by_field);
+			if where_clause.is_empty() {
+				cursor_cond
+			} else {
+				format!("{} AND {}", where_clause, cursor_cond)
+			}
+		};
+
+		let sql = if full_where.is_empty() {
+			format!("SELECT * FROM {} ORDER BY {} ASC LIMIT {}", table, by_field, per_page + 1)
+		} else {
+			format!(
+				"SELECT * FROM {} WHERE {} ORDER BY {} ASC LIMIT {}",
+				table, full_where, by_field, per_page + 1
+			)
+		};
+
+		let result = tokio::time::timeout(
+			Duration::from_millis(timeout),
+			driver.query(&sql, &bind_params),
+		)
+		.await;
+
+		match result {
+			Ok(Ok(mut rows)) => {
+				let has_more = rows.len() as i64 > per_page;
+				if has_more {
+					rows.truncate(per_page as usize);
+				}
+				let next_cursor: Value = if has_more {
+					rows.last()
+						.and_then(|r| r.get(&by_field))
+						.cloned()
+						.unwrap_or(Value::Null)
+				} else {
+					Value::Null
+				};
+				Ok(json!({
+					"ok": true,
+					"data": {
+						"data": rows,
+						"next_cursor": next_cursor,
+						"has_more": has_more
+					}
+				}))
+			}
+			Ok(Err(e)) => {
+				let (code, msg) = self.categorize_error(&e.to_string());
+				Ok(json!({
+					"ok": false,
+					"err": { "code": code, "message": msg, "details": {} }
+				}))
+			}
+			Err(_) => Ok(json!({
+				"ok": false,
+				"err": { "code": "TIMEOUT", "message": "Cursor page query timed out", "details": {} }
+			})),
+		}
+	}
+
+	/// Compare declared model fields against the live database schema and return
+	/// the ALTER TABLE SQL needed to reconcile the difference.
+	///
+	/// Expected `params` keys:
+	/// - `table` (string, optional) — when present, the live schema is introspected from the DB
+	/// - `declared` (object) — {`column`: "SQL-type-fragment", ...}
+	/// - `live` (object, optional) — only used when `table` is absent
+	///
+	/// Returns `{"ok": true, "data": {"sql": "ALTER TABLE..."}`; `sql` is empty when in sync.
+	async fn migration_diff(&self, params: Value) -> Result<Value> {
+		let table_opt = params.get("table").and_then(|v| v.as_str()).map(|s| s.to_string());
+		let declared = params.get("declared").cloned().unwrap_or(json!({}));
+
+		let live_json = if let Some(ref table) = table_opt {
+			if !is_safe_identifier(table) {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "VALIDATION_ERROR", "message": "Invalid table name", "details": {} }
+				}));
+			}
+			match self.get_driver().await {
+				Ok(driver) => {
+					let cols = introspect_table_columns(&driver, table).await;
+					columns_to_json(&cols)
+				}
+				Err(_) => json!({})
+			}
+		} else {
+			params.get("live").cloned().unwrap_or(json!({}))
+		};
+
+		let sql = compute_migration_diff(table_opt.as_deref(), &declared, &live_json);
+		Ok(json!({ "ok": true, "data": { "sql": sql } }))
+	}
+
+	/// Return the current status of all registered migrations.
+	///
+	/// Returns `{"ok": true, "data": {"migrations": [{"name": "...", "applied_at": "..."|null}, ...]}}`.
+	async fn migration_status(&self) -> Result<Value> {
+		let pending = {
+			let guard = self.pending_migrations.read().await;
+			guard.clone()
+		};
+
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(_) => {
+				let rows: Vec<Value> = pending
+					.iter()
+					.map(|m| json!({ "name": m.name, "applied_at": Value::Null }))
+					.collect();
+				return Ok(json!({ "ok": true, "data": { "migrations": rows } }));
+			}
+		};
+
+		let _ = driver
+			.execute(
+				"CREATE TABLE IF NOT EXISTS _clean_migrations 				 (name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(64) NOT NULL)",
+				&[],
+			)
+			.await;
+
+		let applied_rows = driver
+			.query("SELECT name, applied_at FROM _clean_migrations ORDER BY name ASC", &[])
+			.await
+			.unwrap_or_default();
+
+		let mut applied_map: HashMap<String, String> = HashMap::new();
+		for row in &applied_rows {
+			if let (Some(name), Some(at)) = (
+				row.get("name").and_then(|v| v.as_str()),
+				row.get("applied_at").and_then(|v| v.as_str()),
+			) {
+				applied_map.insert(name.to_string(), at.to_string());
+			}
+		}
+
+		let rows: Vec<Value> = pending
+			.iter()
+			.map(|m| {
+				let applied_at = applied_map
+					.get(&m.name)
+					.map(|s| Value::String(s.clone()))
+					.unwrap_or(Value::Null);
+				json!({ "name": m.name, "applied_at": applied_at })
+			})
+			.collect();
+
+		Ok(json!({ "ok": true, "data": { "migrations": rows } }))
+	}
+
+	/// Rollback a specific named migration by executing its `down_sql`.
+	///
+	/// Returns `{"ok": true, "data": null}` on success or `{"ok": false, "err": {...}}`.
+	/// The WASM bridge converts this to `0` / `-1`.
+	async fn rollback_migration(&self, params: Value) -> Result<Value> {
+		let name = match params.get("name").and_then(|v| v.as_str()) {
+			Some(n) => n.to_string(),
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "VALIDATION_ERROR", "message": "rollback_migration requires name", "details": {} }
+				}));
+			}
+		};
+
+		let entry = {
+			let guard = self.pending_migrations.read().await;
+			guard.iter().find(|m| m.name == name).cloned()
+		};
+
+		let entry = match entry {
+			Some(e) => e,
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": {
+						"code": "NOT_FOUND",
+						"message": format!("Migration {} is not registered", name),
+						"details": {}
+					}
+				}));
+			}
+		};
+
+		if entry.down_sql.is_empty() {
+			return Ok(json!({
+				"ok": false,
+				"err": {
+					"code": "VALIDATION_ERROR",
+					"message": format!("Migration {} has no down_sql defined", name),
+					"details": {}
+				}
+			}));
+		}
+
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(e) => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "CONNECTION_ERROR", "message": format!("{}", e), "details": {} }
+				}));
+			}
+		};
+
+		if let Err(e) = driver.execute(&entry.down_sql, &[]).await {
+			let (code, msg) = self.categorize_error(&e.to_string());
+			return Ok(json!({
+				"ok": false,
+				"err": { "code": code, "message": msg, "details": {} }
+			}));
+		}
+
+		let _ = driver
+			.execute(
+				"DELETE FROM _clean_migrations WHERE name = ?",
+				&[Value::String(name)],
+			)
+			.await;
+
+		Ok(json!({ "ok": true, "data": null }))
+	}
+
+	/// Apply all pending registered migrations and return the count newly applied.
+	///
+	/// Returns `{"ok": true, "data": {"applied": N}}`.
+	async fn run_migrations_call(&self, _params: Value) -> Result<Value> {
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(e) => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "CONNECTION_ERROR", "message": format!("{}", e), "details": {} }
+				}));
+			}
+		};
+
+		let _ = driver
+			.execute(
+				"CREATE TABLE IF NOT EXISTS _clean_migrations 				 (name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(64) NOT NULL)",
+				&[],
+			)
+			.await;
+
+		let count_before = driver
+			.query("SELECT COUNT(*) AS cnt FROM _clean_migrations", &[])
+			.await
+			.ok()
+			.and_then(|rows| rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()))
+			.unwrap_or(0);
+
+		match self.run_pending_migrations().await {
+			Ok(()) => {
+				let count_after = driver
+					.query("SELECT COUNT(*) AS cnt FROM _clean_migrations", &[])
+					.await
+					.ok()
+					.and_then(|rows| rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()))
+					.unwrap_or(count_before);
+
+				Ok(json!({
+					"ok": true,
+					"data": { "applied": (count_after - count_before).max(0) }
+				}))
+			}
+			Err(e) => {
+				let (code, msg) = self.categorize_error(&e.to_string());
+				Ok(json!({
+					"ok": false,
+					"err": { "code": code, "message": msg, "details": {} }
+				}))
+			}
+		}
+	}
+
+	/// Runtime ORDER BY safety check: returns true when `candidate` is a real
+	/// column name in `table`.
+	///
+	/// Returns `{"ok": true, "data": {"valid": bool}}`.
+	async fn valid_field(&self, params: Value) -> Result<Value> {
+		let table = match params.get("table").and_then(|v| v.as_str()) {
+			Some(t) => t.to_string(),
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "VALIDATION_ERROR", "message": "valid_field requires table", "details": {} }
+				}));
+			}
+		};
+		let candidate = match params.get("field").and_then(|v| v.as_str()) {
+			Some(f) => f.to_string(),
+			None => {
+				return Ok(json!({
+					"ok": false,
+					"err": { "code": "VALIDATION_ERROR", "message": "valid_field requires field", "details": {} }
+				}));
+			}
+		};
+
+		if !is_safe_identifier(&table) || !is_safe_identifier(&candidate) {
+			return Ok(json!({ "ok": true, "data": { "valid": false } }));
+		}
+
+		let driver = match self.get_driver().await {
+			Ok(d) => d,
+			Err(_) => return Ok(json!({ "ok": true, "data": { "valid": false } })),
+		};
+
+		let columns = introspect_table_columns(&driver, &table).await;
+		let valid = columns.iter().any(|c| c.eq_ignore_ascii_case(&candidate));
+		Ok(json!({ "ok": true, "data": { "valid": valid } }))
+	}
+
 	/// Categorize database error and return appropriate code and message
 	fn categorize_error(&self, error: &str) -> (&'static str, String) {
 		let error_lower = error.to_lowercase();
@@ -1448,6 +1982,144 @@ impl Default for DbBridge {
 	fn default() -> Self {
 		Self::new()
 	}
+}
+
+
+// ============================================================================
+// HELPER FUNCTIONS — used by the new frame.data bridge methods
+// ============================================================================
+
+/// Returns true when `s` contains only ASCII alphanumeric characters and underscores.
+/// Used to validate table/column names before interpolating them into SQL.
+fn is_safe_identifier(s: &str) -> bool {
+	!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Build a parameterised WHERE clause from a JSON object of equality filters.
+///
+/// The returned tuple contains:
+/// - A SQL fragment such as `col1 = ? AND col2 = ?` (empty string when `filters` is empty)
+/// - A `Vec<Value>` of the corresponding bind parameters
+///
+/// Only object-level keys that pass `is_safe_identifier` are included; others are silently
+/// skipped to prevent SQL injection through attacker-controlled key names.
+fn build_where_clause(filters: &Value) -> (String, Vec<Value>) {
+	let obj = match filters.as_object() {
+		Some(o) => o,
+		None => return (String::new(), Vec::new()),
+	};
+
+	let mut clauses: Vec<String> = Vec::new();
+	let mut params: Vec<Value> = Vec::new();
+
+	for (key, val) in obj {
+		if !is_safe_identifier(key) {
+			continue;
+		}
+		clauses.push(format!("{} = ?", key));
+		params.push(val.clone());
+	}
+
+	(clauses.join(" AND "), params)
+}
+
+/// Introspect the column names of an existing table using database-specific
+/// INFORMATION_SCHEMA or PRAGMA queries.
+///
+/// Returns an empty vector when the table does not exist or introspection fails.
+async fn introspect_table_columns(driver: &DatabaseDriver, table: &str) -> Vec<String> {
+	match driver {
+		DatabaseDriver::Sqlite(_) => {
+			let sql = format!("PRAGMA table_info({})", table);
+			match driver.query(&sql, &[]).await {
+				Ok(rows) => rows
+					.iter()
+					.filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+					.collect(),
+				Err(_) => Vec::new(),
+			}
+		}
+		DatabaseDriver::Postgres(_) => {
+			let sql = "SELECT column_name FROM information_schema.columns 				WHERE table_name =  AND table_schema = current_schema() ORDER BY ordinal_position";
+			match driver.query(sql, &[Value::String(table.to_string())]).await {
+				Ok(rows) => rows
+					.iter()
+					.filter_map(|r| {
+						r.get("column_name").and_then(|v| v.as_str()).map(|s| s.to_string())
+					})
+					.collect(),
+				Err(_) => Vec::new(),
+			}
+		}
+		DatabaseDriver::MySql(_) => {
+			let sql = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 				WHERE TABLE_NAME = ? AND TABLE_SCHEMA = DATABASE() ORDER BY ORDINAL_POSITION";
+			match driver.query(sql, &[Value::String(table.to_string())]).await {
+				Ok(rows) => rows
+					.iter()
+					.filter_map(|r| {
+						r.get("COLUMN_NAME").and_then(|v| v.as_str()).map(|s| s.to_string())
+					})
+					.collect(),
+				Err(_) => Vec::new(),
+			}
+		}
+	}
+}
+
+/// Convert a list of column names into a JSON object mapping each name to an empty type string.
+/// Used as the "live" schema representation for `compute_migration_diff`.
+fn columns_to_json(columns: &[String]) -> Value {
+	let mut map = serde_json::Map::new();
+	for col in columns {
+		map.insert(col.clone(), Value::String(String::new()));
+	}
+	Value::Object(map)
+}
+
+/// Compute the ALTER TABLE SQL needed to bring a live table in sync with a declared schema.
+///
+/// - `table` — table name to use in the ALTER TABLE statement (None → generic output)
+/// - `declared` — JSON object: { column_name: "type-string", ... }
+/// - `live` — JSON object with the same shape representing the current live columns
+///
+/// Returns an empty string when declared and live match exactly (same column names, case-insensitive).
+/// Currently only generates ADD COLUMN statements for columns present in `declared` but absent
+/// from `live`.  DROP COLUMN statements are not generated because removing columns is
+/// destructive and should require explicit developer action.
+fn compute_migration_diff(table: Option<&str>, declared: &Value, live: &Value) -> String {
+	let decl_obj = match declared.as_object() {
+		Some(o) => o,
+		None => return String::new(),
+	};
+	let live_obj = match live.as_object() {
+		Some(o) => o,
+		None => return String::new(),
+	};
+
+	let live_keys: std::collections::HashSet<String> = live_obj
+		.keys()
+		.map(|k| k.to_lowercase())
+		.collect();
+
+	let mut add_clauses: Vec<String> = Vec::new();
+
+	for (col, type_val) in decl_obj {
+		if live_keys.contains(&col.to_lowercase()) {
+			continue;
+		}
+		let type_str = type_val.as_str().unwrap_or("TEXT");
+		if !is_safe_identifier(col) {
+			continue;
+		}
+		add_clauses.push(format!("ADD COLUMN {} {}", col, type_str));
+	}
+
+	if add_clauses.is_empty() {
+		return String::new();
+	}
+
+	let tbl = table.unwrap_or("<table>");
+	format!("ALTER TABLE {} {};", tbl, add_clauses.join(", "))
 }
 
 // ============================================================================
@@ -1788,6 +2460,387 @@ mod tests {
 
 		assert_eq!(result["ok"], false);
 		assert_eq!(result["err"]["code"], "VALIDATION_ERROR");
+	}
+}
+
+
+
+// ============================================================================
+// TESTS — new frame.data bridge methods
+// ============================================================================
+
+#[cfg(test)]
+mod frame_data_bridge_tests {
+	use super::*;
+
+	async fn setup_test_db_new() -> DbBridge {
+		let mut bridge = DbBridge::new();
+		let config = DbConfig {
+			database_url: "sqlite::memory:".to_string(),
+			max_connections: 5,
+			min_connections: 1,
+			connection_timeout: 5000,
+			query_timeout: 10000,
+		};
+		bridge.configure(config).await.unwrap();
+
+		// Create users table for pagination tests
+		let _ = bridge.call("execute", json!({
+			"sql": "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL)",
+			"params": []
+		})).await;
+
+		bridge
+	}
+
+	#[tokio::test]
+	async fn test_configure_from_json_valid() {
+		let mut bridge = DbBridge::new();
+		let result = bridge
+			.configure_from_json(r#"{"database_url":"sqlite::memory:","max_connections":5,"min_connections":1,"connection_timeout":5000,"query_timeout":10000}"#)
+			.await
+			.unwrap();
+		assert_eq!(result["ok"], true, "configure_from_json should succeed: {:?}", result);
+	}
+
+	#[tokio::test]
+	async fn test_configure_from_json_invalid() {
+		let mut bridge = DbBridge::new();
+		let result = bridge
+			.configure_from_json("not valid json at all")
+			.await
+			.unwrap();
+		assert_eq!(result["ok"], false, "Should fail on invalid JSON");
+	}
+
+	#[tokio::test]
+	async fn test_paginate_basic() {
+		let mut bridge = setup_test_db_new().await;
+
+		// Insert 25 rows
+		for i in 1..=25 {
+			bridge.call("execute", json!({
+				"sql": "INSERT INTO users (name, email) VALUES (?, ?)",
+				"params": [format!("User{}", i), format!("user{}@test.com", i)]
+			})).await.unwrap();
+		}
+
+		let result = bridge.call("paginate", json!({
+			"table": "users",
+			"where": {},
+			"page": 1,
+			"per_page": 10
+		})).await.unwrap();
+
+		assert_eq!(result["ok"], true, "paginate should succeed: {:?}", result);
+		let data = &result["data"];
+		assert_eq!(data["total"], 25, "Total should be 25");
+		assert_eq!(data["page"], 1);
+		assert_eq!(data["per_page"], 10);
+		assert_eq!(data["total_pages"], 3);
+		assert_eq!(data["data"].as_array().unwrap().len(), 10, "Should return 10 rows");
+	}
+
+	#[tokio::test]
+	async fn test_paginate_last_page() {
+		let mut bridge = setup_test_db_new().await;
+
+		for i in 1..=15 {
+			bridge.call("execute", json!({
+				"sql": "INSERT INTO users (name, email) VALUES (?, ?)",
+				"params": [format!("User{}", i), format!("user{}@pglast.com", i)]
+			})).await.unwrap();
+		}
+
+		let result = bridge.call("paginate", json!({
+			"table": "users",
+			"where": {},
+			"page": 2,
+			"per_page": 10
+		})).await.unwrap();
+
+		assert_eq!(result["ok"], true);
+		let data = &result["data"];
+		assert_eq!(data["total"], 15);
+		assert_eq!(data["data"].as_array().unwrap().len(), 5, "Last page should have 5 rows");
+	}
+
+	#[tokio::test]
+	async fn test_paginate_invalid_table() {
+		let mut bridge = setup_test_db_new().await;
+		let result = bridge.call("paginate", json!({
+			"table": "users; DROP TABLE users--",
+			"where": {},
+			"page": 1,
+			"per_page": 10
+		})).await.unwrap();
+		assert_eq!(result["ok"], false);
+		assert_eq!(result["err"]["code"], "VALIDATION_ERROR");
+	}
+
+	#[tokio::test]
+	async fn test_cursor_page_basic() {
+		let mut bridge = setup_test_db_new().await;
+
+		for i in 1..=10 {
+			bridge.call("execute", json!({
+				"sql": "INSERT INTO users (name, email) VALUES (?, ?)",
+				"params": [format!("User{}", i), format!("user{}@cursor.com", i)]
+			})).await.unwrap();
+		}
+
+		// First page — no after cursor
+		let result = bridge.call("cursor_page", json!({
+			"table": "users",
+			"where": {},
+			"per_page": 5,
+			"after": "",
+			"by_field": "id"
+		})).await.unwrap();
+
+		assert_eq!(result["ok"], true, "cursor_page should succeed: {:?}", result);
+		let data = &result["data"];
+		assert_eq!(data["data"].as_array().unwrap().len(), 5, "Should return 5 rows");
+		assert_eq!(data["has_more"], true);
+		assert!(data["next_cursor"] != serde_json::Value::Null, "next_cursor should be set");
+	}
+
+	#[tokio::test]
+	async fn test_cursor_page_no_more() {
+		let mut bridge = setup_test_db_new().await;
+
+		for i in 1..=3 {
+			bridge.call("execute", json!({
+				"sql": "INSERT INTO users (name, email) VALUES (?, ?)",
+				"params": [format!("User{}", i), format!("user{}@cursor2.com", i)]
+			})).await.unwrap();
+		}
+
+		let result = bridge.call("cursor_page", json!({
+			"table": "users",
+			"where": {},
+			"per_page": 10,
+			"after": "",
+			"by_field": "id"
+		})).await.unwrap();
+
+		assert_eq!(result["ok"], true);
+		let data = &result["data"];
+		assert_eq!(data["has_more"], false);
+		assert_eq!(data["next_cursor"], serde_json::Value::Null);
+	}
+
+	#[tokio::test]
+	async fn test_cursor_page_invalid_field() {
+		let mut bridge = setup_test_db_new().await;
+		let result = bridge.call("cursor_page", json!({
+			"table": "users",
+			"where": {},
+			"per_page": 10,
+			"after": "",
+			"by_field": "id; DROP TABLE users--"
+		})).await.unwrap();
+		assert_eq!(result["ok"], false);
+		assert_eq!(result["err"]["code"], "VALIDATION_ERROR");
+	}
+
+	#[tokio::test]
+	async fn test_migration_diff_no_difference() {
+		let mut bridge = setup_test_db_new().await;
+		// The declared columns match the live columns (id, name, email)
+		let result = bridge.call("migration_diff", json!({
+			"declared": {"id": "INTEGER", "name": "TEXT", "email": "TEXT"},
+			"live": {"id": "", "name": "", "email": ""}
+		})).await.unwrap();
+		assert_eq!(result["ok"], true);
+		let sql = result["data"]["sql"].as_str().unwrap_or("");
+		assert!(sql.is_empty(), "Should return empty SQL when in sync, got: {}", sql);
+	}
+
+	#[tokio::test]
+	async fn test_migration_diff_missing_column() {
+		let mut bridge = setup_test_db_new().await;
+		// Declare a new column "age" that does not exist in live schema
+		let result = bridge.call("migration_diff", json!({
+			"declared": {"id": "INTEGER", "name": "TEXT", "email": "TEXT", "age": "INTEGER"},
+			"live": {"id": "", "name": "", "email": ""}
+		})).await.unwrap();
+		assert_eq!(result["ok"], true);
+		let sql = result["data"]["sql"].as_str().unwrap_or("");
+		assert!(!sql.is_empty(), "Should generate ALTER TABLE SQL");
+		assert!(sql.contains("ADD COLUMN age"), "SQL should add the age column: {}", sql);
+	}
+
+	#[tokio::test]
+	async fn test_migration_status_no_db() {
+		// Without DB configured, all migrations report as pending
+		let mut bridge = DbBridge::new();
+		bridge.call("register_migration", json!({
+			"name": "001_create_users",
+			"up_sql": "CREATE TABLE users (id INT)",
+			"down_sql": "DROP TABLE users"
+		})).await.unwrap();
+
+		let result = bridge.migration_status().await.unwrap();
+		assert_eq!(result["ok"], true);
+		let migrations = result["data"]["migrations"].as_array().unwrap();
+		assert_eq!(migrations.len(), 1);
+		assert_eq!(migrations[0]["name"], "001_create_users");
+		assert_eq!(migrations[0]["applied_at"], serde_json::Value::Null);
+	}
+
+	#[tokio::test]
+	async fn test_migration_status_after_run() {
+		let mut bridge = setup_test_db_new().await;
+		bridge.call("register_migration", json!({
+			"name": "001_add_age",
+			"up_sql": "ALTER TABLE users ADD COLUMN age INTEGER",
+			"down_sql": "SELECT 1"
+		})).await.unwrap();
+
+		// Run migrations
+		let run_result = bridge.run_migrations_call(json!({})).await.unwrap();
+		assert_eq!(run_result["ok"], true);
+		assert_eq!(run_result["data"]["applied"], 1);
+
+		// Now check status
+		let result = bridge.migration_status().await.unwrap();
+		assert_eq!(result["ok"], true);
+		let migrations = result["data"]["migrations"].as_array().unwrap();
+		assert_eq!(migrations.len(), 1);
+		assert_ne!(migrations[0]["applied_at"], serde_json::Value::Null);
+	}
+
+	#[tokio::test]
+	async fn test_rollback_migration_success() {
+		let mut bridge = setup_test_db_new().await;
+		bridge.call("register_migration", json!({
+			"name": "001_add_age",
+			"up_sql": "ALTER TABLE users ADD COLUMN age INTEGER",
+			"down_sql": "SELECT 1"
+		})).await.unwrap();
+
+		// Apply first
+		bridge.run_migrations_call(json!({})).await.unwrap();
+
+		// Rollback
+		let result = bridge.rollback_migration(json!({"name": "001_add_age"})).await.unwrap();
+		assert_eq!(result["ok"], true, "rollback_migration should succeed: {:?}", result);
+	}
+
+	#[tokio::test]
+	async fn test_rollback_migration_not_found() {
+		let mut bridge = setup_test_db_new().await;
+		let result = bridge.rollback_migration(json!({"name": "nonexistent_migration"})).await.unwrap();
+		assert_eq!(result["ok"], false);
+		assert_eq!(result["err"]["code"], "NOT_FOUND");
+	}
+
+	#[tokio::test]
+	async fn test_rollback_migration_no_down_sql() {
+		let mut bridge = setup_test_db_new().await;
+		bridge.call("register_migration", json!({
+			"name": "001_no_down",
+			"up_sql": "ALTER TABLE users ADD COLUMN phone TEXT",
+			"down_sql": ""
+		})).await.unwrap();
+
+		let result = bridge.rollback_migration(json!({"name": "001_no_down"})).await.unwrap();
+		assert_eq!(result["ok"], false);
+		assert_eq!(result["err"]["code"], "VALIDATION_ERROR");
+	}
+
+	#[tokio::test]
+	async fn test_run_migrations_count() {
+		let mut bridge = setup_test_db_new().await;
+		bridge.call("register_migration", json!({
+			"name": "001_m1",
+			"up_sql": "CREATE TABLE IF NOT EXISTS m1_test (id INTEGER PRIMARY KEY)",
+			"down_sql": "DROP TABLE IF EXISTS m1_test"
+		})).await.unwrap();
+		bridge.call("register_migration", json!({
+			"name": "002_m2",
+			"up_sql": "CREATE TABLE IF NOT EXISTS m2_test (id INTEGER PRIMARY KEY)",
+			"down_sql": "DROP TABLE IF EXISTS m2_test"
+		})).await.unwrap();
+
+		let result = bridge.run_migrations_call(json!({})).await.unwrap();
+		assert_eq!(result["ok"], true);
+		assert_eq!(result["data"]["applied"], 2, "Should apply 2 migrations");
+
+		// Running again applies 0 (already applied)
+		let result2 = bridge.run_migrations_call(json!({})).await.unwrap();
+		assert_eq!(result2["ok"], true);
+		assert_eq!(result2["data"]["applied"], 0, "Re-running applies 0");
+	}
+
+	#[tokio::test]
+	async fn test_valid_field_true() {
+		let mut bridge = setup_test_db_new().await;
+		let result = bridge.call("valid_field", json!({"table": "users", "field": "email"})).await.unwrap();
+		assert_eq!(result["ok"], true);
+		assert_eq!(result["data"]["valid"], true, "email should be a valid field");
+	}
+
+	#[tokio::test]
+	async fn test_valid_field_false() {
+		let mut bridge = setup_test_db_new().await;
+		let result = bridge.call("valid_field", json!({"table": "users", "field": "nonexistent_col"})).await.unwrap();
+		assert_eq!(result["ok"], true);
+		assert_eq!(result["data"]["valid"], false, "nonexistent_col should be invalid");
+	}
+
+	#[tokio::test]
+	async fn test_valid_field_sql_injection_attempt() {
+		let mut bridge = setup_test_db_new().await;
+		// A field name containing SQL metacharacters must be rejected
+		let result = bridge.call("valid_field", json!({
+			"table": "users",
+			"field": "id; DROP TABLE users--"
+		})).await.unwrap();
+		assert_eq!(result["ok"], true);
+		assert_eq!(result["data"]["valid"], false, "SQL injection attempt should be rejected");
+	}
+
+	#[test]
+	fn test_is_safe_identifier_valid() {
+		assert!(is_safe_identifier("users"));
+		assert!(is_safe_identifier("user_name"));
+		assert!(is_safe_identifier("Column1"));
+	}
+
+	#[test]
+	fn test_is_safe_identifier_invalid() {
+		assert!(!is_safe_identifier(""));
+		assert!(!is_safe_identifier("user-name"));
+		assert!(!is_safe_identifier("table name"));
+		assert!(!is_safe_identifier("id; DROP"));
+	}
+
+	#[test]
+	fn test_build_where_clause_empty() {
+		let (clause, params) = build_where_clause(&json!({}));
+		assert!(clause.is_empty());
+		assert!(params.is_empty());
+	}
+
+	#[test]
+	fn test_build_where_clause_single() {
+		let (clause, params) = build_where_clause(&json!({"name": "Alice"}));
+		assert_eq!(clause, "name = ?");
+		assert_eq!(params.len(), 1);
+	}
+
+	#[test]
+	fn test_build_where_clause_rejects_unsafe_keys() {
+		// Keys with SQL metacharacters must be skipped
+		let (clause, params) = build_where_clause(&json!({
+			"safe_col": "value",
+			"unsafe; DROP--": "evil"
+		}));
+		assert!(clause.contains("safe_col"), "Safe column should be included");
+		assert!(!clause.contains("unsafe"), "Unsafe key should be excluded");
+		assert_eq!(params.len(), 1, "Only 1 param for the safe column");
 	}
 }
 

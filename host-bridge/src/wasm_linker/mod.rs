@@ -169,6 +169,14 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
         ("_db_commit",              "db.commit"),
         ("_db_rollback",            "db.rollback"),
         ("_db_register_migration",  "db.register_migration"),
+        ("_db_configure",           "db.configure"),
+        ("_db_paginate",            "db.paginate"),
+        ("_db_cursor_page",         "db.cursor_page"),
+        ("_db_migration_diff",      "db.migration_diff"),
+        ("_db_migration_status",    "db.migration_status"),
+        ("_db_rollback_migration",  "db.rollback_migration"),
+        ("_db_run_migrations",      "db.run_migrations"),
+        ("_db_valid_field",         "db.valid_field"),
         // Crypto (crypto_funcs module)
         ("_crypto_hash_password",   "crypto.hash_password"),
         ("_crypto_verify_password", "crypto.verify_password"),
@@ -263,6 +271,7 @@ mod tests {
         match t {
             "void" => None,
             "ptr" => Some("i32"),
+            "string" => Some("i32"),  // string return = ptr to length-prefixed string
             "i32" => Some("i32"),
             "i64" => Some("i64"),
             "boolean" => Some("i32"),

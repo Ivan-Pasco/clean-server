@@ -4084,6 +4084,7 @@ mod tests {
         match t {
             "void" => None,
             "ptr" => Some("i32"),
+            "string" => Some("i32"),  // string return = ptr to length-prefixed string
             "i32" => Some("i32"),
             "i64" => Some("i64"),
             "boolean" => Some("i32"),
