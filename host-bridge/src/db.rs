@@ -2016,6 +2016,18 @@ fn is_safe_identifier(s: &str) -> bool {
 ///
 /// Only object-level keys that pass `is_safe_identifier` are included; others are silently
 /// skipped to prevent SQL injection through attacker-controlled key names.
+///
+/// Reserved protocol keys (any key starting with `__`) are handled separately and never
+/// treated as column equality filters. Currently recognised:
+/// - `__where` (string): appended verbatim as a raw SQL fragment without parameter binding.
+///   Used by the framework's `frame.data` plugin to convey operators (`!= null`, `> x`, …)
+///   that cannot be expressed as plain equality. The fragment is composed by the framework
+///   from typed AST nodes, not user input, so it is trusted.
+/// - `__order` (string): silently skipped — order resolution is the caller's responsibility
+///   (e.g. cursor_page uses its own `by_field`).
+///
+/// All other `__*` keys are skipped without effect, reserving the `__` prefix as a
+/// framework/bridge protocol namespace.
 fn build_where_clause(filters: &Value) -> (String, Vec<Value>) {
 	let obj = match filters.as_object() {
 		Some(o) => o,
@@ -2026,6 +2038,16 @@ fn build_where_clause(filters: &Value) -> (String, Vec<Value>) {
 	let mut params: Vec<Value> = Vec::new();
 
 	for (key, val) in obj {
+		if let Some(rest) = key.strip_prefix("__") {
+			if rest == "where" {
+				if let Some(fragment) = val.as_str() {
+					if !fragment.is_empty() {
+						clauses.push(fragment.to_string());
+					}
+				}
+			}
+			continue;
+		}
 		if !is_safe_identifier(key) {
 			continue;
 		}
@@ -2854,6 +2876,63 @@ mod frame_data_bridge_tests {
 		assert!(clause.contains("safe_col"), "Safe column should be included");
 		assert!(!clause.contains("unsafe"), "Unsafe key should be excluded");
 		assert_eq!(params.len(), 1, "Only 1 param for the safe column");
+	}
+
+	#[test]
+	fn test_build_where_clause_dunder_where_appended_as_raw_fragment() {
+		// Bug DB-BUILD-WHERE-IGNORES-DUNDER-WHERE: the framework's frame.data plugin emits
+		// {"__where": "<sql_fragment>"} for operators like `!= null` / `> x`. The bridge
+		// must inject the fragment verbatim, NOT generate `WHERE __where = ?`.
+		let (clause, params) = build_where_clause(&json!({
+			"__where": "published_at IS NOT NULL"
+		}));
+		assert_eq!(clause, "published_at IS NOT NULL");
+		assert!(params.is_empty(), "__where fragment must not produce bind params");
+	}
+
+	#[test]
+	fn test_build_where_clause_dunder_where_combined_with_equality() {
+		let (clause, params) = build_where_clause(&json!({
+			"author_id": 42,
+			"__where": "published_at IS NOT NULL"
+		}));
+		// Both fragments must be present, joined with AND. The framework guarantees
+		// the equality and raw fragments are compatible.
+		assert!(clause.contains("author_id = ?"), "equality clause present");
+		assert!(clause.contains("published_at IS NOT NULL"), "raw fragment present");
+		assert!(clause.contains(" AND "), "fragments joined with AND");
+		assert_eq!(params.len(), 1, "only the equality column binds a param");
+	}
+
+	#[test]
+	fn test_build_where_clause_dunder_order_is_skipped() {
+		// __order is a reserved protocol key carrying ORDER BY metadata; it must not
+		// produce a WHERE clause. Order is the caller's responsibility.
+		let (clause, params) = build_where_clause(&json!({
+			"name": "Alice",
+			"__order": "created_at DESC"
+		}));
+		assert_eq!(clause, "name = ?");
+		assert_eq!(params.len(), 1);
+	}
+
+	#[test]
+	fn test_build_where_clause_unknown_dunder_keys_are_skipped() {
+		// Any __* key not recognised must be silently ignored to keep the protocol
+		// namespace forward-compatible.
+		let (clause, params) = build_where_clause(&json!({
+			"__future": "something",
+			"name": "Alice"
+		}));
+		assert_eq!(clause, "name = ?");
+		assert_eq!(params.len(), 1);
+	}
+
+	#[test]
+	fn test_build_where_clause_empty_dunder_where_produces_no_clause() {
+		let (clause, params) = build_where_clause(&json!({"__where": ""}));
+		assert!(clause.is_empty());
+		assert!(params.is_empty());
 	}
 }
 
