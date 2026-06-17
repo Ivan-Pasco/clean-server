@@ -22,11 +22,40 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // MEMORY ALLOCATION
     // =========================================
 
-    // mem_alloc - Allocate memory in WASM linear memory
+    // mem_alloc - Allocate memory in WASM linear memory.
+    //
+    // Compiler-emitted calling convention is `mem_alloc(type_id: i32, size: i32) -> i32`
+    // (verified against the compiler's own wasmtime_runner — see clean-language-compiler/
+    // src/bin/wasmtime_runner.rs). The first argument is a type tag that the compiler
+    // uses for telemetry; the host implementation ignores it. The second argument is
+    // the byte size to allocate.
+    //
+    // Earlier revisions of this function treated the args as `(size, align)`, which
+    // made every allocation 0 bytes — every box returned the same pointer and
+    // overwrote the previous one. Symptom: json.encode of any object literal trapped
+    // inside the tagged-tree walker (see RUNTIME-WASMTIME-DIVERGES-FROM-CLN-TEST).
+    //
+    // CRITICAL: The host bump allocator (state.memory) and the WASM module's own
+    // bump allocator (__malloc / list.allocate) share the same linear memory and the
+    // same high-water mark (`__heap_ptr` global). They must be kept in sync on every
+    // host allocation, otherwise the WASM-internal __malloc and the host mem_alloc
+    // hand out overlapping ranges. Mirrors the read-then-take-max-then-write-back
+    // pattern used by the compiler's wasmtime_runner.
     linker.func_wrap(
         "memory_runtime",
         "mem_alloc",
-        |mut caller: Caller<'_, S>, size: i32, _align: i32| -> i32 {
+        |mut caller: Caller<'_, S>, _type_id: i32, size: i32| -> i32 {
+            // Step 1: Sync host offset with WASM __heap_ptr before allocating.
+            if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+                if let Some(wasm_heap) = heap_global.get(&mut caller).i32() {
+                    let wasm_heap = wasm_heap as usize;
+                    let host_off = caller.data().memory().current_offset();
+                    if wasm_heap > host_off {
+                        caller.data_mut().memory_mut().set_offset(wasm_heap);
+                    }
+                }
+            }
+
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => {
@@ -37,11 +66,11 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             let size = size as usize;
 
-            // Get allocation offset from state (using trait method)
+            // Get allocation offset from state (using trait method).
             let state = caller.data_mut();
             let ptr = state.memory_mut().allocate(size);
 
-            // Ensure memory is large enough using 1.5x amortized growth
+            // Ensure memory is large enough using 1.5x amortized growth.
             let required = ptr + size;
             let current_size = memory.data_size(&caller);
 
@@ -80,6 +109,16 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                             return 0;
                         }
                     }
+                }
+            }
+
+            // Step 2: Write the new high-water mark back to __heap_ptr so the
+            // WASM-side __malloc resumes from past our allocation.
+            let new_offset = caller.data().memory().current_offset() as i32;
+            if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+                let current = heap_global.get(&mut caller).i32().unwrap_or(0);
+                if new_offset > current {
+                    let _ = heap_global.set(&mut caller, wasmtime::Val::I32(new_offset));
                 }
             }
 

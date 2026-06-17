@@ -674,3 +674,65 @@ fn test_linker_provides_all_standard_imports() {
         import_count
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: mem_alloc argument order honors compiler-emitted (type_id, size).
+//
+// Regression for RUNTIME-WASMTIME-DIVERGES-FROM-CLN-TEST (fingerprint
+// d8c010f7a7b2). Before the fix, the linker bound mem_alloc's parameters as
+// (size, align) — but the compiler emits `mem_alloc(type_id, size)`. Every
+// allocation therefore had size=0, the bump allocator never advanced, and the
+// next allocation returned the same pointer. json.encode of an object literal
+// trapped because the three Any-box allocations all overlapped.
+//
+// This test asserts the second sequential allocation lands at a strictly
+// greater pointer than the first (proving size was honored, not coerced to 0).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mem_alloc_honors_compiler_size_arg() {
+    let wat = r#"
+        (module
+            (import "memory_runtime" "mem_alloc"
+                (func $mem_alloc (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 4152))
+            (global (export "__heap_ptr") (mut i32) (i32.const 4152))
+            ;; alloc_twice() calls mem_alloc(0, 12) twice and returns
+            ;; (second_ptr - first_ptr). A working host returns >= 12;
+            ;; the buggy host (which read size from the first arg, getting 0)
+            ;; returns 0 because the bump allocator never advances.
+            (func (export "alloc_twice") (result i32)
+                (local $a i32)
+                (local $b i32)
+                (local.set $a (call $mem_alloc (i32.const 0) (i32.const 12)))
+                (local.set $b (call $mem_alloc (i32.const 0) (i32.const 12)))
+                (i32.sub (local.get $b) (local.get $a))
+            )
+        )
+    "#;
+
+    let engine = Engine::default();
+    let module = Module::new(&engine, wat).expect("compile WAT");
+    let linker = create_linker(&engine).expect("create linker");
+    let mut store = make_store(&engine);
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("instantiate module");
+
+    let alloc_twice = instance
+        .get_typed_func::<(), i32>(&mut store, "alloc_twice")
+        .expect("get alloc_twice export");
+
+    let diff = alloc_twice.call(&mut store, ()).expect("call alloc_twice");
+
+    assert!(
+        diff >= 12,
+        "mem_alloc argument order regression: two sequential 12-byte allocations \
+         returned pointers differing by {} (expected >= 12). The host is reading \
+         size from the wrong argument — compiler emits (type_id, size), the host \
+         must consume (type_id, size). See RUNTIME-WASMTIME-DIVERGES-FROM-CLN-TEST.",
+        diff
+    );
+}
