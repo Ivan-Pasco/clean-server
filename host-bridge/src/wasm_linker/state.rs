@@ -65,6 +65,21 @@ pub trait WasmStateCore: Send + 'static {
         // Default implementation does nothing
     }
 
+    /// Get the last_insert_id cached from the most recent INSERT in this
+    /// WASM state's lifetime. Because the DB driver acquires a fresh pooled
+    /// connection per query, MySQL's session-local `LAST_INSERT_ID()` and
+    /// SQLite's `LAST_INSERT_ROWID()` cannot be observed by a follow-up
+    /// query. The bridge therefore caches the value returned by the driver
+    /// alongside the INSERT and serves it back when the caller asks for it.
+    fn last_insert_id(&self) -> Option<i64> {
+        None
+    }
+
+    /// Cache the last_insert_id returned by the most recent INSERT.
+    fn set_last_insert_id(&mut self, _id: Option<i64>) {
+        // Default implementation does nothing
+    }
+
     // =========================================
     // HTTP SERVER METHODS (optional, for server runtimes)
     // =========================================
@@ -306,6 +321,9 @@ pub struct WasmState {
     pub router: Option<Arc<dyn RouterInterface + Send + Sync>>,
     /// Current transaction ID (for implicit commit/rollback)
     pub current_tx_id: Option<String>,
+    /// Cached last_insert_id from the most recent INSERT in this state.
+    /// See `WasmStateCore::last_insert_id` for the rationale.
+    pub last_insert_id: Option<i64>,
 }
 
 /// Router interface for HTTP server integration
@@ -335,6 +353,7 @@ impl WasmState {
             db_bridge: Arc::new(TokioRwLock::new(DbBridge::new())),
             router: None,
             current_tx_id: None,
+            last_insert_id: None,
         }
     }
 
@@ -350,6 +369,7 @@ impl WasmState {
             db_bridge,
             router: None,
             current_tx_id: None,
+            last_insert_id: None,
         }
     }
 
@@ -439,6 +459,14 @@ impl WasmStateCore for WasmState {
     fn set_current_tx_id(&mut self, tx_id: Option<String>) {
         self.current_tx_id = tx_id;
     }
+
+    fn last_insert_id(&self) -> Option<i64> {
+        self.last_insert_id
+    }
+
+    fn set_last_insert_id(&mut self, id: Option<i64>) {
+        self.last_insert_id = id;
+    }
 }
 
 #[cfg(test)]
@@ -496,5 +524,15 @@ mod tests {
         let state = WasmState::new();
         assert!(state.request_context.is_none());
         assert_eq!(state.port, 3000);
+    }
+
+    #[test]
+    fn last_insert_id_round_trip() {
+        let mut state = WasmState::new();
+        assert!(state.last_insert_id().is_none());
+        state.set_last_insert_id(Some(7));
+        assert_eq!(state.last_insert_id(), Some(7));
+        state.set_last_insert_id(None);
+        assert!(state.last_insert_id().is_none());
     }
 }

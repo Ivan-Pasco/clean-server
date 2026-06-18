@@ -220,6 +220,12 @@ pub struct WasmState {
     pub pending_body: Option<String>,
     /// Current transaction ID (for implicit commit/rollback)
     pub current_tx_id: Option<String>,
+    /// Cached last_insert_id from the most recent INSERT in this request.
+    /// The DB driver acquires a fresh pooled connection per query, so
+    /// MySQL's `LAST_INSERT_ID()` and SQLite's `LAST_INSERT_ROWID()` are
+    /// invisible to a follow-up call. The bridge caches the value here
+    /// and serves it back when the caller asks for it.
+    pub last_insert_id: Option<i64>,
     /// Roles and permissions store
     pub roles_store: SharedRolesStore,
     /// Static file directories registered via _http_serve_static
@@ -347,6 +353,7 @@ impl WasmState {
             pending_status: None,
             pending_body: None,
             current_tx_id: None,
+            last_insert_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
@@ -384,6 +391,7 @@ impl WasmState {
             pending_status: None,
             pending_body: None,
             current_tx_id: None,
+            last_insert_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs: create_shared_static_dirs(),
             islands_store: create_shared_islands_store(),
@@ -431,6 +439,7 @@ impl WasmState {
             pending_status: None,
             pending_body: None,
             current_tx_id: None,
+            last_insert_id: None,
             roles_store: Arc::new(RwLock::new(RolesStore::new())),
             static_dirs,
             islands_store,
@@ -561,6 +570,14 @@ impl WasmStateCore for WasmState {
 
     fn set_current_tx_id(&mut self, tx_id: Option<String>) {
         self.current_tx_id = tx_id;
+    }
+
+    fn last_insert_id(&self) -> Option<i64> {
+        self.last_insert_id
+    }
+
+    fn set_last_insert_id(&mut self, id: Option<i64>) {
+        self.last_insert_id = id;
     }
 }
 

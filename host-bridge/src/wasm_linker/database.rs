@@ -22,6 +22,78 @@ use serde_json::json;
 use tracing::{debug, error};
 use wasmtime::{Caller, Linker};
 
+/// Match `SELECT [<expr>] LAST_INSERT_ID()` / `SELECT [<expr>] LAST_INSERT_ROWID()`
+/// (with an optional `AS <alias>`) and return the alias column name to use in the
+/// synthetic single-row response. Returns `None` if the SQL is not a bare
+/// `LAST_INSERT_ID()` / `LAST_INSERT_ROWID()` query.
+///
+/// MySQL's `LAST_INSERT_ID()` and SQLite's `LAST_INSERT_ROWID()` are
+/// session-local. The bridge dispatches each query against a fresh pooled
+/// connection, so the id from the prior INSERT is invisible to a follow-up
+/// SELECT. To preserve the documented contract from the caller's perspective
+/// we serve the cached value from the WASM state instead of hitting the DB.
+fn last_insert_id_alias(sql: &str) -> Option<String> {
+    let normalized: String = sql
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase();
+    let trimmed = normalized.trim_end_matches(';').trim();
+    let body = trimmed.strip_prefix("SELECT ")?;
+    let body = body.trim();
+    let (func, rest) = if let Some(r) = body.strip_prefix("LAST_INSERT_ID ( )") {
+        ("id", r)
+    } else if let Some(r) = body.strip_prefix("LAST_INSERT_ID()") {
+        ("id", r)
+    } else if let Some(r) = body.strip_prefix("LAST_INSERT_ROWID ( )") {
+        ("id", r)
+    } else if let Some(r) = body.strip_prefix("LAST_INSERT_ROWID()") {
+        ("id", r)
+    } else {
+        return None;
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some(func.to_string());
+    }
+    let alias_part = rest.strip_prefix("AS ").unwrap_or(rest).trim();
+    // Reject anything with extra clauses (FROM, WHERE, commas — multi-column SELECTs)
+    if alias_part.contains(' ') || alias_part.contains(',') {
+        return None;
+    }
+    // Preserve the alias casing from the original SQL where possible.
+    let alias_lower = alias_part.to_lowercase();
+    let original_alias = sql
+        .split_whitespace()
+        .find(|tok| tok.trim_end_matches(';').to_lowercase() == alias_lower)
+        .map(|tok| tok.trim_end_matches(';').to_string())
+        .unwrap_or(alias_part.to_string());
+    Some(original_alias)
+}
+
+fn last_insert_id_response(alias: &str, id: Option<i64>) -> String {
+    let id_val = id.unwrap_or(0);
+    let row = json!({ alias: id_val });
+    json!({
+        "ok": true,
+        "data": {
+            "rows": [row],
+            "count": 1
+        }
+    })
+    .to_string()
+}
+
+/// Detect whether `sql` is an INSERT (so the bridge knows to cache the
+/// resulting `last_insert_id` after dispatching to `execute`).
+fn is_insert(sql: &str) -> bool {
+    sql.trim_start().to_uppercase().starts_with("INSERT")
+        || sql.trim_start().to_uppercase().starts_with("REPLACE")
+}
+
 /// Register all database functions with the linker
 pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
     // =========================================
@@ -58,6 +130,19 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             };
 
             debug!("_db_query: SQL='{}' (len={}), params={}", sql, sql.len(), params_json);
+
+            // Intercept SELECT LAST_INSERT_ID() / LAST_INSERT_ROWID() and serve
+            // from the cached value on the WASM state — pool connections lose
+            // session-local state between calls, so the underlying SELECT would
+            // always return 0.
+            if let Some(alias) = last_insert_id_alias(&sql) {
+                let cached = caller.data().last_insert_id();
+                debug!("_db_query: serving cached last_insert_id={:?} as alias='{}'", cached, alias);
+                return write_string_to_caller(
+                    &mut caller,
+                    &last_insert_id_response(&alias, cached),
+                );
+            }
 
             let params: Vec<serde_json::Value> =
                 serde_json::from_str(&params_json).unwrap_or_default();
@@ -101,6 +186,22 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                         .await
                 })
             });
+
+            // Cache last_insert_id from successful INSERT/REPLACE so a follow-up
+            // `SELECT LAST_INSERT_ID()` can be served from state.
+            if is_insert(&sql) {
+                if let Ok(ref v) = result {
+                    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+                        if let Some(id) = v
+                            .get("data")
+                            .and_then(|d| d.get("last_insert_id"))
+                            .and_then(|i| i.as_i64())
+                        {
+                            caller.data_mut().set_last_insert_id(Some(id));
+                        }
+                    }
+                }
+            }
 
             let result_str = match result {
                 Ok(v) => {
@@ -189,6 +290,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Ok(v) => {
                     if let Some(ok) = v.get("ok").and_then(|o| o.as_bool()) {
                         if ok {
+                            // Cache last_insert_id for INSERT/REPLACE so a follow-up
+                            // `SELECT LAST_INSERT_ID()` can be served from state.
+                            if is_insert(&sql) {
+                                if let Some(id) = v
+                                    .get("data")
+                                    .and_then(|d| d.get("last_insert_id"))
+                                    .and_then(|i| i.as_i64())
+                                {
+                                    caller.data_mut().set_last_insert_id(Some(id));
+                                }
+                            }
                             v.get("data")
                                 .and_then(|d| d.get("affected_rows"))
                                 .and_then(|r| r.as_i64())
@@ -963,5 +1075,92 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
 #[cfg(test)]
 mod tests {
-    // Database tests require actual database connection
+    use super::{is_insert, last_insert_id_alias, last_insert_id_response};
+
+    // -----------------------------------------------------------------
+    // Reproduces FRAME-DATA-LAST-INSERT-ID-ZERO (server `ba39f757de3c`).
+    //
+    // The original bridge dispatched `SELECT LAST_INSERT_ID() AS id` to the
+    // MySQL pool, which acquired a fresh connection — losing the session-local
+    // id from the prior INSERT — and returned 0. The fix moves that pattern
+    // into the bridge: `last_insert_id_alias` recognizes the SQL shape, the
+    // INSERT path caches the id on the WASM state, and the synthetic SELECT
+    // response is built without touching the pool.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn last_insert_id_alias_matches_bare_mysql() {
+        assert_eq!(last_insert_id_alias("SELECT LAST_INSERT_ID()"), Some("id".to_string()));
+    }
+
+    #[test]
+    fn last_insert_id_alias_matches_bare_sqlite() {
+        assert_eq!(last_insert_id_alias("SELECT LAST_INSERT_ROWID()"), Some("id".to_string()));
+    }
+
+    #[test]
+    fn last_insert_id_alias_matches_aliased() {
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ID() AS id"),
+            Some("id".to_string())
+        );
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ID() AS new_id"),
+            Some("new_id".to_string())
+        );
+    }
+
+    #[test]
+    fn last_insert_id_alias_tolerates_whitespace_and_case() {
+        assert_eq!(
+            last_insert_id_alias("  select   last_insert_id()   as   id  "),
+            Some("id".to_string())
+        );
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ID ( ) AS id"),
+            Some("id".to_string())
+        );
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ID() AS id;"),
+            Some("id".to_string())
+        );
+    }
+
+    #[test]
+    fn last_insert_id_alias_rejects_unrelated_queries() {
+        assert_eq!(last_insert_id_alias("SELECT * FROM t"), None);
+        assert_eq!(last_insert_id_alias("SELECT id FROM t WHERE id = LAST_INSERT_ID()"), None);
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ID(), other_col FROM t"),
+            None
+        );
+    }
+
+    #[test]
+    fn last_insert_id_response_shape_matches_select_envelope() {
+        let body = last_insert_id_response("id", Some(42));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], serde_json::json!(true));
+        assert_eq!(v["data"]["count"], serde_json::json!(1));
+        assert_eq!(v["data"]["rows"][0]["id"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn last_insert_id_response_returns_zero_when_cache_empty() {
+        // Before any INSERT, the cache is empty — match the historical
+        // behavior so callers see "0" rather than a missing field. The bug
+        // is fixed precisely by the cache being populated after INSERT.
+        let body = last_insert_id_response("new_id", None);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"]["rows"][0]["new_id"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn is_insert_recognizes_insert_and_replace() {
+        assert!(is_insert("INSERT INTO t VALUES (1)"));
+        assert!(is_insert("  insert  into t values (1)"));
+        assert!(is_insert("REPLACE INTO t VALUES (1)"));
+        assert!(!is_insert("SELECT 1"));
+        assert!(!is_insert("UPDATE t SET n = 1"));
+    }
 }
