@@ -2013,6 +2013,7 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
          data_ptr: i32,
          data_len: i32|
          -> i32 {
+            error!("_ui_render_page: HIT");
             let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) if !s.is_empty() => s,
                 _ => {
@@ -2022,6 +2023,7 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             };
 
             let data_str = read_raw_string(&mut caller, data_ptr, data_len).unwrap_or_default();
+            error!("_ui_render_page: data_str len={} first200={:?}", data_str.len(), &data_str.chars().take(200).collect::<String>());
 
             let cwd = std::env::current_dir().unwrap_or_default();
             let path = cwd.join(&path_str);
@@ -2038,10 +2040,25 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             let data: serde_json::Value = if data_str.is_empty() {
                 serde_json::Value::Object(serde_json::Map::new())
             } else {
-                serde_json::from_str(&data_str).unwrap_or_else(|e| {
-                    error!("_ui_render_page: Failed to parse JSON data for '{}': {}", path_str, e);
-                    serde_json::Value::Object(serde_json::Map::new())
-                })
+                let parsed = serde_json::from_str::<serde_json::Value>(&data_str)
+                    .unwrap_or_else(|e| {
+                        error!(
+                            "_ui_render_page: Failed to parse JSON data for '{}': {}",
+                            path_str, e
+                        );
+                        serde_json::Value::Object(serde_json::Map::new())
+                    });
+                // Unwrap double-encoded JSON: when a Clean Language page companion's
+                // load() returns a STRING that already contains JSON, the compiler
+                // calls json.encode() on it before passing it here, producing a
+                // JSON-string-of-a-JSON-string. Detect that case and unwrap one
+                // layer so substitute_template can iterate the inner object's keys.
+                match parsed {
+                    serde_json::Value::String(inner) if inner.trim_start().starts_with('{') || inner.trim_start().starts_with('[') => {
+                        serde_json::from_str(&inner).unwrap_or(serde_json::Value::String(inner))
+                    }
+                    other => other,
+                }
             };
 
             // Extract <page layout="..."> wrapper if present
@@ -2681,6 +2698,7 @@ fn extract_page_layout(html: &str) -> (String, Option<String>) {
 /// Load a layout file and inject `content` into its `<slot>`.
 fn apply_layout(content: &str, layout_name: &str, cwd: &std::path::Path) -> String {
     let candidates = [
+        cwd.join(format!("app/ui/web/layouts/{}.html", layout_name)),
         cwd.join(format!("app/ui/layouts/{}.html", layout_name)),
         cwd.join(format!("ui/layouts/{}.html", layout_name)),
         cwd.join(format!("layouts/{}.html", layout_name)),
@@ -4964,6 +4982,45 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_layout(dir: &std::path::Path, rel: &str, body: &str) {
+        let full = dir.join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, body).unwrap();
+    }
+
+    #[test]
+    fn apply_layout_finds_app_ui_web_layouts() {
+        // Regression: SERVER-APPLY-LAYOUT-MISSES-APP-UI-WEB-LAYOUTS — after the
+        // PROJECT_STRUCTURE migration apps store layouts under app/ui/web/layouts/.
+        let tmp = tempfile::tempdir().unwrap();
+        write_layout(
+            tmp.path(),
+            "app/ui/web/layouts/main.html",
+            "<html><head></head><body><slot /></body></html>",
+        );
+        let out = apply_layout("<h1>hi</h1>", "main", tmp.path());
+        assert_eq!(out, "<html><head></head><body><h1>hi</h1></body></html>");
+    }
+
+    #[test]
+    fn apply_layout_falls_back_to_app_ui_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_layout(
+            tmp.path(),
+            "app/ui/layouts/main.html",
+            "<a><slot/></a>",
+        );
+        let out = apply_layout("X", "main", tmp.path());
+        assert_eq!(out, "<a>X</a>");
+    }
+
+    #[test]
+    fn apply_layout_returns_content_when_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = apply_layout("X", "missing", tmp.path());
+        assert_eq!(out, "X");
+    }
 
     #[test]
     fn test_create_linker() {
