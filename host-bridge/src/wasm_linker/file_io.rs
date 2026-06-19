@@ -56,8 +56,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_write - Write to a file (overwrites if exists)
-    // Signature: (path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32) -> i32
-    // Returns: 0 on success, -1 on error
+    // Signature: (path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32) -> i32 (boolean)
+    // Returns: 1 on success, 0 on failure
     linker.func_wrap(
         "env",
         "file_write",
@@ -66,7 +66,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Some(s) => s,
                 None => {
                     error!("file_write: Failed to read path");
-                    return -1;
+                    return 0;
                 }
             };
 
@@ -74,17 +74,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Some(s) => s,
                 None => {
                     error!("file_write: Failed to read content");
-                    return -1;
+                    return 0;
                 }
             };
 
             debug!("file_write: path={}, content_len={}", path, content.len());
 
             match fs::write(&path, content) {
-                Ok(_) => 0,
+                Ok(_) => 1,
                 Err(e) => {
                     error!("file_write: Failed to write file '{}': {}", path, e);
-                    -1
+                    0
                 }
             }
         },
@@ -120,8 +120,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_delete - Delete a file
-    // Signature: (path_ptr: i32, path_len: i32) -> i32
-    // Returns: 0 on success, -1 on error
+    // Signature: (path_ptr: i32, path_len: i32) -> i32 (boolean)
+    // Returns: 1 on success, 0 on failure
     linker.func_wrap(
         "env",
         "file_delete",
@@ -130,17 +130,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Some(s) => s,
                 None => {
                     error!("file_delete: Failed to read path");
-                    return -1;
+                    return 0;
                 }
             };
 
             debug!("file_delete: path={}", path);
 
             match fs::remove_file(&path) {
-                Ok(_) => 0,
+                Ok(_) => 1,
                 Err(e) => {
                     error!("file_delete: Failed to delete file '{}': {}", path, e);
-                    -1
+                    0
                 }
             }
         },
@@ -151,8 +151,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // file_append - Append to a file
-    // Signature: (path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32) -> i32
-    // Returns: 0 on success, -1 on error
+    // Signature: (path_ptr: i32, path_len: i32, content_ptr: i32, content_len: i32) -> i32 (boolean)
+    // Returns: 1 on success, 0 on failure
     linker.func_wrap(
         "env",
         "file_append",
@@ -161,7 +161,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Some(s) => s,
                 None => {
                     error!("file_append: Failed to read path");
-                    return -1;
+                    return 0;
                 }
             };
 
@@ -169,7 +169,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Some(s) => s,
                 None => {
                     error!("file_append: Failed to read content");
-                    return -1;
+                    return 0;
                 }
             };
 
@@ -177,15 +177,15 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             match fs::OpenOptions::new().append(true).create(true).open(&path) {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
-                    Ok(_) => 0,
+                    Ok(_) => 1,
                     Err(e) => {
                         error!("file_append: Failed to write to file '{}': {}", path, e);
-                        -1
+                        0
                     }
                 },
                 Err(e) => {
                     error!("file_append: Failed to open file '{}': {}", path, e);
-                    -1
+                    0
                 }
             }
         },
