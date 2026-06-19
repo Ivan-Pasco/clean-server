@@ -405,7 +405,8 @@ const FULL_CONTRACT_WAT: &str = r#"
   (import "env" "string_replace" (func (param i32 i32 i32) (result i32)))
   (import "env" "string.replace" (func (param i32 i32 i32) (result i32)))
 
-  ;; split: (str_ptr, delim_ptr) -> result_ptr (JSON array)
+  ;; split: (str_ptr, delim_ptr) -> list_ptr (Clean list<string>: 16-byte header
+  ;; + N*4-byte element pointers; behavior verified in string_split_test.rs)
   (import "env" "string_split"   (func (param i32 i32) (result i32)))
   (import "env" "string.split"   (func (param i32 i32) (result i32)))
 

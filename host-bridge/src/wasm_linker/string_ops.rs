@@ -10,7 +10,9 @@
 //!
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
-use super::helpers::{read_raw_string, read_string_from_caller, write_string_to_caller};
+use super::helpers::{
+    read_raw_string, read_string_from_caller, write_string_list_to_caller, write_string_to_caller,
+};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use wasmtime::{Caller, Linker};
@@ -288,7 +290,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // string_split - Split string by delimiter (returns JSON array as length-prefixed string)
+    // string_split - Split string by delimiter, returns a Clean Language list<string>
+    // pointer (16-byte header + N*4-byte element pointers). See
+    // `write_string_list_to_caller` for the layout. Returning a JSON-encoded
+    // length-prefixed string here would break `iterate` (HOST_BRIDGE_STRING_SPLIT).
     // Signature: (ptr: i32, delim_ptr: i32) -> i32
     linker.func_wrap(
         "env",
@@ -297,9 +302,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let s = read_string_from_caller(&mut caller, ptr).unwrap_or_default();
             let delim = read_string_from_caller(&mut caller, delim_ptr).unwrap_or_default();
 
-            let parts: Vec<&str> = s.split(&delim).collect();
-            let json = serde_json::to_string(&parts).unwrap_or_else(|_| "[]".to_string());
-            write_string_to_caller(&mut caller, &json)
+            let parts: Vec<&str> = s.split(delim.as_str()).collect();
+            write_string_list_to_caller(&mut caller, &parts)
         },
     )?;
 
@@ -310,9 +314,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let s = read_string_from_caller(&mut caller, ptr).unwrap_or_default();
             let delim = read_string_from_caller(&mut caller, delim_ptr).unwrap_or_default();
 
-            let parts: Vec<&str> = s.split(&delim).collect();
-            let json = serde_json::to_string(&parts).unwrap_or_else(|_| "[]".to_string());
-            write_string_to_caller(&mut caller, &json)
+            let parts: Vec<&str> = s.split(delim.as_str()).collect();
+            write_string_list_to_caller(&mut caller, &parts)
         },
     )?;
 

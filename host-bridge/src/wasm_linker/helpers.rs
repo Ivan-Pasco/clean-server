@@ -379,6 +379,135 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
     ptr as i32
 }
 
+/// Write a Clean Language `list<string>` to WASM memory.
+///
+/// Layout (matches the compiler's iterate / list ops codegen):
+///   offset  0..4  : length     (u32 LE)
+///   offset  4..8  : capacity   (u32 LE)
+///   offset  8..12 : type_id    (u32 LE, 3 = string)
+///   offset 12..16 : padding    (u32 LE, 0)
+///   offset 16..   : N * 4-byte LE pointers to length-prefixed strings
+///
+/// Each element is a pointer to a string allocated via `write_string_to_caller`
+/// (so the strings live in WASM-malloc'd memory just like other host-produced
+/// strings). The list header block is allocated via WASM malloc as well.
+///
+/// Returns the pointer to the list block, or 0 on failure.
+///
+/// CRITICAL: Prior to this helper, `string_split` returned a JSON-encoded string
+/// instead of a list pointer. The compiler emits `iterate part in parts` code
+/// that reads the size at offset 0 and element pointers at offset 16 + i*4 —
+/// so feeding it a JSON-LP string caused the iterate to walk JSON bytes and
+/// either over-run (wrong count) or WASM-trap. See HOST_BRIDGE_STRING_SPLIT.
+pub fn write_string_list_to_caller<S: WasmStateCore>(
+    caller: &mut Caller<'_, S>,
+    parts: &[&str],
+) -> i32 {
+    const LIST_HEADER_SIZE: usize = 16;
+    const ELEM_PTR_SIZE: usize = 4;
+
+    let num_parts = parts.len();
+
+    // Allocate each element string via the existing helper (uses WASM malloc
+    // under the hood, so the strings live alongside other host-produced strings
+    // and __heap_ptr stays consistent).
+    let mut element_ptrs: Vec<i32> = Vec::with_capacity(num_parts);
+    for part in parts {
+        let p = write_string_to_caller(caller, part);
+        if p == 0 {
+            error!("write_string_list_to_caller: failed to allocate element string");
+            return 0;
+        }
+        element_ptrs.push(p);
+    }
+
+    // Allocate the list block (header + N pointer slots) via WASM malloc.
+    let list_size = LIST_HEADER_SIZE + num_parts * ELEM_PTR_SIZE;
+
+    let list_ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
+        match malloc.typed::<i32, i32>(&*caller) {
+            Ok(typed_malloc) => match typed_malloc.call(&mut *caller, list_size as i32) {
+                Ok(p) if p > 0 => p as usize,
+                Ok(p) => {
+                    error!("write_string_list_to_caller: malloc returned invalid ptr={}", p);
+                    return 0;
+                }
+                Err(e) => {
+                    error!("write_string_list_to_caller: malloc call failed: {}", e);
+                    return 0;
+                }
+            },
+            Err(e) => {
+                error!("write_string_list_to_caller: malloc type mismatch: {}", e);
+                return 0;
+            }
+        }
+    } else {
+        error!("write_string_list_to_caller: No malloc export found");
+        return 0;
+    };
+
+    // Defensive __heap_ptr fix-up: mirrors write_string_to_caller's pattern so
+    // any malloc that fails to bump the global doesn't cause later overlap.
+    let expected_heap_ptr = ((list_ptr + list_size + 7) & !7) as i32;
+    if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        let actual = heap_global.get(&mut *caller).i32().unwrap_or(-1);
+        if actual >= 0 && actual < expected_heap_ptr {
+            if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(expected_heap_ptr)) {
+                error!("write_string_list_to_caller: failed to update __heap_ptr: {}", e);
+            }
+        }
+    }
+
+    // Re-acquire memory after malloc (it may have grown).
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => {
+            error!("write_string_list_to_caller: No memory export after malloc");
+            return 0;
+        }
+    };
+
+    if !ensure_memory_capacity(caller, &memory, list_ptr, list_size) {
+        error!(
+            "write_string_list_to_caller: Failed to ensure memory capacity ({} bytes at ptr={})",
+            list_size, list_ptr
+        );
+        return 0;
+    }
+
+    // Build the 16-byte header.
+    let mut header = [0u8; LIST_HEADER_SIZE];
+    header[0..4].copy_from_slice(&(num_parts as u32).to_le_bytes()); // length
+    header[4..8].copy_from_slice(&(num_parts as u32).to_le_bytes()); // capacity
+    header[8..12].copy_from_slice(&3u32.to_le_bytes()); // type_id (3 = string)
+    header[12..16].copy_from_slice(&0u32.to_le_bytes()); // padding
+
+    if let Err(e) = memory.write(&mut *caller, list_ptr, &header) {
+        error!("write_string_list_to_caller: failed to write list header: {}", e);
+        return 0;
+    }
+
+    // Write element pointers.
+    for (i, &elem_ptr) in element_ptrs.iter().enumerate() {
+        let ofs = list_ptr + LIST_HEADER_SIZE + i * ELEM_PTR_SIZE;
+        let bytes = (elem_ptr as u32).to_le_bytes();
+        if let Err(e) = memory.write(&mut *caller, ofs, &bytes) {
+            error!(
+                "write_string_list_to_caller: failed to write element ptr {} at ofs {}: {}",
+                i, ofs, e
+            );
+            return 0;
+        }
+    }
+
+    debug!(
+        "write_string_list_to_caller: wrote list of {} string(s) at ptr={}",
+        num_parts, list_ptr
+    );
+    list_ptr as i32
+}
+
 /// Read a length-prefixed byte array from WASM memory (from raw data slice)
 pub fn read_length_prefixed_bytes(data: &[u8], ptr: usize) -> Vec<u8> {
     if ptr + STRING_LENGTH_PREFIX_SIZE > data.len() {
