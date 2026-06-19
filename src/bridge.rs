@@ -2013,7 +2013,6 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
          data_ptr: i32,
          data_len: i32|
          -> i32 {
-            error!("_ui_render_page: HIT");
             let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) if !s.is_empty() => s,
                 _ => {
@@ -2023,7 +2022,6 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             };
 
             let data_str = read_raw_string(&mut caller, data_ptr, data_len).unwrap_or_default();
-            error!("_ui_render_page: data_str len={} first200={:?}", data_str.len(), &data_str.chars().take(200).collect::<String>());
 
             let cwd = std::env::current_dir().unwrap_or_default();
             let path = cwd.join(&path_str);
@@ -2040,25 +2038,10 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             let data: serde_json::Value = if data_str.is_empty() {
                 serde_json::Value::Object(serde_json::Map::new())
             } else {
-                let parsed = serde_json::from_str::<serde_json::Value>(&data_str)
-                    .unwrap_or_else(|e| {
-                        error!(
-                            "_ui_render_page: Failed to parse JSON data for '{}': {}",
-                            path_str, e
-                        );
-                        serde_json::Value::Object(serde_json::Map::new())
-                    });
-                // Unwrap double-encoded JSON: when a Clean Language page companion's
-                // load() returns a STRING that already contains JSON, the compiler
-                // calls json.encode() on it before passing it here, producing a
-                // JSON-string-of-a-JSON-string. Detect that case and unwrap one
-                // layer so substitute_template can iterate the inner object's keys.
-                match parsed {
-                    serde_json::Value::String(inner) if inner.trim_start().starts_with('{') || inner.trim_start().starts_with('[') => {
-                        serde_json::from_str(&inner).unwrap_or(serde_json::Value::String(inner))
-                    }
-                    other => other,
-                }
+                serde_json::from_str(&data_str).unwrap_or_else(|e| {
+                    error!("_ui_render_page: Failed to parse JSON data for '{}': {}", path_str, e);
+                    serde_json::Value::Object(serde_json::Map::new())
+                })
             };
 
             // Extract <page layout="..."> wrapper if present
