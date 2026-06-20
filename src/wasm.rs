@@ -967,7 +967,18 @@ impl WasmInstance {
                 RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
             })?;
 
-            crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
+            // When the handler signalled a redirect via `_http_redirect` /
+            // `_res_redirect`, its i32 return value is not guaranteed to be a
+            // length-prefixed UTF-8 string. The frame.ui page-render export, for
+            // instance, forwards the boxed-any value returned from `guard()`
+            // unchanged. The redirect path in `handle_request` discards the body
+            // anyway, so reading it would only risk a spurious UTF-8 trap that
+            // turns the intended 302 into a 500.
+            if store.data().pending_redirect.is_some() {
+                String::new()
+            } else {
+                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
+            }
         } else {
             return Err(RuntimeError::wasm(format!(
                 "Could not find or call handler '{}'",
