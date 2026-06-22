@@ -4,7 +4,9 @@
 *.pdb
 
 # Cargo
-Cargo.lock
+# Cargo.lock is committed: clean-server is an application binary, not a library.
+# Locking the dep graph protects CI/release from upstream crate rot (e.g. a freshly
+# published patch version of a transitive dep that fails to compile).
 
 # IDE
 .vscode/
