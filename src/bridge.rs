@@ -2209,20 +2209,44 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     Ok(())
 }
 
-/// Replace `{key}` tokens in `template` with values from `data`.
-/// Missing keys are left as-is. Only top-level JSON object fields are supported.
+/// Replace `{{ key }}` tokens in `template` with values from `data` per the
+/// `_ui_render_page` spec (`HOST_BRIDGE.md` §UI templates). Whitespace around
+/// `key` is allowed; missing keys produce an empty string. Single-brace forms
+/// (`{key}`) are not template syntax and are preserved as literals. Only
+/// top-level JSON object fields are supported.
 fn substitute_template(template: &str, data: &serde_json::Value) -> String {
-    let mut result = template.to_string();
-    if let Some(obj) = data.as_object() {
-        for (key, value) in obj {
-            let placeholder = format!("{{{}}}", key);
-            let replacement = match value {
+    let obj = data.as_object();
+    let mut result = String::with_capacity(template.len());
+    let mut rest = template;
+    while !rest.is_empty() {
+        let Some(open) = rest.find("{{") else {
+            result.push_str(rest);
+            break;
+        };
+        result.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            result.push_str("{{");
+            result.push_str(after_open);
+            break;
+        };
+        let raw_key = &after_open[..close];
+        let key = raw_key.trim();
+        if key.is_empty() || key.contains(['{', '}', '\n', '\r']) {
+            result.push_str("{{");
+            rest = after_open;
+            continue;
+        }
+        let replacement = obj
+            .and_then(|o| o.get(key))
+            .map(|v| match v {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Null => String::new(),
                 other => other.to_string(),
-            };
-            result = result.replace(&placeholder, &replacement);
-        }
+            })
+            .unwrap_or_default();
+        result.push_str(&replacement);
+        rest = &after_open[close + 2..];
     }
     result
 }
@@ -5354,5 +5378,87 @@ mod tests {
             "my-tag",
         );
         assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
+    }
+
+    // Regression: SERVER-UI-RENDER-PAGE-INTERP-STRICT-WHITESPACE
+    // Spec (HOST_BRIDGE.md): `{{ key }}` with optional whitespace; missing keys produce empty string.
+
+    #[test]
+    fn substitute_template_double_brace_with_whitespace() {
+        let data = serde_json::json!({"greeting": "hello"});
+        assert_eq!(substitute_template("<p>{{ greeting }}</p>", &data), "<p>hello</p>");
+    }
+
+    #[test]
+    fn substitute_template_double_brace_no_whitespace() {
+        let data = serde_json::json!({"greeting": "hi"});
+        assert_eq!(substitute_template("<p>{{greeting}}</p>", &data), "<p>hi</p>");
+    }
+
+    #[test]
+    fn substitute_template_double_brace_extra_whitespace() {
+        let data = serde_json::json!({"key": "value"});
+        assert_eq!(substitute_template("[{{   key   }}]", &data), "[value]");
+    }
+
+    #[test]
+    fn substitute_template_missing_key_becomes_empty_string() {
+        let data = serde_json::json!({"present": "x"});
+        assert_eq!(substitute_template("a{{missing}}b", &data), "ab");
+    }
+
+    #[test]
+    fn substitute_template_multiple_substitutions() {
+        let data = serde_json::json!({"a": "1", "b": "2"});
+        assert_eq!(
+            substitute_template("{{a}} and {{ b }} and {{a}}", &data),
+            "1 and 2 and 1"
+        );
+    }
+
+    #[test]
+    fn substitute_template_non_string_values_stringify() {
+        let data = serde_json::json!({"n": 42, "f": 3.5, "t": true, "z": null});
+        assert_eq!(
+            substitute_template("{{n}}|{{f}}|{{t}}|{{z}}|", &data),
+            "42|3.5|true||"
+        );
+    }
+
+    #[test]
+    fn substitute_template_unclosed_brace_left_literal() {
+        let data = serde_json::json!({"x": "y"});
+        assert_eq!(
+            substitute_template("before {{ unclosed text", &data),
+            "before {{ unclosed text"
+        );
+    }
+
+    #[test]
+    fn substitute_template_preserves_single_brace_literal() {
+        let data = serde_json::json!({"key": "value"});
+        // Single brace is not template syntax per spec — left as literal.
+        assert_eq!(
+            substitute_template("{key} and { key } and {{key}}", &data),
+            "{key} and { key } and value"
+        );
+    }
+
+    #[test]
+    fn substitute_template_preserves_utf8() {
+        let data = serde_json::json!({"name": "世界"});
+        assert_eq!(
+            substitute_template("¡Hola, {{ name }}! 🎉", &data),
+            "¡Hola, 世界! 🎉"
+        );
+    }
+
+    #[test]
+    fn substitute_template_empty_key_left_literal() {
+        let data = serde_json::json!({});
+        assert_eq!(
+            substitute_template("a{{}}b{{   }}c", &data),
+            "a{{}}b{{   }}c"
+        );
     }
 }
