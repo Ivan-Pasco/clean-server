@@ -333,8 +333,66 @@ fn build_store_limits(memory_limit: usize) -> StoreLimits {
         .build()
 }
 
-/// Default memory limit: 32 MB (standard tier)
-const DEFAULT_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
+/// Detect whether a wasmtime trap is the memory-size limit being hit.
+/// We can't pattern-match on a structured error code because wasmtime collapses
+/// the OOM into a generic trap; the trap message is the only signal.
+fn is_memory_limit_trap<E: std::fmt::Display>(err: &E) -> bool {
+    let msg = format!("{}", err).to_lowercase();
+    msg.contains("memory")
+        && (msg.contains("grow")
+            || msg.contains("out of bounds")
+            || msg.contains("limit"))
+}
+
+/// Wrap a wasmtime handler error with friendlier context when the trap is
+/// caused by the per-instance memory limit. Lets operators see "raise
+/// CLEAN_SERVER_MEMORY_LIMIT_MB" instead of the raw wasmtime backtrace.
+fn classify_handler_error(handler_name: &str, err: wasmtime::Error) -> RuntimeError {
+    if is_memory_limit_trap(&err) {
+        let limit_mb = std::env::var("CLEAN_SERVER_MEMORY_LIMIT_MB")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MEMORY_LIMIT / (1024 * 1024));
+        RuntimeError::wasm(format!(
+            "Handler {} hit the {} MB WASM memory limit. \
+             Raise it with CLEAN_SERVER_MEMORY_LIMIT_MB=<MB> if the request is \
+             genuinely allocation-heavy, or investigate the handler for an \
+             iterate/string accumulation loop that doesn't release intermediate \
+             buffers (see compiler bug SERVER-NO-WASM-HEAP-RESET-PER-REQUEST). \
+             Original error: {}",
+            handler_name, limit_mb, err
+        ))
+    } else {
+        RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, err))
+    }
+}
+
+/// Default memory limit: 128 MB. Raised from 32 MB because realistic
+/// SSR handlers (page rendering with iterate + string.split + string.trim
+/// chains, design-doc validators, etc.) exhaust 32 MB inside a single
+/// request — see SERVER-NO-WASM-HEAP-RESET-PER-REQUEST. The intra-request
+/// allocation chain has no per-iteration scope_pop, so peak heap usage in
+/// one handler invocation can be several MB even for moderately sized
+/// inputs. 128 MB matches what wasmtime defaults to in most embedder
+/// projects and leaves room for compiler/framework-level intra-request
+/// scope work without re-tuning every deployment.
+///
+/// Override at runtime with `CLEAN_SERVER_MEMORY_LIMIT_MB`, in megabytes,
+/// e.g. `CLEAN_SERVER_MEMORY_LIMIT_MB=512`.
+const DEFAULT_MEMORY_LIMIT: usize = 128 * 1024 * 1024;
+
+/// Read `CLEAN_SERVER_MEMORY_LIMIT_MB` from the environment and convert
+/// to bytes. Returns `DEFAULT_MEMORY_LIMIT` when the env var is unset or
+/// invalid.
+pub fn memory_limit_from_env() -> usize {
+    match std::env::var("CLEAN_SERVER_MEMORY_LIMIT_MB") {
+        Ok(s) => match s.trim().parse::<usize>() {
+            Ok(mb) if mb > 0 => mb.saturating_mul(1024 * 1024),
+            _ => DEFAULT_MEMORY_LIMIT,
+        },
+        Err(_) => DEFAULT_MEMORY_LIMIT,
+    }
+}
 
 impl WasmState {
     pub fn new(router: SharedRouter) -> Self {
@@ -637,7 +695,7 @@ impl WasmInstance {
 
         let db_bridge = Arc::new(TokioRwLock::new(DbBridge::new()));
         let session_store = create_session_store(SessionConfig::default());
-        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path), DEFAULT_MEMORY_LIMIT)
+        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path), memory_limit_from_env())
     }
 
     /// Load a WASM module from a file with a custom database bridge
@@ -646,7 +704,7 @@ impl WasmInstance {
         router: SharedRouter,
         db_bridge: SharedDbBridge,
     ) -> RuntimeResult<Self> {
-        Self::load_with_db_and_limit(wasm_path, router, db_bridge, DEFAULT_MEMORY_LIMIT)
+        Self::load_with_db_and_limit(wasm_path, router, db_bridge, memory_limit_from_env())
     }
 
     /// Load a WASM module from a file with a custom database bridge and memory limit
@@ -689,7 +747,7 @@ impl WasmInstance {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
     ) -> RuntimeResult<Self> {
-        Self::from_bytes_inner(wasm_bytes, router, db_bridge, session_store, None, DEFAULT_MEMORY_LIMIT)
+        Self::from_bytes_inner(wasm_bytes, router, db_bridge, session_store, None, memory_limit_from_env())
     }
 
     /// Internal loader that carries the optional source path for error reporting.
@@ -910,9 +968,9 @@ impl WasmInstance {
         debug!("Calling handler: {}", handler_name);
 
         if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
-            let result_ptr = handler.call(&mut store, ()).map_err(|e| {
-                RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
-            })?;
+            let result_ptr = handler
+                .call(&mut store, ())
+                .map_err(|e| classify_handler_error(handler_name, e))?;
 
             let result =
                 crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?;
@@ -963,9 +1021,9 @@ impl WasmInstance {
         debug!("Calling handler with auth: {}", handler_name);
 
         let result = if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
-            let result_ptr = handler.call(&mut store, ()).map_err(|e| {
-                RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, e))
-            })?;
+            let result_ptr = handler
+                .call(&mut store, ())
+                .map_err(|e| classify_handler_error(handler_name, e))?;
 
             // When the handler signalled a redirect via `_http_redirect` /
             // `_res_redirect`, its i32 return value is not guaranteed to be a
