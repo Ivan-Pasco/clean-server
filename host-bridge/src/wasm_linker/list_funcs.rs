@@ -16,11 +16,37 @@
 
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use tracing::{debug, error};
 use wasmtime::{Caller, Linker};
 
 const LIST_HEADER_SIZE: usize = 16;
 const F64_SIZE: usize = 8;
+
+// Handle-based list store (mirrors clean-node-server/src/bridge/list.ts).
+// Distinct from the memory-backed list<T> used by list.push_f64.
+thread_local! {
+    static LIST_STORE: RefCell<HashMap<i32, Vec<i32>>> = RefCell::new(HashMap::new());
+    static NEXT_LIST_HANDLE: RefCell<i32> = const { RefCell::new(1) };
+}
+
+/// Reset the thread-local list store. Call between requests.
+pub fn reset_list_store() {
+    LIST_STORE.with(|s| s.borrow_mut().clear());
+    NEXT_LIST_HANDLE.with(|n| *n.borrow_mut() = 1);
+}
+
+fn new_list_handle(initial: Vec<i32>) -> i32 {
+    let handle = NEXT_LIST_HANDLE.with(|n| {
+        let mut v = n.borrow_mut();
+        let h = *v;
+        *v = v.checked_add(1).unwrap_or(1);
+        h
+    });
+    LIST_STORE.with(|s| s.borrow_mut().insert(handle, initial));
+    handle
+}
 
 /// Register all list functions with the linker
 pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
@@ -87,6 +113,108 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             list_ptr
         },
     )?;
+
+    // =========================================
+    // Handle-based list ops (parity with clean-node-server/src/bridge/list.ts)
+    // These take an i32 handle, NOT a WASM memory pointer.
+    // =========================================
+
+    // list.allocate(capacity_hint) -> handle
+    linker.func_wrap("env", "list.allocate",
+        |_: Caller<'_, S>, capacity: i32| -> i32 {
+            let cap = capacity.max(0) as usize;
+            new_list_handle(Vec::with_capacity(cap))
+        })?;
+
+    // list.add(handle, value) -> void  (alias of push)
+    linker.func_wrap("env", "list.add",
+        |_: Caller<'_, S>, handle: i32, value: i32| {
+            LIST_STORE.with(|s| {
+                if let Some(v) = s.borrow_mut().get_mut(&handle) {
+                    v.push(value);
+                }
+            });
+        })?;
+
+    // list.push(handle, value) -> void
+    linker.func_wrap("env", "list.push",
+        |_: Caller<'_, S>, handle: i32, value: i32| {
+            LIST_STORE.with(|s| {
+                if let Some(v) = s.borrow_mut().get_mut(&handle) {
+                    v.push(value);
+                }
+            });
+        })?;
+
+    // list.clear(handle) -> void
+    linker.func_wrap("env", "list.clear",
+        |_: Caller<'_, S>, handle: i32| {
+            LIST_STORE.with(|s| {
+                if let Some(v) = s.borrow_mut().get_mut(&handle) {
+                    v.clear();
+                }
+            });
+        })?;
+
+    // list.contains(handle, value) -> boolean
+    linker.func_wrap("env", "list.contains",
+        |_: Caller<'_, S>, handle: i32, value: i32| -> i32 {
+            LIST_STORE.with(|s| {
+                match s.borrow().get(&handle) {
+                    Some(v) if v.contains(&value) => 1,
+                    _ => 0,
+                }
+            })
+        })?;
+
+    // list.get(handle, index) -> i32 (0 on OOB/invalid)
+    linker.func_wrap("env", "list.get",
+        |_: Caller<'_, S>, handle: i32, idx: i32| -> i32 {
+            if idx < 0 { return 0; }
+            LIST_STORE.with(|s| {
+                s.borrow().get(&handle)
+                    .and_then(|v| v.get(idx as usize).copied())
+                    .unwrap_or(0)
+            })
+        })?;
+
+    // list.set(handle, index, value) -> void
+    linker.func_wrap("env", "list.set",
+        |_: Caller<'_, S>, handle: i32, idx: i32, value: i32| {
+            if idx < 0 { return; }
+            LIST_STORE.with(|s| {
+                if let Some(v) = s.borrow_mut().get_mut(&handle) {
+                    if (idx as usize) < v.len() {
+                        v[idx as usize] = value;
+                    }
+                }
+            });
+        })?;
+
+    // list.remove(handle, index) -> void
+    linker.func_wrap("env", "list.remove",
+        |_: Caller<'_, S>, handle: i32, idx: i32| {
+            if idx < 0 { return; }
+            LIST_STORE.with(|s| {
+                if let Some(v) = s.borrow_mut().get_mut(&handle) {
+                    if (idx as usize) < v.len() {
+                        v.remove(idx as usize);
+                    }
+                }
+            });
+        })?;
+
+    // list.isEmpty(handle) -> boolean
+    linker.func_wrap("env", "list.isEmpty",
+        |_: Caller<'_, S>, handle: i32| -> i32 {
+            LIST_STORE.with(|s| {
+                match s.borrow().get(&handle) {
+                    Some(v) if v.is_empty() => 1,
+                    Some(_) => 0,
+                    None => 1,  // invalid handle treated as empty
+                }
+            })
+        })?;
 
     Ok(())
 }

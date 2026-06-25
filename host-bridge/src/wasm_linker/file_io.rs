@@ -11,6 +11,7 @@
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
 use super::helpers::{read_raw_string, write_string_to_caller};
+use base64::Engine as _;
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use std::fs;
@@ -231,6 +232,119 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             append_file_with_parents(&path, &content)
         },
     )?;
+
+    // =========================================
+    // FILE EXTRAS (registry hosts = ["server"])
+    // =========================================
+
+    // file_size(string) -> i32 — bytes, -1 on error
+    linker.func_wrap("env", "file_size",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, p, l) { Some(s) => s, None => return -1 };
+            match fs::metadata(&path) {
+                Ok(m) => m.len() as i32,
+                Err(_) => -1,
+            }
+        })?;
+
+    // file_list_dir(string) -> ptr (LP string with JSON array of names)
+    linker.func_wrap("env", "file_list_dir",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, "[]"),
+            };
+            let names: Vec<String> = match fs::read_dir(&path) {
+                Ok(rd) => rd.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
+            write_string_to_caller(&mut caller, &json)
+        })?;
+
+    // file_mkdir(string) -> i32 (1 on success, 0 on failure) — creates intermediates
+    linker.func_wrap("env", "file_mkdir",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, p, l) { Some(s) => s, None => return 0 };
+            if fs::create_dir_all(&path).is_ok() { 1 } else { 0 }
+        })?;
+
+    // file_copy(string, string) -> i32
+    linker.func_wrap("env", "file_copy",
+        |mut caller: Caller<'_, S>, sp: i32, sl: i32, dp: i32, dl: i32| -> i32 {
+            let src = match read_raw_string(&mut caller, sp, sl) { Some(s) => s, None => return 0 };
+            let dst = match read_raw_string(&mut caller, dp, dl) { Some(s) => s, None => return 0 };
+            if let Err(e) = ensure_parent_dir(&dst) {
+                error!("file_copy: parent dir for '{}': {}", dst, e);
+                return 0;
+            }
+            if fs::copy(&src, &dst).is_ok() { 1 } else { 0 }
+        })?;
+
+    // file_rename(string, string) -> i32
+    linker.func_wrap("env", "file_rename",
+        |mut caller: Caller<'_, S>, sp: i32, sl: i32, dp: i32, dl: i32| -> i32 {
+            let src = match read_raw_string(&mut caller, sp, sl) { Some(s) => s, None => return 0 };
+            let dst = match read_raw_string(&mut caller, dp, dl) { Some(s) => s, None => return 0 };
+            if let Err(e) = ensure_parent_dir(&dst) {
+                error!("file_rename: parent dir for '{}': {}", dst, e);
+                return 0;
+            }
+            if fs::rename(&src, &dst).is_ok() { 1 } else { 0 }
+        })?;
+
+    // file_is_directory(string) -> boolean
+    linker.func_wrap("env", "file_is_directory",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, p, l) { Some(s) => s, None => return 0 };
+            if Path::new(&path).is_dir() { 1 } else { 0 }
+        })?;
+
+    // file_read_binary(string) -> ptr — base64-encoded file contents in an LP string
+    linker.func_wrap("env", "file_read_binary",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let bytes = match fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("file_read_binary: '{}': {}", path, e);
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            write_string_to_caller(&mut caller, &encoded)
+        })?;
+
+    // file_write_binary(string, string) -> i32 — second string is base64 of bytes to write
+    linker.func_wrap("env", "file_write_binary",
+        |mut caller: Caller<'_, S>, pp: i32, pl: i32, bp: i32, bl: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, pp, pl) { Some(s) => s, None => return 0 };
+            let b64 = match read_raw_string(&mut caller, bp, bl) { Some(s) => s, None => return 0 };
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("file_write_binary: base64 decode failed for '{}': {}", path, e);
+                    return 0;
+                }
+            };
+            if let Err(e) = ensure_parent_dir(&path) {
+                error!("file_write_binary: parent for '{}': {}", path, e);
+                return 0;
+            }
+            if fs::write(&path, &bytes).is_ok() { 1 } else { 0 }
+        })?;
+
+    // file_rmdir(string) -> i32 — recursive removal
+    linker.func_wrap("env", "file_rmdir",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, p, l) { Some(s) => s, None => return 0 };
+            if fs::remove_dir_all(&path).is_ok() { 1 } else { 0 }
+        })?;
 
     Ok(())
 }

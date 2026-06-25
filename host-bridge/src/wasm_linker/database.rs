@@ -19,8 +19,18 @@ use super::helpers::{read_raw_string, write_string_to_caller};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use serde_json::json;
+use std::cell::RefCell;
 use tracing::{debug, error};
 use wasmtime::{Caller, Linker};
+
+// Per-thread cache for `_db_*_async` fire-and-forget pattern.
+// Rust drivers (sqlx) are inherently async-capable via block_on, so the "async"
+// variants delegate to the existing sync impls and cache the result for the
+// matching `*_result` getter. See HOST_BRIDGE.md § DB Async.
+thread_local! {
+    static LAST_QUERY_RESULT_JSON: RefCell<String> = RefCell::new(String::new());
+    static LAST_EXECUTE_AFFECTED: RefCell<i32> = const { RefCell::new(0) };
+}
 
 /// Match `SELECT [<expr>] LAST_INSERT_ID()` / `SELECT [<expr>] LAST_INSERT_ROWID()`
 /// (with an optional `AS <alias>`) and return the alias column name to use in the
@@ -1069,6 +1079,103 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             }
         },
     )?;
+
+    // =========================================
+    // DB ASYNC EXTRAS (Phase 2)
+    //
+    // node-server's Postgres driver is async-only, so it splits each query
+    // into "fire" (start) and "result" (collect) host calls. Rust drivers
+    // (sqlx) are sync-capable via block_on, so the "async" variant just
+    // runs the same sync path and caches the result for the matching getter.
+    // See HOST_BRIDGE.md § DB Async.
+    // =========================================
+
+    // _db_connected() -> boolean
+    linker.func_wrap("env", "_db_connected",
+        |caller: Caller<'_, S>| -> i32 {
+            if caller.data().db_bridge().is_some() { 1 } else { 0 }
+        })?;
+
+    // _db_query_async(sql, params) -> void  — runs sync, caches into thread_local
+    linker.func_wrap("env", "_db_query_async",
+        |mut caller: Caller<'_, S>, sp: i32, sl: i32, pp: i32, pl: i32| {
+            let sql = read_raw_string(&mut caller, sp, sl).unwrap_or_default();
+            let params_json = if pl > 0 {
+                read_raw_string(&mut caller, pp, pl).unwrap_or_else(|| "[]".to_string())
+            } else {
+                "[]".to_string()
+            };
+            let db_bridge = match caller.data().db_bridge() {
+                Some(db) => db,
+                None => {
+                    LAST_QUERY_RESULT_JSON.with(|c| *c.borrow_mut() = r#"{"ok":false,"err":{"code":"NO_DB","message":"No database configured"}}"#.to_string());
+                    return;
+                }
+            };
+            let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).unwrap_or_default();
+            let sql_upper = sql.trim_start().to_uppercase();
+            let method = if sql_upper.starts_with("INSERT") || sql_upper.starts_with("UPDATE")
+                || sql_upper.starts_with("DELETE") || sql_upper.starts_with("CREATE")
+                || sql_upper.starts_with("DROP") || sql_upper.starts_with("ALTER")
+                || sql_upper.starts_with("TRUNCATE") || sql_upper.starts_with("REPLACE")
+            { "execute" } else { "query" };
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut bridge = db_bridge.write().await;
+                    bridge.call(method, json!({"sql": sql, "params": params})).await
+                })
+            });
+            let s = match result {
+                Ok(v) => v.to_string(),
+                Err(e) => json!({"ok":false,"err":{"code":"DB_ERROR","message":e.to_string()}}).to_string(),
+            };
+            LAST_QUERY_RESULT_JSON.with(|c| *c.borrow_mut() = s);
+        })?;
+
+    // _db_query_result() -> ptr (last cached query JSON)
+    linker.func_wrap("env", "_db_query_result",
+        |mut caller: Caller<'_, S>| -> i32 {
+            let s = LAST_QUERY_RESULT_JSON.with(|c| c.borrow().clone());
+            write_string_to_caller(&mut caller, &s)
+        })?;
+
+    // _db_execute_async(sql, params) -> void — runs sync, caches affected_rows
+    linker.func_wrap("env", "_db_execute_async",
+        |mut caller: Caller<'_, S>, sp: i32, sl: i32, pp: i32, pl: i32| {
+            let sql = read_raw_string(&mut caller, sp, sl).unwrap_or_default();
+            let params_json = if pl > 0 {
+                read_raw_string(&mut caller, pp, pl).unwrap_or_else(|| "[]".to_string())
+            } else {
+                "[]".to_string()
+            };
+            let db_bridge = match caller.data().db_bridge() {
+                Some(db) => db,
+                None => {
+                    LAST_EXECUTE_AFFECTED.with(|c| *c.borrow_mut() = -1);
+                    return;
+                }
+            };
+            let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).unwrap_or_default();
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut bridge = db_bridge.write().await;
+                    bridge.call("execute", json!({"sql": sql, "params": params})).await
+                })
+            });
+            let affected: i32 = match result {
+                Ok(v) => v.get("data")
+                    .and_then(|d| d.get("affected_rows"))
+                    .and_then(|n| n.as_i64()).map(|n| n as i32).unwrap_or(0),
+                Err(_) => -1,
+            };
+            LAST_EXECUTE_AFFECTED.with(|c| *c.borrow_mut() = affected);
+        })?;
+
+    // _db_execute_result() -> i32 (last cached affected_rows)
+    linker.func_wrap("env", "_db_execute_result",
+        |_: Caller<'_, S>| -> i32 {
+            LAST_EXECUTE_AFFECTED.with(|c| *c.borrow())
+        })?;
 
     Ok(())
 }

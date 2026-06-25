@@ -18,11 +18,13 @@ use super::helpers::{read_raw_string, write_string_to_caller};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use crate::CryptoBridge;
+use aes_gcm::{aead::Aead, Aes256Gcm, Nonce};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
+use md5::{Digest as Md5Digest, Md5};
 use rand::RngCore;
 use serde_json::json;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Sha256, Sha512};
 use tracing::{debug, error};
 use wasmtime::{Caller, Linker};
 
@@ -433,6 +435,148 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             }
         },
     )?;
+
+    // =========================================
+    // CRYPTO EXTRAS (Phase 2)
+    // =========================================
+
+    // _crypto_uuid() -> ptr (RFC 4122 v4)
+    linker.func_wrap("env", "_crypto_uuid", |mut caller: Caller<'_, S>| -> i32 {
+        write_string_to_caller(&mut caller, &uuid::Uuid::new_v4().to_string())
+    })?;
+
+    // _crypto_hash_md5(string) -> ptr (hex digest)
+    linker.func_wrap("env", "_crypto_hash_md5",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let s = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let mut h = Md5::new();
+            h.update(s.as_bytes());
+            let digest = h.finalize();
+            let hex = digest.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            write_string_to_caller(&mut caller, &hex)
+        })?;
+
+    // _crypto_hmac_sha256(key, data) -> ptr (hex)
+    linker.func_wrap("env", "_crypto_hmac_sha256",
+        |mut caller: Caller<'_, S>, kp: i32, kl: i32, dp: i32, dl: i32| -> i32 {
+            let key = read_raw_string(&mut caller, kp, kl).unwrap_or_default();
+            let data = read_raw_string(&mut caller, dp, dl).unwrap_or_default();
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("_crypto_hmac_sha256: invalid key: {}", e);
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+            mac.update(data.as_bytes());
+            let result = mac.finalize().into_bytes();
+            let hex = result.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            write_string_to_caller(&mut caller, &hex)
+        })?;
+
+    // _crypto_random_base64(n) -> ptr — N random bytes as base64
+    linker.func_wrap("env", "_crypto_random_base64",
+        |mut caller: Caller<'_, S>, n: i32| -> i32 {
+            let n = n.max(0).min(1 << 16) as usize;
+            let mut bytes = vec![0u8; n];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            write_string_to_caller(&mut caller, &BASE64.encode(&bytes))
+        })?;
+
+    // _crypto_base64_encode(string) -> ptr (utf-8 bytes -> base64)
+    linker.func_wrap("env", "_crypto_base64_encode",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let s = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            write_string_to_caller(&mut caller, &BASE64.encode(s.as_bytes()))
+        })?;
+
+    // _crypto_base64_decode(string) -> ptr (base64 -> utf-8; empty on invalid)
+    linker.func_wrap("env", "_crypto_base64_decode",
+        |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
+            let s = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let bytes = match BASE64.decode(s.as_bytes()) {
+                Ok(b) => b,
+                Err(_) => return write_string_to_caller(&mut caller, ""),
+            };
+            let out = String::from_utf8(bytes).unwrap_or_default();
+            write_string_to_caller(&mut caller, &out)
+        })?;
+
+    // _crypto_encrypt_aes(key, plaintext) -> ptr (JSON {iv, tag, data} each base64)
+    // Key is taken as raw key material; if shorter than 32 bytes, padded with zeros;
+    // if longer, truncated. AES-256-GCM gives a 16-byte tag bundled with the ciphertext.
+    linker.func_wrap("env", "_crypto_encrypt_aes",
+        |mut caller: Caller<'_, S>, kp: i32, kl: i32, pp: i32, pl: i32| -> i32 {
+            let key = read_raw_string(&mut caller, kp, kl).unwrap_or_default();
+            let plaintext = read_raw_string(&mut caller, pp, pl).unwrap_or_default();
+
+            let mut key_buf = [0u8; 32];
+            let kb = key.as_bytes();
+            let copy_len = kb.len().min(32);
+            key_buf[..copy_len].copy_from_slice(&kb[..copy_len]);
+
+            let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key_buf).expect("32-byte key");
+            let mut iv_buf = [0u8; 12];
+            rand::thread_rng().fill_bytes(&mut iv_buf);
+            let nonce = Nonce::from_slice(&iv_buf);
+
+            let ciphertext = match cipher.encrypt(nonce, plaintext.as_bytes()) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("_crypto_encrypt_aes: {}", e);
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+            // GCM tags are the last 16 bytes of the output
+            let split = ciphertext.len().saturating_sub(16);
+            let (data, tag) = ciphertext.split_at(split);
+            let payload = json!({
+                "iv": BASE64.encode(iv_buf),
+                "tag": BASE64.encode(tag),
+                "data": BASE64.encode(data),
+            });
+            write_string_to_caller(&mut caller, &payload.to_string())
+        })?;
+
+    // _crypto_decrypt_aes(key, json) -> ptr (decrypted UTF-8; empty on tag mismatch)
+    linker.func_wrap("env", "_crypto_decrypt_aes",
+        |mut caller: Caller<'_, S>, kp: i32, kl: i32, jp: i32, jl: i32| -> i32 {
+            let key = read_raw_string(&mut caller, kp, kl).unwrap_or_default();
+            let json_str = read_raw_string(&mut caller, jp, jl).unwrap_or_default();
+            let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
+                Ok(v) => v,
+                Err(_) => return write_string_to_caller(&mut caller, ""),
+            };
+            let iv_b64 = parsed.get("iv").and_then(|v| v.as_str()).unwrap_or("");
+            let tag_b64 = parsed.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+            let data_b64 = parsed.get("data").and_then(|v| v.as_str()).unwrap_or("");
+
+            let iv = match BASE64.decode(iv_b64) { Ok(b) => b, Err(_) => return write_string_to_caller(&mut caller, "") };
+            if iv.len() != 12 {
+                return write_string_to_caller(&mut caller, "");
+            }
+            let tag = match BASE64.decode(tag_b64) { Ok(b) => b, Err(_) => return write_string_to_caller(&mut caller, "") };
+            let data = match BASE64.decode(data_b64) { Ok(b) => b, Err(_) => return write_string_to_caller(&mut caller, "") };
+
+            let mut ciphertext = data;
+            ciphertext.extend_from_slice(&tag);
+
+            let mut key_buf = [0u8; 32];
+            let kb = key.as_bytes();
+            let copy_len = kb.len().min(32);
+            key_buf[..copy_len].copy_from_slice(&kb[..copy_len]);
+            let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key_buf).expect("32-byte key");
+            let nonce = Nonce::from_slice(&iv);
+
+            match cipher.decrypt(nonce, ciphertext.as_ref()) {
+                Ok(plain) => {
+                    let s = String::from_utf8(plain).unwrap_or_default();
+                    write_string_to_caller(&mut caller, &s)
+                }
+                Err(_) => write_string_to_caller(&mut caller, ""),
+            }
+        })?;
 
     Ok(())
 }

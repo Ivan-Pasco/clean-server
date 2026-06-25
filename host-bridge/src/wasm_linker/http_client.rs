@@ -590,6 +590,25 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // http_get_response_header(name) -> ptr — single header value, case-insensitive, "" if absent
+    linker.func_wrap(
+        "env",
+        "http_get_response_header",
+        |mut caller: Caller<'_, S>, name_ptr: i32, name_len: i32| -> i32 {
+            let name = read_raw_string(&mut caller, name_ptr, name_len).unwrap_or_default();
+            let lname = name.to_ascii_lowercase();
+            let headers_json = HTTP_LAST_RESPONSE.with(|last| last.borrow().headers_json.clone());
+            let value = match serde_json::from_str::<serde_json::Value>(&headers_json) {
+                Ok(serde_json::Value::Object(map)) => map.iter()
+                    .find(|(k, _)| k.to_ascii_lowercase() == lname)
+                    .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            write_string_to_caller(&mut caller, &value)
+        },
+    )?;
+
     // http_get_response_body - Return body string from the last HTTP response
     linker.func_wrap(
         "env",

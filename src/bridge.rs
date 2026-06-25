@@ -97,6 +97,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_locale_functions(&mut linker)?;
     crate::bridge_canvas_stubs::register_canvas_stubs(&mut linker)?;
     crate::bridge_ui_stubs::register_ui_stubs(&mut linker)?;
+    crate::bridge_browser_stubs::register_browser_stubs(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
     // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
@@ -114,6 +115,39 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
 #[inline]
 fn check_bridge_permission(caller: &Caller<'_, WasmState>, func_name: &str) -> bool {
     caller.data().permission_gate.check(func_name)
+}
+
+/// Resolve the active session id for the current request: auth context first,
+/// then the `session` / `sid` cookie. Used by every session/auth bridge that
+/// implicitly addresses the caller's session.
+fn current_session_id(state: &WasmState) -> Option<String> {
+    state
+        .auth_context
+        .as_ref()
+        .and_then(|ctx| ctx.session_id.clone())
+        .or_else(|| {
+            state.request_context.as_ref().and_then(|ctx| {
+                ctx.headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                    .and_then(|(_, cookie_header)| {
+                        let cookies = parse_cookies(cookie_header);
+                        cookies
+                            .get("session")
+                            .cloned()
+                            .or_else(|| cookies.get("sid").cloned())
+                    })
+            })
+        })
+}
+
+/// Format a JSON error body matching node-server's `{ok:false, err:{code, message}}` shape.
+fn err_body(code: &str, message: &str) -> String {
+    serde_json::json!({
+        "ok": false,
+        "err": {"code": code, "message": message}
+    })
+    .to_string()
 }
 
 /// Register HTTP server functions (_http_listen, _http_route, _http_route_protected, _http_serve_static)
@@ -732,6 +766,173 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_ip: {}", e)))?;
+
+    // =========================================
+    // PHASE 3 REQUEST CONTEXT EXTRAS
+    // =========================================
+
+    // _req_params() -> ptr (JSON map of path params)
+    register_bridge_fn!(linker, "_req_params",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let json = caller.data().request_context.as_ref()
+                .map(|ctx| serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string()))
+                .unwrap_or_else(|| "{}".to_string());
+            write_string_to_caller(&mut caller, &json)
+        }
+    );
+
+    // _req_queries() -> ptr (JSON map of query params)
+    register_bridge_fn!(linker, "_req_queries",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let json = caller.data().request_context.as_ref()
+                .map(|ctx| serde_json::to_string(&ctx.query).unwrap_or_else(|_| "{}".to_string()))
+                .unwrap_or_else(|| "{}".to_string());
+            write_string_to_caller(&mut caller, &json)
+        }
+    );
+
+    // _req_cookies() -> ptr (JSON map parsed from Cookie header)
+    register_bridge_fn!(linker, "_req_cookies",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let json = caller.data().request_context.as_ref()
+                .and_then(|ctx| {
+                    ctx.headers.iter()
+                        .find(|(k, _)| k.to_lowercase() == "cookie")
+                        .map(|(_, v)| parse_cookies(v))
+                })
+                .map(|m| serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string()))
+                .unwrap_or_else(|| "{}".to_string());
+            write_string_to_caller(&mut caller, &json)
+        }
+    );
+
+    // _req_json() -> ptr — body if Content-Type contains application/json, "" otherwise
+    register_bridge_fn!(linker, "_req_json",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let body = caller.data().request_context.as_ref()
+                .and_then(|ctx| {
+                    let is_json = ctx.headers.iter()
+                        .find(|(k, _)| k.to_lowercase() == "content-type")
+                        .map(|(_, v)| v.to_lowercase().contains("application/json"))
+                        .unwrap_or(false);
+                    if is_json { Some(ctx.body.clone()) } else { None }
+                })
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &body)
+        }
+    );
+
+    // _req_is_json() -> boolean
+    register_bridge_fn!(linker, "_req_is_json",
+        |caller: Caller<'_, WasmState>| -> i32 {
+            let is_json = caller.data().request_context.as_ref()
+                .map(|ctx| {
+                    ctx.headers.iter()
+                        .find(|(k, _)| k.to_lowercase() == "content-type")
+                        .map(|(_, v)| v.to_lowercase().contains("application/json"))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if is_json { 1 } else { 0 }
+        }
+    );
+
+    // _req_content_type() -> ptr
+    register_bridge_fn!(linker, "_req_content_type",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let v = caller.data().request_context.as_ref()
+                .and_then(|ctx| {
+                    ctx.headers.iter()
+                        .find(|(k, _)| k.to_lowercase() == "content-type")
+                        .map(|(_, val)| val.clone())
+                })
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &v)
+        }
+    );
+
+    // _req_auth_token() -> ptr — Bearer token without "Bearer " prefix
+    register_bridge_fn!(linker, "_req_auth_token",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let v = caller.data().request_context.as_ref()
+                .and_then(|ctx| {
+                    ctx.headers.iter()
+                        .find(|(k, _)| k.to_lowercase() == "authorization")
+                        .map(|(_, val)| val.clone())
+                })
+                .map(|val| {
+                    let trimmed = val.trim();
+                    if let Some(rest) = trimmed.strip_prefix("Bearer ") {
+                        rest.trim().to_string()
+                    } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
+                        rest.trim().to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &v)
+        }
+    );
+
+    // _req_has_auth() -> boolean (Authorization header present and non-empty)
+    register_bridge_fn!(linker, "_req_has_auth",
+        |caller: Caller<'_, WasmState>| -> i32 {
+            let has = caller.data().request_context.as_ref()
+                .map(|ctx| {
+                    ctx.headers.iter()
+                        .any(|(k, v)| k.to_lowercase() == "authorization" && !v.is_empty())
+                })
+                .unwrap_or(false);
+            if has { 1 } else { 0 }
+        }
+    );
+
+    // _req_has_header(name) -> boolean (case-insensitive)
+    register_bridge_fn!(linker, "_req_has_header",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s.to_lowercase(),
+                None => return 0,
+            };
+            let has = caller.data().request_context.as_ref()
+                .map(|ctx| ctx.headers.iter().any(|(k, _)| k.to_lowercase() == name))
+                .unwrap_or(false);
+            if has { 1 } else { 0 }
+        }
+    );
+
+    // _req_has_query(name) -> boolean
+    register_bridge_fn!(linker, "_req_has_query",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let has = caller.data().request_context.as_ref()
+                .map(|ctx| ctx.query.contains_key(&name))
+                .unwrap_or(false);
+            if has { 1 } else { 0 }
+        }
+    );
+
+    // _req_has_cookie(name) -> boolean
+    register_bridge_fn!(linker, "_req_has_cookie",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let name = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let has = caller.data().request_context.as_ref()
+                .and_then(|ctx| {
+                    ctx.headers.iter()
+                        .find(|(k, _)| k.to_lowercase() == "cookie")
+                        .map(|(_, v)| parse_cookies(v).contains_key(&name))
+                })
+                .unwrap_or(false);
+            if has { 1 } else { 0 }
+        }
+    );
 
     Ok(())
 }
@@ -1455,7 +1656,342 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_user_role: {}", e)))?;
 
+    // =========================================
+    // PHASE 3 AUTH EXTRAS
+    // =========================================
+
+    // _auth_check() -> boolean
+    register_bridge_fn!(linker, "_auth_check",
+        |caller: Caller<'_, WasmState>| -> i32 {
+            if caller.data().auth_context.is_some() { 1 } else { 0 }
+        }
+    );
+
+    // _auth_user() -> ptr — JSON {id, role, claims} or ""
+    register_bridge_fn!(linker, "_auth_user",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let sid = match current_session_id(caller.data()) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let session_store = caller.data().session_store.clone();
+            let session = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.get(&sid)
+            };
+            let payload = match session {
+                Some(sd) => {
+                    let claims: serde_json::Value = serde_json::from_str(&sd.claims)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    serde_json::json!({
+                        "id": sd.user_id,
+                        "role": sd.role,
+                        "claims": claims,
+                    })
+                    .to_string()
+                }
+                None => match &caller.data().auth_context {
+                    Some(a) => serde_json::json!({
+                        "id": a.user_id,
+                        "role": a.role,
+                        "claims": {},
+                    }).to_string(),
+                    None => String::new(),
+                },
+            };
+            write_string_to_caller(&mut caller, &payload)
+        }
+    );
+
+    // _auth_is_admin() -> boolean
+    register_bridge_fn!(linker, "_auth_is_admin",
+        |caller: Caller<'_, WasmState>| -> i32 {
+            match &caller.data().auth_context {
+                Some(a) if a.role == "admin" => 1,
+                _ => 0,
+            }
+        }
+    );
+
+    // _auth_is_owner(user_id) -> boolean — auth.user_id == arg OR is_admin
+    register_bridge_fn!(linker, "_auth_is_owner",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let arg = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return 0,
+            };
+            match &caller.data().auth_context {
+                Some(a) if a.role == "admin" => 1,
+                Some(a) => {
+                    let parsed = arg.trim().parse::<i32>().ok();
+                    match parsed {
+                        Some(id) if id == a.user_id => 1,
+                        // Allow string match too (in case the resource id is a string).
+                        _ => if arg == a.user_id.to_string() { 1 } else { 0 },
+                    }
+                }
+                _ => 0,
+            }
+        }
+    );
+
+    // _auth_require_any_role(roles_json) -> boolean
+    register_bridge_fn!(linker, "_auth_require_any_role",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let roles_json = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let roles: Vec<String> = serde_json::from_str(&roles_json).unwrap_or_default();
+            match &caller.data().auth_context {
+                Some(a) if a.role == "admin" => 1,
+                Some(a) if roles.iter().any(|r| r == &a.role) => 1,
+                _ => 0,
+            }
+        }
+    );
+
+    // =========================================
+    // PHASE 3 SESSION EXTRAS
+    // =========================================
+
+    // _session_create(user_id, role, claims_json) -> ptr (session id; sets cookie)
+    register_bridge_fn!(linker, "_session_create",
+        |mut caller: Caller<'_, WasmState>,
+         up: i32, ul: i32,
+         rp: i32, rl: i32,
+         cp: i32, cl: i32| -> i32 {
+            let user_id_str = read_raw_string(&mut caller, up, ul).unwrap_or_default();
+            let role = read_raw_string(&mut caller, rp, rl).unwrap_or_else(|| "user".to_string());
+            let claims = read_raw_string(&mut caller, cp, cl).unwrap_or_else(|| "{}".to_string());
+            let user_id: i32 = user_id_str.trim().parse().unwrap_or(0);
+
+            let session_store = caller.data().session_store.clone();
+            let session = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.create(user_id, &role, &claims)
+            };
+            let sid = session.session_id.clone();
+            let cookie = {
+                let store = session_store.read().expect("session store lock poisoned");
+                store.format_cookie(&sid)
+            };
+            caller.data_mut().pending_set_cookie = Some(cookie);
+            caller.data_mut().set_auth_from_session(user_id, role, sid.clone());
+            write_string_to_caller(&mut caller, &sid)
+        }
+    );
+
+    // _session_create_with_ttl(user_id, role, claims_json, ttl_seconds) -> ptr
+    register_bridge_fn!(linker, "_session_create_with_ttl",
+        |mut caller: Caller<'_, WasmState>,
+         up: i32, ul: i32,
+         rp: i32, rl: i32,
+         cp: i32, cl: i32,
+         ttl: i32| -> i32 {
+            let user_id_str = read_raw_string(&mut caller, up, ul).unwrap_or_default();
+            let role = read_raw_string(&mut caller, rp, rl).unwrap_or_else(|| "user".to_string());
+            let claims = read_raw_string(&mut caller, cp, cl).unwrap_or_else(|| "{}".to_string());
+            let user_id: i32 = user_id_str.trim().parse().unwrap_or(0);
+            let ttl = if ttl > 0 { ttl as u64 } else { 0 };
+
+            let session_store = caller.data().session_store.clone();
+            let session = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.create(user_id, &role, &claims)
+            };
+            let sid = session.session_id.clone();
+            // Take the default cookie format and substitute the Max-Age with the requested ttl.
+            let base = {
+                let store = session_store.read().expect("session store lock poisoned");
+                store.format_cookie(&sid)
+            };
+            let cookie = if ttl > 0 {
+                replace_cookie_max_age(&base, ttl)
+            } else {
+                base
+            };
+            caller.data_mut().pending_set_cookie = Some(cookie);
+            caller.data_mut().set_auth_from_session(user_id, role, sid.clone());
+            write_string_to_caller(&mut caller, &sid)
+        }
+    );
+
+    // _session_destroy() -> boolean
+    register_bridge_fn!(linker, "_session_destroy",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let sid = match current_session_id(caller.data()) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let session_store = caller.data().session_store.clone();
+            let removed = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.delete_raw(&sid)
+            };
+            let clear = {
+                let store = session_store.read().expect("session store lock poisoned");
+                store.format_clear_cookie()
+            };
+            caller.data_mut().pending_set_cookie = Some(clear);
+            caller.data_mut().auth_context = None;
+            if removed { 1 } else { 0 }
+        }
+    );
+
+    // _session_extend(ttl_seconds) -> boolean — touches session, refreshes cookie max-age
+    register_bridge_fn!(linker, "_session_extend",
+        |mut caller: Caller<'_, WasmState>, ttl: i32| -> i32 {
+            let sid = match current_session_id(caller.data()) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let session_store = caller.data().session_store.clone();
+            let exists = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.get(&sid).is_some() || store.get_raw(&sid).is_some()
+            };
+            if !exists {
+                return 0;
+            }
+            let base = {
+                let store = session_store.read().expect("session store lock poisoned");
+                store.format_cookie(&sid)
+            };
+            let cookie = if ttl > 0 {
+                replace_cookie_max_age(&base, ttl as u64)
+            } else {
+                base
+            };
+            caller.data_mut().pending_set_cookie = Some(cookie);
+            1
+        }
+    );
+
+    // _session_user_id() -> ptr (string of current user's id, "" if none)
+    register_bridge_fn!(linker, "_session_user_id",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let v = caller.data().auth_context.as_ref()
+                .map(|a| a.user_id.to_string())
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &v)
+        }
+    );
+
+    // _session_role() -> ptr
+    register_bridge_fn!(linker, "_session_role",
+        |mut caller: Caller<'_, WasmState>| -> i32 {
+            let v = caller.data().auth_context.as_ref()
+                .map(|a| a.role.clone())
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &v)
+        }
+    );
+
+    // _session_claim(key) -> ptr — single claim from the typed session's claims JSON
+    register_bridge_fn!(linker, "_session_claim",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let key = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let sid = match current_session_id(caller.data()) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let session_store = caller.data().session_store.clone();
+            let session = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.get(&sid)
+            };
+            let value = session.and_then(|sd| {
+                serde_json::from_str::<serde_json::Value>(&sd.claims).ok()
+                    .and_then(|v| v.get(&key).cloned())
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s,
+                        serde_json::Value::Null => String::new(),
+                        other => other.to_string(),
+                    })
+            }).unwrap_or_default();
+            write_string_to_caller(&mut caller, &value)
+        }
+    );
+
+    // _session_get_value(key) -> ptr — value previously stored via _session_store (key=value JSON)
+    register_bridge_fn!(linker, "_session_get_value",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let key = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let sid = match current_session_id(caller.data()) {
+                Some(s) => s,
+                None => return write_string_to_caller(&mut caller, ""),
+            };
+            let session_store = caller.data().session_store.clone();
+            let raw = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.get_raw(&sid)
+            };
+            let value = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get(&key).cloned())
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Null => String::new(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &value)
+        }
+    );
+
+    // _session_has_key(key) -> boolean
+    register_bridge_fn!(linker, "_session_has_key",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
+            let key = match read_raw_string(&mut caller, p, l) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let sid = match current_session_id(caller.data()) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let session_store = caller.data().session_store.clone();
+            let raw = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.get_raw(&sid)
+            };
+            let present = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .map(|v| v.get(&key).is_some())
+                .unwrap_or(false);
+            if present { 1 } else { 0 }
+        }
+    );
+
     Ok(())
+}
+
+/// Replace the `Max-Age=<n>` directive in a Set-Cookie string with a new value.
+/// If no `Max-Age` is present, append one. Used by `_session_create_with_ttl`
+/// and `_session_extend` to override the session-store-default lifetime.
+fn replace_cookie_max_age(cookie: &str, ttl_seconds: u64) -> String {
+    let needle_lower = "max-age=";
+    let lower = cookie.to_ascii_lowercase();
+    if let Some(start) = lower.find(needle_lower) {
+        // Find the end of the existing Max-Age value (next `;` or end of string).
+        let val_start = start + needle_lower.len();
+        let end = cookie[val_start..]
+            .find(|c| c == ';' || c == ' ')
+            .map(|off| val_start + off)
+            .unwrap_or(cookie.len());
+        let mut out = String::with_capacity(cookie.len() + 8);
+        out.push_str(&cookie[..val_start]);
+        out.push_str(&ttl_seconds.to_string());
+        out.push_str(&cookie[end..]);
+        out
+    } else {
+        format!("{}; Max-Age={}", cookie.trim_end_matches(';'), ttl_seconds)
+    }
 }
 
 /// Register response manipulation functions (_res_set_header, _res_redirect)
@@ -1729,6 +2265,123 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             };
             debug!("_res_download: Content-Disposition: {}", value);
             caller.data_mut().add_header("Content-Disposition".to_string(), value);
+        }
+    );
+
+    // =========================================
+    // PHASE 3 RESPONSE EXTRAS
+    // =========================================
+
+    // _http_set_status(i32) -> void  (companion to _res_status; no header touch)
+    register_bridge_fn!(linker, "_http_set_status",
+        |mut caller: Caller<'_, WasmState>, code: i32| {
+            caller.data_mut().set_status(code as u16);
+        }
+    );
+
+    // _http_set_body(string) -> void  (raw body, no Content-Type touch)
+    register_bridge_fn!(linker, "_http_set_body",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            caller.data_mut().set_body(body);
+        }
+    );
+
+    // _http_json(string) -> void  (body + Content-Type: application/json)
+    register_bridge_fn!(linker, "_http_json",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let state = caller.data_mut();
+            state.add_header("Content-Type".to_string(), "application/json".to_string());
+            state.set_body(body);
+        }
+    );
+
+    // _http_html(string) -> void  (body + Content-Type: text/html; charset=utf-8)
+    register_bridge_fn!(linker, "_http_html",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let state = caller.data_mut();
+            state.add_header("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
+            state.set_body(body);
+        }
+    );
+
+    // _http_text(string) -> void  (body + Content-Type: text/plain; charset=utf-8)
+    register_bridge_fn!(linker, "_http_text",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let state = caller.data_mut();
+            state.add_header("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+            state.set_body(body);
+        }
+    );
+
+    // Status-coded JSON error helpers. All share the same {ok:false, err:{code, message}} shape.
+    register_bridge_fn!(linker, "_http_not_found",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let body = err_body("NOT_FOUND", &msg);
+            let state = caller.data_mut();
+            state.set_status(404);
+            state.add_header("Content-Type".to_string(), "application/json".to_string());
+            state.set_body(body);
+        }
+    );
+
+    register_bridge_fn!(linker, "_http_bad_request",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let body = err_body("BAD_REQUEST", &msg);
+            let state = caller.data_mut();
+            state.set_status(400);
+            state.add_header("Content-Type".to_string(), "application/json".to_string());
+            state.set_body(body);
+        }
+    );
+
+    register_bridge_fn!(linker, "_http_unauthorized",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let body = err_body("AUTH_ERROR", &msg);
+            let state = caller.data_mut();
+            state.set_status(401);
+            state.add_header("Content-Type".to_string(), "application/json".to_string());
+            state.set_body(body);
+        }
+    );
+
+    register_bridge_fn!(linker, "_http_forbidden",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let body = err_body("PERMISSION_DENIED", &msg);
+            let state = caller.data_mut();
+            state.set_status(403);
+            state.add_header("Content-Type".to_string(), "application/json".to_string());
+            state.set_body(body);
+        }
+    );
+
+    register_bridge_fn!(linker, "_http_server_error",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            let body = err_body("INTERNAL_ERROR", &msg);
+            let state = caller.data_mut();
+            state.set_status(500);
+            state.add_header("Content-Type".to_string(), "application/json".to_string());
+            state.set_body(body);
+        }
+    );
+
+    // _http_delete_cookie(name) -> void — clear cookie via max-age=0
+    register_bridge_fn!(linker, "_http_delete_cookie",
+        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
+            let name = read_raw_string(&mut caller, p, l).unwrap_or_default();
+            if name.is_empty() {
+                return;
+            }
+            let cookie = format!("{}=; Path=/; Max-Age=0; HttpOnly", name);
+            caller.data_mut().pending_set_cookie = Some(cookie);
         }
     );
 
@@ -4018,12 +4671,13 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
 
     // -----------------------------------------------------------------------
     // _ws_send — send a text message to a specific client
-    // Signature: (clientId: i32, msg_ptr: i32, msg_len: i32) -> void
+    // Signature: (clientId: i64, msg_ptr: i32, msg_len: i32) -> void
+    // (clientId is i64 per function-registry.toml.)
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
         "_ws_send",
-        |mut caller: Caller<'_, WasmState>, client_id: i32, msg_ptr: i32, msg_len: i32| {
+        |mut caller: Caller<'_, WasmState>, client_id: i64, msg_ptr: i32, msg_len: i32| {
             let message = match read_raw_string(&mut caller, msg_ptr, msg_len) {
                 Some(s) => s,
                 None => {
@@ -4035,7 +4689,7 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(websocket::ws_send(
                     &ws_state,
-                    client_id as i64,
+                    client_id,
                     message,
                 ))
             });
@@ -4078,29 +4732,29 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
 
     // -----------------------------------------------------------------------
     // _ws_close — close a specific client connection (code 1000)
-    // Signature: (clientId: i32) -> void
+    // Signature: (clientId: i64) -> void (per function-registry.toml)
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
         "_ws_close",
-        |caller: Caller<'_, WasmState>, client_id: i32| {
+        |caller: Caller<'_, WasmState>, client_id: i64| {
             let ws_state = caller.data().ws_state.clone();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
-                    .block_on(websocket::ws_close(&ws_state, client_id as i64))
+                    .block_on(websocket::ws_close(&ws_state, client_id))
             });
         }
     );
 
     // -----------------------------------------------------------------------
     // _ws_client_id — get the current WebSocket client ID from task-local context
-    // Signature: () -> i32
+    // Signature: () -> i64 (per function-registry.toml)
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
         "_ws_client_id",
-        |_caller: Caller<'_, WasmState>| -> i32 {
-            websocket::current_client_id() as i32
+        |_caller: Caller<'_, WasmState>| -> i64 {
+            websocket::current_client_id()
         }
     );
 
@@ -4119,12 +4773,13 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
 
     // -----------------------------------------------------------------------
     // _ws_room_join — add a client to a room
-    // Signature: (clientId: i32, room_ptr: i32, room_len: i32) -> void
+    // Signature: (clientId: i64, room_ptr: i32, room_len: i32) -> void
+    // (clientId is i64 per function-registry.toml.)
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
         "_ws_room_join",
-        |mut caller: Caller<'_, WasmState>, client_id: i32, room_ptr: i32, room_len: i32| {
+        |mut caller: Caller<'_, WasmState>, client_id: i64, room_ptr: i32, room_len: i32| {
             let room = match read_raw_string(&mut caller, room_ptr, room_len) {
                 Some(s) => s,
                 None => {
@@ -4135,19 +4790,20 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
             let ws_state = caller.data().ws_state.clone();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
-                    .block_on(websocket::ws_room_join(&ws_state, client_id as i64, room))
+                    .block_on(websocket::ws_room_join(&ws_state, client_id, room))
             });
         }
     );
 
     // -----------------------------------------------------------------------
     // _ws_room_leave — remove a client from a room
-    // Signature: (clientId: i32, room_ptr: i32, room_len: i32) -> void
+    // Signature: (clientId: i64, room_ptr: i32, room_len: i32) -> void
+    // (clientId is i64 per function-registry.toml.)
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
         "_ws_room_leave",
-        |mut caller: Caller<'_, WasmState>, client_id: i32, room_ptr: i32, room_len: i32| {
+        |mut caller: Caller<'_, WasmState>, client_id: i64, room_ptr: i32, room_len: i32| {
             let room = match read_raw_string(&mut caller, room_ptr, room_len) {
                 Some(s) => s,
                 None => {
@@ -4158,7 +4814,7 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
             let ws_state = caller.data().ws_state.clone();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
-                    .block_on(websocket::ws_room_leave(&ws_state, client_id as i64, &room))
+                    .block_on(websocket::ws_room_leave(&ws_state, client_id, &room))
             });
         }
     );
@@ -4722,14 +5378,15 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
 
     // -----------------------------------------------------------------------
     // _i18n_t_count — translate a key with plural form selection
-    // Signature: (key_ptr, key_len, count: i32, params_ptr, params_len) -> i32 (LP string)
+    // Signature: (key_ptr: i32, key_len: i32, count: i64, params_ptr: i32, params_len: i32) -> i32
+    // (count is i64 per function-registry.toml.)
     // -----------------------------------------------------------------------
     register_bridge_fn!(
         linker,
         "_i18n_t_count",
         |mut caller: Caller<'_, WasmState>,
          key_ptr: i32, key_len: i32,
-         count: i32,
+         count: i64,
          params_ptr: i32, params_len: i32| -> i32 {
             let key = match read_raw_string(&mut caller, key_ptr, key_len) {
                 Some(s) => s,
@@ -4747,7 +5404,7 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
                     } else {
                         active_locale.clone()
                     };
-                    state.translate_count(&key, count, &locale, &params)
+                    state.translate_count(&key, count as i32, &locale, &params)
                 })
             });
             write_string_to_caller(&mut caller, &result)
@@ -4943,7 +5600,20 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         // Test bridge aliases are registered by register_bridge_fn! macro in register_test_functions
         // WebSocket aliases (_ws_*) are registered by register_bridge_fn! macro in
         // register_websocket_functions — they do not need manual entries here.
-        // _http_ws_route has no dot alias per spec (registration-only function).
+        // Manual-registration dot aliases the auto-derive macro could not produce
+        // because these functions were declared with bare `func_wrap` (not the macro).
+        // Each is required by function-registry.toml.
+        ("_http_ws_route",       "http.ws_route"),
+        ("_job_register",        "job.register"),
+        ("_schedule_cron",       "schedule.cron"),
+        // Registry declares camelCase aliases for these (auto-derivation produces
+        // snake_case which doesn't match). Both forms remain valid via aliases.
+        ("_job_enqueue_at",      "job.enqueueAt"),
+        ("_job_enqueue_at",      "queue.enqueueAt"),
+        ("_job_current_id",      "job.currentId"),
+        ("_job_current_args",    "job.currentArgs"),
+        ("_job_current_attempt", "job.currentAttempt"),
+        ("_job_retry_after",     "job.retryAfter"),
         // Jobs — spec-defined aliases that differ from the auto-derived job.* forms.
         // register_bridge_fn! already creates: job.enqueue, job.enqueue_at, job.cancel,
         // job.status, job.result, job.current_id, job.current_args, job.current_attempt,
@@ -4961,20 +5631,26 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         // match the spec (job.retry_after, job.fail, job.succeed, schedule.cancel) —
         // no manual entry needed; register_bridge_fn! handles them.
         // _job_register and _schedule_cron have no dot alias per spec (setup-only).
-        // i18n / locale aliases (register_locale_functions uses register_bridge_fn! for most,
-        // but the spec also defines clean aliases: t(), tc(), locale.current, locale.set,
-        // locale.formatNumber, locale.formatCurrency, locale.formatDate).
-        // The register_bridge_fn! macro already derives: i18n.t, i18n.t_count,
-        // i18n.locale, i18n.set_locale, i18n.format_number, i18n.format_currency,
-        // i18n.format_date, i18n.load.
-        // The entries below add the spec-defined locale.* and bare t/tc aliases.
+        // i18n / locale aliases. register_bridge_fn! macro auto-derives the
+        // snake-cased dot form (e.g. i18n.t_count, i18n.set_locale). The registry
+        // additionally declares camelCase / shortened aliases — registered below.
+        // Bare aliases:
         ("_i18n_t",              "t"),
         ("_i18n_t_count",        "tc"),
-        ("_i18n_locale",         "locale.current"),
+        // Registry-declared camelCase forms (not derivable from snake_case):
+        ("_i18n_t_count",        "i18n.tc"),
+        ("_i18n_set_locale",     "i18n.setLocale"),
+        ("_i18n_format_number",  "i18n.formatNumber"),
+        ("_i18n_format_currency","i18n.formatCurrency"),
+        ("_i18n_format_date",    "i18n.formatDate"),
+        // locale.* aliases per registry:
+        ("_i18n_locale",         "locale.get"),
         ("_i18n_set_locale",     "locale.set"),
         ("_i18n_format_number",  "locale.formatNumber"),
         ("_i18n_format_currency","locale.formatCurrency"),
         ("_i18n_format_date",    "locale.formatDate"),
+        // _i18n_load is registered with bare func_wrap; add its dot alias manually.
+        ("_i18n_load",           "i18n.load"),
     ];
 
     for (canonical, dot_alias) in ALIASES {

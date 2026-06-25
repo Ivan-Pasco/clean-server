@@ -578,6 +578,198 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // =========================================
+    // STRING EXTRAS — registry "string" convention: (ptr, len) raw pairs
+    // (parity with clean-node-server src/bridge/string.ts)
+    // String length matches JS String.length = UTF-16 code units.
+    // =========================================
+
+    // string_length(string) -> i32 (UTF-16 code units, matches JS)
+    linker.func_wrap("env", "string_length",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            s.encode_utf16().count() as i32
+        })?;
+
+    // string_char_at(string, i32) -> ptr — 1-char LP string, "" on OOB
+    linker.func_wrap("env", "string_char_at",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, idx: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            if idx < 0 {
+                return write_string_to_caller(&mut caller, "");
+            }
+            let c: String = s.chars().nth(idx as usize)
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            write_string_to_caller(&mut caller, &c)
+        })?;
+
+    // string_char_code_at(string, i32) -> i32 — UTF-16 unit at index, -1 on OOB
+    linker.func_wrap("env", "string_char_code_at",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, idx: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            if idx < 0 {
+                return -1;
+            }
+            s.encode_utf16().nth(idx as usize).map(|u| u as i32).unwrap_or(-1)
+        })?;
+
+    // string_from_char_code(i32) -> ptr
+    linker.func_wrap("env", "string_from_char_code",
+        |mut caller: Caller<'_, S>, code: i32| -> i32 {
+            let c = char::from_u32(code as u32).unwrap_or('\u{FFFD}');
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            write_string_to_caller(&mut caller, s)
+        })?;
+
+    // string_contains(string, string) -> boolean
+    linker.func_wrap("env", "string_contains",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, pat_ptr: i32, pat_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pat = read_raw_string(&mut caller, pat_ptr, pat_len).unwrap_or_default();
+            if s.contains(&pat) { 1 } else { 0 }
+        })?;
+
+    // string_starts_with(string, string) -> boolean
+    linker.func_wrap("env", "string_starts_with",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, pat_ptr: i32, pat_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pat = read_raw_string(&mut caller, pat_ptr, pat_len).unwrap_or_default();
+            if s.starts_with(&pat) { 1 } else { 0 }
+        })?;
+
+    // string_ends_with(string, string) -> boolean
+    linker.func_wrap("env", "string_ends_with",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, pat_ptr: i32, pat_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pat = read_raw_string(&mut caller, pat_ptr, pat_len).unwrap_or_default();
+            if s.ends_with(&pat) { 1 } else { 0 }
+        })?;
+
+    // string_equals(string, string) -> boolean
+    linker.func_wrap("env", "string_equals",
+        |mut caller: Caller<'_, S>, p1: i32, l1: i32, p2: i32, l2: i32| -> i32 {
+            let s1 = read_raw_string(&mut caller, p1, l1).unwrap_or_default();
+            let s2 = read_raw_string(&mut caller, p2, l2).unwrap_or_default();
+            if s1 == s2 { 1 } else { 0 }
+        })?;
+
+    // string_equals_ignore_case(string, string) -> boolean
+    linker.func_wrap("env", "string_equals_ignore_case",
+        |mut caller: Caller<'_, S>, p1: i32, l1: i32, p2: i32, l2: i32| -> i32 {
+            let s1 = read_raw_string(&mut caller, p1, l1).unwrap_or_default();
+            let s2 = read_raw_string(&mut caller, p2, l2).unwrap_or_default();
+            if s1.to_lowercase() == s2.to_lowercase() { 1 } else { 0 }
+        })?;
+
+    // string_last_index_of(string, string) -> i32 (-1 if not found)
+    linker.func_wrap("env", "string_last_index_of",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, pat_ptr: i32, pat_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pat = read_raw_string(&mut caller, pat_ptr, pat_len).unwrap_or_default();
+            // To match JS String#lastIndexOf, index is in UTF-16 code units.
+            // Approximation: byte offset → utf16 offset of the prefix.
+            match s.rfind(&pat) {
+                Some(byte_idx) => s[..byte_idx].encode_utf16().count() as i32,
+                None => -1,
+            }
+        })?;
+
+    // string_pad_start(string, i32, string) -> ptr
+    linker.func_wrap("env", "string_pad_start",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, target: i32, pad_ptr: i32, pad_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pad = read_raw_string(&mut caller, pad_ptr, pad_len).unwrap_or_default();
+            let target = target.max(0) as usize;
+            let cur = s.chars().count();
+            if cur >= target || pad.is_empty() {
+                return write_string_to_caller(&mut caller, &s);
+            }
+            let mut prefix = String::new();
+            while prefix.chars().count() + cur < target {
+                prefix.push_str(&pad);
+            }
+            let need = target - cur;
+            let trimmed: String = prefix.chars().take(need).collect();
+            write_string_to_caller(&mut caller, &format!("{}{}", trimmed, s))
+        })?;
+
+    // string_pad_end(string, i32, string) -> ptr
+    linker.func_wrap("env", "string_pad_end",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, target: i32, pad_ptr: i32, pad_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pad = read_raw_string(&mut caller, pad_ptr, pad_len).unwrap_or_default();
+            let target = target.max(0) as usize;
+            let cur = s.chars().count();
+            if cur >= target || pad.is_empty() {
+                return write_string_to_caller(&mut caller, &s);
+            }
+            let mut suffix = String::new();
+            while suffix.chars().count() + cur < target {
+                suffix.push_str(&pad);
+            }
+            let need = target - cur;
+            let trimmed: String = suffix.chars().take(need).collect();
+            write_string_to_caller(&mut caller, &format!("{}{}", s, trimmed))
+        })?;
+
+    // string_join(string, string) -> ptr
+    // Matches node-server: first string is JSON-encoded array of strings, second is delimiter.
+    linker.func_wrap("env", "string_join",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, d_ptr: i32, d_len: i32| -> i32 {
+            let json = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let delim = read_raw_string(&mut caller, d_ptr, d_len).unwrap_or_default();
+            let joined: String = match serde_json::from_str::<Vec<String>>(&json) {
+                Ok(parts) => parts.join(&delim),
+                Err(_) => String::new(),
+            };
+            write_string_to_caller(&mut caller, &joined)
+        })?;
+
+    // string_reverse(string) -> ptr
+    linker.func_wrap("env", "string_reverse",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let reversed: String = s.chars().rev().collect();
+            write_string_to_caller(&mut caller, &reversed)
+        })?;
+
+    // string_is_empty(string) -> boolean
+    linker.func_wrap("env", "string_is_empty",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            if s.is_empty() { 1 } else { 0 }
+        })?;
+
+    // string_is_blank(string) -> boolean
+    linker.func_wrap("env", "string_is_blank",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            if s.trim().is_empty() { 1 } else { 0 }
+        })?;
+
+    // string_replace_first(string, string, string) -> ptr
+    linker.func_wrap("env", "string_replace_first",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32, pat_ptr: i32, pat_len: i32, rep_ptr: i32, rep_len: i32| -> i32 {
+            let s = read_raw_string(&mut caller, ptr, len).unwrap_or_default();
+            let pat = read_raw_string(&mut caller, pat_ptr, pat_len).unwrap_or_default();
+            let rep = read_raw_string(&mut caller, rep_ptr, rep_len).unwrap_or_default();
+            let result = if pat.is_empty() {
+                s
+            } else {
+                s.replacen(&pat, &rep, 1)
+            };
+            write_string_to_caller(&mut caller, &result)
+        })?;
+
+    // float_to_string_fixed(number, i32) -> ptr — toFixed equivalent
+    linker.func_wrap("env", "float_to_string_fixed",
+        |mut caller: Caller<'_, S>, value: f64, decimals: i32| -> i32 {
+            let d = decimals.clamp(0, 100) as usize;
+            write_string_to_caller(&mut caller, &format!("{:.*}", d, value))
+        })?;
+
     Ok(())
 }
 

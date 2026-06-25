@@ -127,6 +127,30 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // print_debug - Stdout with [DEBUG] prefix, gated on CLEAN_VERBOSE
+    linker.func_wrap(
+        "env",
+        "print_debug",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| {
+            if std::env::var("CLEAN_VERBOSE").is_ok() {
+                if let Some(s) = read_raw_string(&mut caller, ptr, len) {
+                    println!("[DEBUG] {}", s);
+                }
+            }
+        },
+    )?;
+
+    // print_error - Stderr with trailing newline
+    linker.func_wrap(
+        "env",
+        "print_error",
+        |mut caller: Caller<'_, S>, ptr: i32, len: i32| {
+            if let Some(s) = read_raw_string(&mut caller, ptr, len) {
+                eprintln!("{}", s);
+            }
+        },
+    )?;
+
     // =========================================
     // INPUT FUNCTIONS
     // =========================================

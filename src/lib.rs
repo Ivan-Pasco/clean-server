@@ -74,6 +74,7 @@
 //! - **auth**: Authentication (_auth_verify, _auth_create_session)
 
 pub mod bridge;
+pub mod bridge_browser_stubs;
 pub mod bridge_canvas_stubs;
 pub mod bridge_ui_stubs;
 pub mod jobs;

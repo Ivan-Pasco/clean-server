@@ -39,6 +39,10 @@ mod http_client;
 mod crypto_funcs;
 mod env_time;
 mod list_funcs;
+mod array_funcs;
+
+pub use array_funcs::reset_array_store;
+pub use list_funcs::reset_list_store;
 // NOTE: HTTP Server functions (Layer 3) are NOT in host-bridge.
 // They are server-specific and implemented in clean-server/src/bridge.rs.
 // See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
@@ -135,6 +139,7 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     crypto_funcs::register_functions(linker)?;
     env_time::register_functions(linker)?;
     list_funcs::register_functions(linker)?;
+    array_funcs::register_functions(linker)?;
 
     // NOTE: HTTP Server functions (Layer 3) are NOT provided by host-bridge.
     // Server-specific functions like _req_param, _req_body, _http_route, etc.
@@ -171,7 +176,7 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
         ("_db_register_migration",  "db.register_migration"),
         ("_db_configure",           "db.configure"),
         ("_db_paginate",            "db.paginate"),
-        ("_db_cursor_page",         "db.cursor_page"),
+        ("_db_cursor_page",         "db.cursorPage"),
         ("_db_migration_diff",      "db.migration_diff"),
         ("_db_migration_status",    "db.migration_status"),
         ("_db_rollback_migration",  "db.rollback_migration"),
@@ -185,6 +190,15 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
         ("_crypto_hash_sha256",     "crypto.hash_sha256"),
         ("_crypto_hash_sha512",     "crypto.hash_sha512"),
         ("_crypto_hmac",            "crypto.hmac"),
+        // Crypto extras (Phase 2)
+        ("_crypto_uuid",            "crypto.uuid"),
+        ("_crypto_hash_md5",        "crypto.hash_md5"),
+        ("_crypto_hmac_sha256",     "crypto.hmac_sha256"),
+        ("_crypto_random_base64",   "crypto.random_base64"),
+        ("_crypto_base64_encode",   "crypto.base64_encode"),
+        ("_crypto_base64_decode",   "crypto.base64_decode"),
+        ("_crypto_encrypt_aes",     "crypto.encrypt_aes"),
+        ("_crypto_decrypt_aes",     "crypto.decrypt_aes"),
         // JWT (crypto_funcs module)
         ("_jwt_sign",   "jwt.sign"),
         ("_jwt_verify", "jwt.verify"),
@@ -192,6 +206,37 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
         // Environment and time (env_time module)
         ("_env_get",  "env.get"),
         ("_time_now", "time.now"),
+        // Env extras (Phase 2)
+        ("_env_has",            "env.has"),
+        ("_env_all",            "env.all"),
+        ("_env_node_env",       "env.node_env"),
+        ("_env_is_production",  "env.is_production"),
+        ("_env_is_development", "env.is_development"),
+        // Time extras (Phase 2)
+        ("_time_epoch_ms",         "time.epoch_ms"),
+        ("_time_epoch_sec",        "time.epoch_sec"),
+        ("_time_iso",              "time.iso"),
+        ("_time_format_iso",       "time.format_iso"),
+        ("_time_parse_iso",        "time.parse_iso"),
+        ("_time_components",       "time.components"),
+        ("_time_from_components",  "time.from_components"),
+        ("_time_add",              "time.add"),
+        ("_time_diff",             "time.diff"),
+        ("_time_format_locale",    "time.format_locale"),
+        ("_time_timezone_offset",  "time.timezone_offset"),
+        ("_time_is_past",          "time.is_past"),
+        ("_time_is_future",        "time.is_future"),
+        ("_time_sleep",            "time.sleep"),
+        // DB async extras (Phase 2)
+        ("_db_connected",       "db.connected"),
+        ("_db_query_async",     "db.query_async"),
+        ("_db_query_result",    "db.query_result"),
+        ("_db_execute_async",   "db.execute_async"),
+        ("_db_execute_result",  "db.execute_result"),
+        // HTTP _-prefixed aliases (registry declares both forms)
+        ("http_put_with_headers",    "_http_put_with_headers"),
+        ("http_patch_with_headers",  "_http_patch_with_headers"),
+        ("http_delete_with_headers", "_http_delete_with_headers"),
     ];
 
     for (canonical, dot_alias) in ALIASES {
@@ -251,8 +296,20 @@ mod tests {
         returns: String,
         #[serde(default)]
         aliases: Vec<String>,
+        #[serde(default = "default_hosts_all")]
+        hosts: Vec<String>,
         #[allow(dead_code)]
         description: String,
+    }
+
+    fn default_hosts_all() -> Vec<String> {
+        vec!["all".to_string()]
+    }
+
+    /// True when this function's `hosts` field includes this host class
+    /// ("all" or the specific class, here "server").
+    fn applies_to_host(entry: &FunctionEntry, host: &str) -> bool {
+        entry.hosts.iter().any(|h| h == "all" || h == host)
     }
 
     fn expand_param_type(t: &str) -> Vec<&str> {
@@ -328,9 +385,26 @@ mod tests {
         let registry: Registry = toml::from_str(&toml_str)
             .expect("Failed to parse function-registry.toml");
 
-        // Filter for Layer 2 functions only (host-bridge scope)
+        // Filter for Layer 2 functions implemented by host-bridge.
+        //
+        // host-bridge is the portable subset of Layer 2: console, math, string,
+        // memory, database, file I/O, HTTP client, crypto, env, time, list, array, jwt, html.
+        // Other Layer 2 categories (canvas, audio, anim, sprite, ui, i18n, locale, asset,
+        // camera, input, page, state, build_state, etc.) are framework- or browser-runtime
+        // concerns. The full clean-server linker covers those via bridge_ui_stubs.rs /
+        // bridge_canvas_stubs.rs; the Layer 3 spec_compliance test in bridge.rs validates
+        // them against the full linker. The host filter additionally drops browser-only
+        // entries that might otherwise leak in.
+        const HOST_BRIDGE_CATEGORIES: &[&str] = &[
+            "console", "math", "string", "memory",
+            "database", "file_io", "http_client",
+            "crypto", "env", "time", "list", "array",
+            "jwt", "html",
+        ];
         let layer2_funcs: Vec<&FunctionEntry> = registry.functions.iter()
             .filter(|f| f.layer == 2)
+            .filter(|f| HOST_BRIDGE_CATEGORIES.contains(&f.category.as_str()))
+            .filter(|f| applies_to_host(f, "server"))
             .collect();
 
         assert!(
