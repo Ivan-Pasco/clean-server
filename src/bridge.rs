@@ -78,6 +78,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
 
     // Register server-specific functions
     register_http_server_functions(&mut linker)?;
+    register_server_config_functions(&mut linker)?;
     register_request_context_functions(&mut linker)?;
     register_session_management_functions(&mut linker)?;
     register_session_auth_functions(&mut linker)?;
@@ -413,6 +414,164 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 error!("_http_sse_route: Failed to register SSE route {}: {}", path, e);
                 return -1;
             }
+            0
+        }
+    );
+
+    Ok(())
+}
+
+/// Register `server:` block runtime-config bridges:
+/// `_http_listen_on`, `_cors_configure`, `_rate_limit_configure`,
+/// `_http_set_global_error_handler`. These write to the shared
+/// `SharedRuntimeConfig` that the server reads after WASM init to build the
+/// axum router.
+fn register_server_config_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    use crate::runtime_config::{CorsConfig, RateLimitConfig, RateLimitStrategy, split_csv};
+
+    // _http_listen_on - Configure host AND port; supersedes _http_listen for
+    // modules declaring `server: host: ...`. Returns 0 on success, -1 if the
+    // host string can't be read or port is out of range.
+    register_bridge_fn!(
+        linker,
+        "_http_listen_on",
+        |mut caller: Caller<'_, WasmState>,
+         host_ptr: i32,
+         host_len: i32,
+         port: i32|
+         -> i32 {
+            let host = match read_raw_string(&mut caller, host_ptr, host_len) {
+                Some(s) => s,
+                None => {
+                    error!("_http_listen_on: failed to read host string");
+                    return -1;
+                }
+            };
+            if !(1..=65535).contains(&port) {
+                error!("_http_listen_on: port {} out of range", port);
+                return -1;
+            }
+            let state = caller.data();
+            {
+                let mut cfg = state.runtime_config.write();
+                if !host.trim().is_empty() {
+                    cfg.listen_host = Some(host.clone());
+                }
+                cfg.listen_port = Some(port as u16);
+            }
+            // Keep the legacy per-instance field in sync for any caller that
+            // still reads it.
+            caller.data_mut().port = port as u16;
+            info!("_http_listen_on: configured to listen on {}:{}", host, port);
+            0
+        }
+    );
+
+    // _cors_configure - Install real CORS settings honoring the `server: cors:`
+    // block. All four list parameters are comma-separated UTF-8 strings; pass
+    // "*" or empty to allow any. Returns 0 on success, -1 on parameter error.
+    register_bridge_fn!(
+        linker,
+        "_cors_configure",
+        |mut caller: Caller<'_, WasmState>,
+         origins_ptr: i32,
+         origins_len: i32,
+         methods_ptr: i32,
+         methods_len: i32,
+         headers_ptr: i32,
+         headers_len: i32,
+         max_age_secs: i32,
+         allow_credentials: i32|
+         -> i32 {
+            let origins = read_raw_string(&mut caller, origins_ptr, origins_len)
+                .unwrap_or_default();
+            let methods = read_raw_string(&mut caller, methods_ptr, methods_len)
+                .unwrap_or_default();
+            let headers = read_raw_string(&mut caller, headers_ptr, headers_len)
+                .unwrap_or_default();
+            if max_age_secs < 0 {
+                error!("_cors_configure: max_age_secs cannot be negative");
+                return -1;
+            }
+            let cfg = CorsConfig {
+                allowed_origins: split_csv(&origins),
+                allowed_methods: split_csv(&methods),
+                allowed_headers: split_csv(&headers),
+                max_age_secs: max_age_secs as u32,
+                allow_credentials: allow_credentials != 0,
+            };
+            info!(
+                "_cors_configure: origins={:?} methods={:?} headers={:?} max_age={}s credentials={}",
+                cfg.allowed_origins,
+                cfg.allowed_methods,
+                cfg.allowed_headers,
+                cfg.max_age_secs,
+                cfg.allow_credentials
+            );
+            caller.data().runtime_config.write().cors = Some(cfg);
+            0
+        }
+    );
+
+    // _rate_limit_configure - Install per-key token-bucket rate limiting.
+    // `strategy` is "ip" or "user". Returns 0 on success, -1 if per_window or
+    // window_secs are non-positive.
+    register_bridge_fn!(
+        linker,
+        "_rate_limit_configure",
+        |mut caller: Caller<'_, WasmState>,
+         per_window: i32,
+         window_secs: i32,
+         strategy_ptr: i32,
+         strategy_len: i32|
+         -> i32 {
+            if per_window <= 0 || window_secs <= 0 {
+                error!(
+                    "_rate_limit_configure: per_window ({}) and window_secs ({}) must be positive",
+                    per_window, window_secs
+                );
+                return -1;
+            }
+            let strategy_str = read_raw_string(&mut caller, strategy_ptr, strategy_len)
+                .unwrap_or_else(|| "ip".to_string());
+            let strategy = RateLimitStrategy::parse(&strategy_str);
+            let cfg = RateLimitConfig {
+                per_window: per_window as u32,
+                window_secs: window_secs as u32,
+                strategy,
+            };
+            info!(
+                "_rate_limit_configure: {} per {}s by {:?}",
+                cfg.per_window, cfg.window_secs, cfg.strategy
+            );
+            caller.data().runtime_config.write().rate_limit = Some(cfg);
+            0
+        }
+    );
+
+    // _http_set_global_error_handler - Register the WASM export name to invoke
+    // when a route handler errors. The server falls back to this handler before
+    // returning a default 500. Returns 0 on success, -1 if the handler name is
+    // empty.
+    register_bridge_fn!(
+        linker,
+        "_http_set_global_error_handler",
+        |mut caller: Caller<'_, WasmState>,
+         name_ptr: i32,
+         name_len: i32|
+         -> i32 {
+            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+                Some(s) if !s.trim().is_empty() => s,
+                _ => {
+                    error!("_http_set_global_error_handler: handler name is empty");
+                    return -1;
+                }
+            };
+            info!(
+                "_http_set_global_error_handler: registered handler '{}'",
+                name
+            );
+            caller.data().runtime_config.write().global_error_handler = Some(name);
             0
         }
     );

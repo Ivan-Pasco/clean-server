@@ -4,7 +4,9 @@
 
 use crate::build_manifest::{BuildManifest, CallbackContract, ResolvedArtifact, purpose as artifact_purpose};
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
+use crate::rate_limit::{RateLimiter, SharedRateLimiter, rate_limit_middleware};
 use crate::router::{HttpMethod, SharedRouter};
+use crate::runtime_config::{CorsConfig, RuntimeConfig};
 use crate::session::{SharedSessionStore, parse_cookies};
 use crate::wasm::{AuthContext, RequestContext, SharedDbBridge, SharedIslandsStore, SharedWasmInstance};
 use crate::websocket::{SharedWsState, WsRouteHandlers, ws_handle_connection};
@@ -22,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::RwLock as TokioRwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
@@ -395,7 +397,7 @@ async fn configure_db_bridge(config: &ServerConfig) -> SharedDbBridge {
 }
 
 /// Start the HTTP server with the given WASM module
-pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeResult<()> {
+pub async fn start_server(wasm_path: PathBuf, mut config: ServerConfig) -> RuntimeResult<()> {
     info!("Starting Frame Runtime server");
     info!("Loading WASM module from {:?}", wasm_path);
 
@@ -413,8 +415,36 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
         config.effective_memory_limit(),
     )?;
 
-    // Initialize WASM module (registers routes and static dirs)
+    // Initialize WASM module (registers routes, static dirs, and runtime config).
+    // `server:` block bridges (_http_listen_on, _cors_configure, etc.) run
+    // during this call and write into `wasm.runtime_config()`.
     wasm.initialize()?;
+
+    // Apply WASM-declared `server:` config to the live ServerConfig before
+    // binding the listener. WASM values win over the defaults so a module's
+    // `host:` / `port:` declarations are honored without a CLI flag. CLI
+    // overrides remain the operator's path via the `--host` / `--port` args
+    // that were already merged into `config` upstream.
+    let runtime_cfg: RuntimeConfig = wasm.runtime_config().read().clone();
+    if let Some(host) = &runtime_cfg.listen_host {
+        info!(
+            "Applying WASM-declared listen host: {} (was {})",
+            host, config.host
+        );
+        config.host = host.clone();
+    }
+    if let Some(port) = runtime_cfg.listen_port {
+        info!(
+            "Applying WASM-declared listen port: {} (was {})",
+            port, config.port
+        );
+        config.port = port;
+    }
+    let rate_limiter: Option<SharedRateLimiter> = runtime_cfg
+        .rate_limit
+        .clone()
+        .map(|cfg| Arc::new(RateLimiter::new(cfg)));
+    let cors_runtime: Option<CorsConfig> = runtime_cfg.cors.clone();
 
     // Check if any routes were registered
     if router.is_empty() {
@@ -532,7 +562,14 @@ pub async fn start_server(wasm_path: PathBuf, config: ServerConfig) -> RuntimeRe
     let state = AppState::new(wasm, router, islands_store, loader_js, frontend_wasm_path, ws_state);
 
     // Build Axum router
-    let app = build_router(state, &config, static_dirs, &resolved_artifacts);
+    let app = build_router(
+        state,
+        &config,
+        static_dirs,
+        &resolved_artifacts,
+        cors_runtime,
+        rate_limiter,
+    );
 
     // Start server
     let addr = config.socket_addr();
@@ -557,6 +594,8 @@ fn build_router(
     config: &ServerConfig,
     static_dirs: Vec<(String, String)>,
     resolved_artifacts: &[ResolvedArtifact],
+    cors_runtime: Option<CorsConfig>,
+    rate_limiter: Option<SharedRateLimiter>,
 ) -> Router {
     // Reserved routes that already have explicit handlers below. Manifest
     // artifacts targeting these paths fall back to the dedicated handler
@@ -612,27 +651,93 @@ fn build_router(
         );
     }
 
-    // Add CORS if enabled
-    if config.cors_enabled {
-        let cors = if config.cors_origins.is_empty() {
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        } else {
-            // Custom origins would go here
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        };
+    // Add CORS. Precedence: explicit runtime config from `_cors_configure`
+    // wins; otherwise fall back to the CLI-driven `cors_enabled` permissive
+    // default for backwards compatibility.
+    if let Some(runtime_cors) = cors_runtime {
+        let cors = build_cors_layer(&runtime_cors);
         app = app.layer(cors);
+    } else if config.cors_enabled {
+        app = app.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
+    }
+
+    // Install rate-limit middleware when configured via `_rate_limit_configure`.
+    if let Some(limiter) = rate_limiter {
+        app = app.layer(axum::middleware::from_fn_with_state(
+            limiter,
+            rate_limit_middleware,
+        ));
     }
 
     // Add tracing
     app = app.layer(TraceLayer::new_for_http());
 
     app
+}
+
+/// Translate a `CorsConfig` (populated by `_cors_configure`) into a tower-http
+/// `CorsLayer`. Empty lists or "*" allow Any. `allow_credentials` cannot be
+/// combined with `Any` origins per the CORS spec; in that case origins fall
+/// back to the configured explicit list (empty list = no origins allowed).
+fn build_cors_layer(cfg: &CorsConfig) -> CorsLayer {
+    use axum::http::{HeaderName, HeaderValue, Method as AxumMethod};
+
+    let allow_any_origin = cfg.allowed_origins.is_empty()
+        || cfg.allowed_origins.iter().any(|o| o.trim() == "*");
+    let allow_any_methods = cfg.allowed_methods.is_empty()
+        || cfg.allowed_methods.iter().any(|m| m.trim() == "*");
+    let allow_any_headers = cfg.allowed_headers.is_empty()
+        || cfg.allowed_headers.iter().any(|h| h.trim() == "*");
+
+    let mut layer = CorsLayer::new();
+
+    layer = if allow_any_origin && !cfg.allow_credentials {
+        layer.allow_origin(Any)
+    } else {
+        let origins: Vec<HeaderValue> = cfg
+            .allowed_origins
+            .iter()
+            .filter(|o| o.trim() != "*")
+            .filter_map(|o| HeaderValue::from_str(o.trim()).ok())
+            .collect();
+        layer.allow_origin(AllowOrigin::list(origins))
+    };
+
+    layer = if allow_any_methods {
+        layer.allow_methods(Any)
+    } else {
+        let methods: Vec<AxumMethod> = cfg
+            .allowed_methods
+            .iter()
+            .filter_map(|m| AxumMethod::from_bytes(m.trim().as_bytes()).ok())
+            .collect();
+        layer.allow_methods(AllowMethods::list(methods))
+    };
+
+    layer = if allow_any_headers {
+        layer.allow_headers(Any)
+    } else {
+        let headers: Vec<HeaderName> = cfg
+            .allowed_headers
+            .iter()
+            .filter_map(|h| HeaderName::from_bytes(h.trim().as_bytes()).ok())
+            .collect();
+        layer.allow_headers(AllowHeaders::list(headers))
+    };
+
+    if cfg.max_age_secs > 0 {
+        layer = layer.max_age(std::time::Duration::from_secs(cfg.max_age_secs as u64));
+    }
+    if cfg.allow_credentials {
+        layer = layer.allow_credentials(true);
+    }
+
+    layer
 }
 
 /// Serve the islands manifest as JSON.
@@ -968,88 +1073,61 @@ async fn handle_request(
             .expect("SSE response builder");
     }
 
+    // Capture inputs needed for the global error handler dispatch path before
+    // moving them into the route handler call.
+    let global_error_handler = state
+        .wasm
+        .runtime_config()
+        .read()
+        .global_error_handler
+        .clone();
+    let err_ctx_clone = global_error_handler
+        .as_ref()
+        .map(|_| request_ctx.clone());
+    let err_auth_clone = global_error_handler.as_ref().map(|_| auth_context.clone());
+
     // Call WASM handler with auth context
     match state
         .wasm
         .call_handler_with_auth(&route_handler.handler_name, request_ctx, auth_context)
     {
-        Ok(handler_response) => {
-            debug!("Handler returned: {} bytes", handler_response.body.len());
-
-            // Check for redirect first
-            if let Some((status_code, redirect_url)) = handler_response.redirect {
-                debug!("Redirecting {} -> {}", status_code, redirect_url);
-                let mut builder = Response::builder()
-                    .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::FOUND))
-                    .header(header::LOCATION, &redirect_url);
-
-                // Add Set-Cookie header if pending (for post-login redirects)
-                if let Some(cookie) = handler_response.set_cookie {
-                    builder = builder.header(header::SET_COOKIE, cookie);
-                }
-
-                // Add custom headers
-                for (name, value) in handler_response.headers {
-                    builder = builder.header(name.as_str(), value.as_str());
-                }
-
-                return builder.body(Body::empty()).expect("response builder");
-            }
-
-            // Use caller-supplied Content-Type if present (e.g. from _http_respond),
-            // otherwise infer from the response body.
-            let explicit_content_type = handler_response
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-                .map(|(_, v)| v.clone());
-
-            let content_type = explicit_content_type.as_deref().unwrap_or_else(|| {
-                if handler_response.body.starts_with('{') || handler_response.body.starts_with('[') {
-                    "application/json"
-                } else if handler_response.body.starts_with("<!") || handler_response.body.starts_with("<html") {
-                    "text/html; charset=utf-8"
-                } else {
-                    "text/plain; charset=utf-8"
-                }
-            });
-
-            let status = handler_response
-                .status
-                .and_then(|s| StatusCode::from_u16(s).ok())
-                .unwrap_or(StatusCode::OK);
-
-            let mut builder = Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, content_type);
-
-            // Add Set-Cookie header if pending
-            if let Some(cookie) = handler_response.set_cookie {
-                debug!("Setting cookie: {}", cookie);
-                builder = builder.header(header::SET_COOKIE, cookie);
-            }
-
-            // Add custom headers, skipping Content-Type (already applied above)
-            for (name, value) in handler_response.headers {
-                if !name.eq_ignore_ascii_case("content-type") {
-                    debug!("Setting header: {}={}", name, value);
-                    builder = builder.header(name.as_str(), value.as_str());
-                }
-            }
-
-            // Inject accumulated <style> and <link> tags into HTML responses
-            let body = inject_head_tags(
-                handler_response.body,
-                handler_response.head_css,
-                handler_response.head_links,
-            );
-
-            builder.body(Body::from(body)).expect("response builder")
-        }
+        Ok(handler_response) => handler_response_to_axum_response(handler_response),
         Err(e) => {
             error!("Handler error: {}", e);
-            let http_err = HttpError::from(e);
 
+            // If a global error handler is registered via
+            // `_http_set_global_error_handler`, invoke it before falling back
+            // to the default 500. The error message is forwarded in the
+            // `X-Clean-Error` request header so the handler can read it via
+            // `_req_header`.
+            if let (Some(handler_name), Some(mut err_ctx), Some(err_auth)) =
+                (global_error_handler, err_ctx_clone, err_auth_clone)
+            {
+                let error_message = e.to_string();
+                err_ctx
+                    .headers
+                    .push(("X-Clean-Error".to_string(), error_message.clone()));
+                debug!(
+                    "Dispatching global error handler '{}': {}",
+                    handler_name, error_message
+                );
+                match state
+                    .wasm
+                    .call_handler_with_auth(&handler_name, err_ctx, err_auth)
+                {
+                    Ok(handler_response) => {
+                        return handler_response_to_axum_response(handler_response);
+                    }
+                    Err(e2) => {
+                        error!(
+                            "Global error handler '{}' itself failed: {}",
+                            handler_name, e2
+                        );
+                    }
+                }
+            }
+
+            let http_err = HttpError::from(e);
             Response::builder()
                 .status(
                     StatusCode::from_u16(http_err.status)
@@ -1060,6 +1138,76 @@ async fn handle_request(
                 .expect("response builder")
         }
     }
+}
+
+/// Translate a WASM `HandlerResponse` into an axum `Response`. Used for both
+/// the normal-path response and the global-error-handler response.
+fn handler_response_to_axum_response(
+    handler_response: crate::wasm::HandlerResponse,
+) -> Response {
+    debug!("Handler returned: {} bytes", handler_response.body.len());
+
+    if let Some((status_code, redirect_url)) = handler_response.redirect {
+        debug!("Redirecting {} -> {}", status_code, redirect_url);
+        let mut builder = Response::builder()
+            .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::FOUND))
+            .header(header::LOCATION, &redirect_url);
+
+        if let Some(cookie) = handler_response.set_cookie {
+            builder = builder.header(header::SET_COOKIE, cookie);
+        }
+
+        for (name, value) in handler_response.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+
+        return builder.body(Body::empty()).expect("response builder");
+    }
+
+    let explicit_content_type = handler_response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone());
+
+    let content_type = explicit_content_type.as_deref().unwrap_or_else(|| {
+        if handler_response.body.starts_with('{') || handler_response.body.starts_with('[') {
+            "application/json"
+        } else if handler_response.body.starts_with("<!") || handler_response.body.starts_with("<html") {
+            "text/html; charset=utf-8"
+        } else {
+            "text/plain; charset=utf-8"
+        }
+    });
+
+    let status = handler_response
+        .status
+        .and_then(|s| StatusCode::from_u16(s).ok())
+        .unwrap_or(StatusCode::OK);
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type);
+
+    if let Some(cookie) = handler_response.set_cookie {
+        debug!("Setting cookie: {}", cookie);
+        builder = builder.header(header::SET_COOKIE, cookie);
+    }
+
+    for (name, value) in handler_response.headers {
+        if !name.eq_ignore_ascii_case("content-type") {
+            debug!("Setting header: {}={}", name, value);
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+    }
+
+    let body = inject_head_tags(
+        handler_response.body,
+        handler_response.head_css,
+        handler_response.head_links,
+    );
+
+    builder.body(Body::from(body)).expect("response builder")
 }
 
 /// Extract auth context from request headers (session cookie or JWT)

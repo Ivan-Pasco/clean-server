@@ -275,6 +275,12 @@ pub struct WasmState {
     /// Shared locale/i18n state (translation maps, default locale).
     /// Populated once at server startup and shared across all WASM instances.
     pub locale_state: crate::locale::SharedLocaleState,
+    /// Shared runtime configuration populated by `server:` block bridges
+    /// (`_http_listen_on`, `_cors_configure`, `_rate_limit_configure`,
+    /// `_http_set_global_error_handler`) during WASM init. Read by the server
+    /// when building the axum router so WASM-declared host/port/CORS/rate-limit
+    /// values are honored.
+    pub runtime_config: crate::runtime_config::SharedRuntimeConfig,
 }
 
 /// Request context passed to handlers
@@ -430,6 +436,7 @@ impl WasmState {
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
             locale_state: crate::locale::create_shared_locale_state(),
+            runtime_config: crate::runtime_config::create_shared_runtime_config(),
         }
     }
 
@@ -468,6 +475,7 @@ impl WasmState {
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
             locale_state: crate::locale::create_shared_locale_state(),
+            runtime_config: crate::runtime_config::create_shared_runtime_config(),
         }
     }
 
@@ -516,6 +524,7 @@ impl WasmState {
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
             locale_state: crate::locale::create_shared_locale_state(),
+            runtime_config: crate::runtime_config::create_shared_runtime_config(),
         }
     }
 
@@ -681,6 +690,10 @@ pub struct WasmInstance {
     /// Shared with the server so WASM init (locale: blocks) and request handlers see
     /// the same translation maps.
     pub locale_state: crate::locale::SharedLocaleState,
+    /// Shared runtime configuration populated by `server:` block bridges during
+    /// WASM init. Read by `start_server` after init to apply WASM-declared
+    /// host/port/CORS/rate-limit/global-error-handler values.
+    pub runtime_config: crate::runtime_config::SharedRuntimeConfig,
 }
 
 impl WasmInstance {
@@ -828,6 +841,7 @@ impl WasmInstance {
             ws_state: crate::websocket::create_shared_ws_state(),
             jobs_state: crate::jobs::create_shared_jobs_state(),
             locale_state: crate::locale::create_shared_locale_state(),
+            runtime_config: crate::runtime_config::create_shared_runtime_config(),
         })
     }
 
@@ -857,6 +871,7 @@ impl WasmInstance {
         state.ws_state = self.ws_state.clone();
         state.jobs_state = self.jobs_state.clone();
         state.locale_state = self.locale_state.clone();
+        state.runtime_config = self.runtime_config.clone();
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         // Copy the resolved callback contracts into the fresh state so bridge
@@ -874,6 +889,11 @@ impl WasmInstance {
     /// Get the session store
     pub fn session_store(&self) -> &SharedSessionStore {
         &self.session_store
+    }
+
+    /// Get the shared runtime configuration populated by `server:` block bridges
+    pub fn runtime_config(&self) -> &crate::runtime_config::SharedRuntimeConfig {
+        &self.runtime_config
     }
 
     /// Get the database bridge for configuration
