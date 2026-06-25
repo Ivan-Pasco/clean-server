@@ -2215,9 +2215,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_redirect: {}", e)))?;
 
-    // _http_set_header - Alias for _res_set_header
+    // _http_set_header - fire-and-forget header setter
     // Args: name_ptr, name_len, value_ptr, value_len
-    // Returns: pointer to header name
+    // Returns: void (matches function-registry.toml; matches clean-node-server)
     linker
         .func_wrap(
             "env",
@@ -2226,19 +2226,16 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
              name_ptr: i32,
              name_len: i32,
              value_ptr: i32,
-             value_len: i32|
-             -> i32 {
+             value_len: i32| {
                 let header_name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
-                    None => return write_string_to_caller(&mut caller, ""),
+                    None => return,
                 };
                 let header_value = read_raw_string(&mut caller, value_ptr, value_len)
                     .unwrap_or_default();
 
                 debug!("_http_set_header: {}={}", header_name, header_value);
-                caller.data_mut().add_header(header_name.clone(), header_value);
-
-                write_string_to_caller(&mut caller, &header_name)
+                caller.data_mut().add_header(header_name, header_value);
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_set_header: {}", e)))?;

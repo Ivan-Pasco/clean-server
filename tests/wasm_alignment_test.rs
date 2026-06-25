@@ -544,8 +544,9 @@ const FULL_CONTRACT_WAT: &str = r#"
   ;; _http_redirect: (status, url_ptr, url_len) -> i32
   (import "env" "_http_redirect"  (func (param i32 i32 i32) (result i32)))
 
-  ;; _http_set_header / _res_set_header: (name_ptr, name_len, val_ptr, val_len) -> i32
-  (import "env" "_http_set_header" (func (param i32 i32 i32 i32) (result i32)))
+  ;; _http_set_header: (name_ptr, name_len, val_ptr, val_len) -> void (per function-registry.toml)
+  ;; _res_set_header:  (name_ptr, name_len, val_ptr, val_len) -> i32 (boolean)
+  (import "env" "_http_set_header" (func (param i32 i32 i32 i32)))
   (import "env" "_res_set_header"  (func (param i32 i32 i32 i32) (result i32)))
 
   ;; _res_redirect: (url_ptr, url_len, status_code) -> i32
