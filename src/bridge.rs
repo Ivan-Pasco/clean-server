@@ -1981,7 +1981,7 @@ fn replace_cookie_max_age(cookie: &str, ttl_seconds: u64) -> String {
         // Find the end of the existing Max-Age value (next `;` or end of string).
         let val_start = start + needle_lower.len();
         let end = cookie[val_start..]
-            .find(|c| c == ';' || c == ' ')
+            .find([';', ' '])
             .map(|off| val_start + off)
             .unwrap_or(cookie.len());
         let mut out = String::with_capacity(cookie.len() + 8);
