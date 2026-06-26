@@ -95,6 +95,45 @@ impl DatabaseDriver {
 	}
 
 	// ========================================================================
+	// Typed bind tags
+	// ========================================================================
+
+	/// If a JSON object carries a typed bind tag, decode it into a value sqlx
+	/// can bind to the driver's native datetime/timestamp column type.
+	///
+	/// Recognised shapes:
+	///   `{"__type": "epoch_s",      "value": <i64>}`  → unix epoch in seconds
+	///   `{"__type": "epoch_ms",     "value": <i64>}`  → unix epoch in milliseconds
+	///   `{"__type": "datetime_iso", "value": "<RFC3339 string>"}`
+	///
+	/// Returns `Some(NaiveDateTime)` when the tag is present and parses,
+	/// `None` otherwise (let the caller fall through to normal binding).
+	fn decode_typed_bind(param: &Value) -> Option<chrono::NaiveDateTime> {
+		let obj = param.as_object()?;
+		let tag = obj.get("__type")?.as_str()?;
+		let value = obj.get("value")?;
+		match tag {
+			"epoch_s" => {
+				let secs = value.as_i64()?;
+				chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+					.map(|dt| dt.naive_utc())
+			}
+			"epoch_ms" => {
+				let ms = value.as_i64()?;
+				chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+					.map(|dt| dt.naive_utc())
+			}
+			"datetime_iso" => {
+				let s = value.as_str()?;
+				chrono::DateTime::parse_from_rfc3339(s)
+					.ok()
+					.map(|dt| dt.naive_utc())
+			}
+			_ => None,
+		}
+	}
+
+	// ========================================================================
 	// PostgreSQL Implementation
 	// ========================================================================
 
@@ -120,6 +159,9 @@ impl DatabaseDriver {
 		query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
 		param: &Value,
 	) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+		if let Some(dt) = Self::decode_typed_bind(param) {
+			return query.bind(dt);
+		}
 		match param {
 			Value::Null => query.bind(None::<String>),
 			Value::Bool(b) => query.bind(*b),
@@ -285,6 +327,9 @@ impl DatabaseDriver {
 		query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
 		param: &Value,
 	) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+		if let Some(dt) = Self::decode_typed_bind(param) {
+			return query.bind(dt);
+		}
 		match param {
 			Value::Null => query.bind(None::<String>),
 			Value::Bool(b) => query.bind(*b),
@@ -453,6 +498,9 @@ impl DatabaseDriver {
 		query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
 		param: &Value,
 	) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+		if let Some(dt) = Self::decode_typed_bind(param) {
+			return query.bind(dt);
+		}
 		match param {
 			Value::Null => query.bind(None::<String>),
 			Value::Bool(b) => query.bind(*b),
@@ -2933,6 +2981,101 @@ mod frame_data_bridge_tests {
 		let (clause, params) = build_where_clause(&json!({"__where": ""}));
 		assert!(clause.is_empty());
 		assert!(params.is_empty());
+	}
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Typed bind tag tests (FRAME-DATA-ORM-NOW-NOT-CONVERTED-FOR-DATETIME-BIND)
+	// ────────────────────────────────────────────────────────────────────────
+
+	#[test]
+	fn decode_typed_bind_epoch_s() {
+		let v = json!({"__type": "epoch_s", "value": 1782437320_i64});
+		let dt = DatabaseDriver::decode_typed_bind(&v).expect("epoch_s tag should decode");
+		assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-06-26 01:28:40");
+	}
+
+	#[test]
+	fn decode_typed_bind_epoch_ms() {
+		let v = json!({"__type": "epoch_ms", "value": 1782437320_500_i64});
+		let dt = DatabaseDriver::decode_typed_bind(&v).expect("epoch_ms tag should decode");
+		assert_eq!(dt.and_utc().timestamp_millis(), 1782437320500);
+	}
+
+	#[test]
+	fn decode_typed_bind_datetime_iso() {
+		let v = json!({"__type": "datetime_iso", "value": "2026-06-26T01:28:40Z"});
+		let dt = DatabaseDriver::decode_typed_bind(&v).expect("datetime_iso tag should decode");
+		assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-06-26 01:28:40");
+	}
+
+	#[test]
+	fn decode_typed_bind_returns_none_for_plain_values() {
+		// Plain values must fall through so existing binds keep working.
+		assert!(DatabaseDriver::decode_typed_bind(&json!(42_i64)).is_none());
+		assert!(DatabaseDriver::decode_typed_bind(&json!("hello")).is_none());
+		assert!(DatabaseDriver::decode_typed_bind(&json!(null)).is_none());
+		assert!(DatabaseDriver::decode_typed_bind(&json!(true)).is_none());
+		assert!(DatabaseDriver::decode_typed_bind(&json!([1, 2, 3])).is_none());
+	}
+
+	#[test]
+	fn decode_typed_bind_returns_none_for_unknown_tag() {
+		// Forward compatibility: unknown tags fall through to JSON object bind.
+		let v = json!({"__type": "future_tag", "value": 123});
+		assert!(DatabaseDriver::decode_typed_bind(&v).is_none());
+	}
+
+	#[test]
+	fn decode_typed_bind_returns_none_for_object_without_tag() {
+		// Plain JSON objects (used elsewhere in the protocol) must not be hijacked.
+		let v = json!({"name": "Alice", "age": 30});
+		assert!(DatabaseDriver::decode_typed_bind(&v).is_none());
+	}
+
+	#[test]
+	fn decode_typed_bind_returns_none_for_invalid_epoch_value() {
+		// String where i64 is required.
+		let v = json!({"__type": "epoch_s", "value": "not-a-number"});
+		assert!(DatabaseDriver::decode_typed_bind(&v).is_none());
+	}
+
+	#[tokio::test]
+	async fn execute_with_epoch_s_tag_binds_as_datetime() {
+		// End-to-end: framework passes {"__type":"epoch_s","value":N} for now(),
+		// SQLite stores it as an ISO-8601 string in a DATETIME column.
+		// Use a unique in-memory database per test to avoid cross-test contention.
+		let mut bridge = DbBridge::new();
+		let config = DbConfig {
+			database_url: "sqlite::memory:".to_string(),
+			max_connections: 1,
+			min_connections: 1,
+			connection_timeout: 5000,
+			query_timeout: 10000,
+		};
+		bridge.configure(config).await.unwrap();
+
+		bridge.call("execute", json!({
+			"sql": "CREATE TABLE docs (id INTEGER PRIMARY KEY, updated_at DATETIME)",
+			"params": []
+		})).await.unwrap();
+
+		let insert = bridge.call("execute", json!({
+			"sql": "INSERT INTO docs (id, updated_at) VALUES (?, ?)",
+			"params": [1, {"__type": "epoch_s", "value": 1782437320_i64}]
+		})).await.unwrap();
+		assert_eq!(insert["ok"], true, "insert with epoch_s tag must succeed: {:?}", insert);
+
+		let rows = bridge.call("query", json!({
+			"sql": "SELECT updated_at FROM docs WHERE id = ?",
+			"params": [1]
+		})).await.unwrap();
+		assert_eq!(rows["ok"], true);
+		let updated_at = rows["data"]["rows"][0]["updated_at"].as_str().unwrap();
+		assert!(
+			updated_at.starts_with("2026-06-26 01:28:40"),
+			"updated_at should be an ISO-8601 datetime string, got {:?}",
+			updated_at
+		);
 	}
 }
 
