@@ -2856,18 +2856,23 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
             // Extract <page layout="..."> wrapper if present
             let (page_content, layout_name) = extract_page_layout(&template);
 
-            // Substitute template variables ({key} format)
-            let substituted = substitute_template(&page_content, &data);
+            // Evaluate server-side directives FIRST so that cl-iterate sees
+            // the raw `{items}` collection in `data` (a top-level substitute
+            // pass would stringify the array). Each directive expands its
+            // body with a scoped data context where the iteration variable
+            // is bound; remaining top-level `{var}` placeholders are then
+            // resolved by the substitute pass below.
+            let with_directives = process_directives(&page_content, &data);
 
-            // Evaluate server-side directives (cl-if, cl-show, cl-iterate)
-            let with_directives = process_directives(&substituted, &data);
+            // Substitute remaining top-level template variables ({key} format)
+            let substituted = substitute_template(&with_directives, &data);
 
             // Expand registered custom component tags to their server-side HTML
             let component_map = {
                 let reg = caller.data().component_registry.clone();
                 reg.read().map(|m| m.clone()).unwrap_or_default()
             };
-            let with_components = expand_component_tags(&with_directives, &component_map);
+            let with_components = expand_component_tags(&substituted, &component_map);
 
             // SRV001: v2 callback-based dispatch. If a plugin declared
             // `callback = { purpose = "component_tag_render", ... }` on
@@ -3018,46 +3023,106 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     Ok(())
 }
 
-/// Replace `{{ key }}` tokens in `template` with values from `data` per the
-/// `_ui_render_page` spec (`HOST_BRIDGE.md` §UI templates). Whitespace around
-/// `key` is allowed; missing keys produce an empty string. Single-brace forms
-/// (`{key}`) are not template syntax and are preserved as literals. Only
-/// top-level JSON object fields are supported.
+/// Replace `{key}` tokens in `template` with values from `data` per the
+/// `_ui_render_page` spec (`HOST_BRIDGE.md` §UI templates). Dotted paths
+/// (`{user.name}`) are looked up against the JSON `data`. Missing paths
+/// produce an empty string. To emit a literal brace in output, escape with
+/// `{{` (renders as `{`) or `}}` (renders as `}`). Malformed placeholders
+/// (empty key, newline inside braces) are preserved as literals.
 fn substitute_template(template: &str, data: &serde_json::Value) -> String {
-    let obj = data.as_object();
+    let bytes = template.as_bytes();
     let mut result = String::with_capacity(template.len());
-    let mut rest = template;
-    while !rest.is_empty() {
-        let Some(open) = rest.find("{{") else {
-            result.push_str(rest);
-            break;
-        };
-        result.push_str(&rest[..open]);
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
-            result.push_str("{{");
-            result.push_str(after_open);
-            break;
-        };
-        let raw_key = &after_open[..close];
-        let key = raw_key.trim();
-        if key.is_empty() || key.contains(['{', '}', '\n', '\r']) {
-            result.push_str("{{");
-            rest = after_open;
-            continue;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'{' {
+            // Escape: `{{` → literal `{`
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                result.push('{');
+                i += 2;
+                continue;
+            }
+            // Find the matching close brace on the same line, with no nested `{`
+            let body_start = i + 1;
+            let mut j = body_start;
+            let mut bad = false;
+            while j < bytes.len() {
+                let cj = bytes[j];
+                if cj == b'}' {
+                    break;
+                }
+                if cj == b'{' || cj == b'\n' || cj == b'\r' {
+                    bad = true;
+                    break;
+                }
+                j += 1;
+            }
+            if bad || j >= bytes.len() {
+                // Unclosed or malformed — leave the `{` as literal and advance one byte
+                result.push('{');
+                i += 1;
+                continue;
+            }
+            let key = template[body_start..j].trim();
+            if key.is_empty() {
+                // `{}` or `{   }` is not a placeholder — preserve literally
+                result.push_str(&template[i..=j]);
+                i = j + 1;
+                continue;
+            }
+            let replacement = lookup_path(data, key)
+                .map(json_value_to_string)
+                .unwrap_or_default();
+            result.push_str(&replacement);
+            i = j + 1;
+        } else if c == b'}' && i + 1 < bytes.len() && bytes[i + 1] == b'}' {
+            // Escape: `}}` → literal `}`
+            result.push('}');
+            i += 2;
+        } else {
+            // Push the full UTF-8 character (could be multi-byte)
+            let ch_len = utf8_char_len(c);
+            result.push_str(&template[i..i + ch_len]);
+            i += ch_len;
         }
-        let replacement = obj
-            .and_then(|o| o.get(key))
-            .map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Null => String::new(),
-                other => other.to_string(),
-            })
-            .unwrap_or_default();
-        result.push_str(&replacement);
-        rest = &after_open[close + 2..];
     }
     result
+}
+
+fn utf8_char_len(first_byte: u8) -> usize {
+    if first_byte < 0x80 { 1 }
+    else if first_byte < 0xC0 { 1 } // continuation byte (shouldn't start a char, but be safe)
+    else if first_byte < 0xE0 { 2 }
+    else if first_byte < 0xF0 { 3 }
+    else { 4 }
+}
+
+/// Look up a dot-separated path against the data. Returns None when any path
+/// segment is missing. Indexing into arrays by numeric segment is supported
+/// (`items.0.name`).
+fn lookup_path<'a>(data: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = data;
+    for part in path.split('.') {
+        current = match current {
+            serde_json::Value::Object(map) => map.get(part)?,
+            serde_json::Value::Array(arr) => {
+                let idx: usize = part.parse().ok()?;
+                arr.get(idx)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn json_value_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Replace custom component element tags with their registered server-side HTML.
@@ -3615,13 +3680,16 @@ fn find_element_end(html: &str, tag_start: usize, tag_name: &str) -> Option<usiz
     None
 }
 
-/// Process `cl-iterate="item in array_path"` directives.
+/// Process `cl-iterate="item in array_path"` directives. The wrapper element
+/// is preserved for every iteration; only the `cl-iterate` attribute itself
+/// is stripped from the rendered output. Inside the body, `{item}` and
+/// `{item.field}` resolve against the current iteration value via a scoped
+/// data context that overlays the iteration variable on top of `data`.
 fn process_iterate_directive(html: &str, data: &serde_json::Value) -> String {
     const MARKER: &str = " cl-iterate=\"";
     let mut result = html.to_string();
 
     while let Some(attr_pos) = result.find(MARKER) {
-
         let tag_start = match find_tag_start(&result, attr_pos) {
             Some(p) => p,
             None => break,
@@ -3635,6 +3703,7 @@ fn process_iterate_directive(html: &str, data: &serde_json::Value) -> String {
             None => break,
         };
         let attr_value = result[val_start..val_end].to_string();
+        let attr_full = format!(" cl-iterate=\"{}\"", attr_value);
 
         // Parse "item in array_path"
         let parts: Vec<&str> = attr_value.splitn(3, ' ').collect();
@@ -3644,50 +3713,52 @@ fn process_iterate_directive(html: &str, data: &serde_json::Value) -> String {
         let item_var = parts[0];
         let array_path = parts[2];
 
-        // Find element end
+        // Find element bounds
         let element_end = match find_element_end(&result, tag_start, &tag_name) {
             Some(e) => e,
             None => break,
         };
-
-        // Extract inner HTML (between opening tag close and closing tag)
         let open_tag_end = match result[tag_start..].find('>') {
             Some(p) => tag_start + p + 1,
             None => break,
         };
         let close_tag_len = tag_name.len() + 3; // </name>
+
+        // Capture the opening tag (e.g. `<li class="x" cl-iterate="...">`)
+        // and strip the `cl-iterate` attribute from it. All other attributes
+        // (class, id, data-*, etc.) are preserved on every iteration.
+        let opening_tag = result[tag_start..open_tag_end].replacen(&attr_full, "", 1);
+        let closing_tag = format!("</{}>", tag_name);
         let inner = result[open_tag_end..element_end - close_tag_len].to_string();
 
-        // Get array from data
+        // Get array from data; non-arrays render as zero iterations.
         let items: Vec<serde_json::Value> = match get_nested_value(data, array_path) {
             Some(serde_json::Value::Array(arr)) => arr.clone(),
             _ => vec![],
         };
 
-        // Expand
+        // Build a scoped data context for each iteration. The base object is
+        // the original `data` (so `{topLevelVar}` still resolves); the item
+        // is bound under `item_var`. For object items, every field is also
+        // bound under `item_var.field` via the lookup_path dot-walk.
         let mut expanded = String::new();
         for item in &items {
-            let mut item_html = inner.clone();
-            if let Some(obj) = item.as_object() {
-                for (field, value) in obj {
-                    let placeholder = format!("{{{}.{}}}", item_var, field);
-                    let replacement = match value {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Null => String::new(),
-                        other => other.to_string(),
-                    };
-                    item_html = item_html.replace(&placeholder, &replacement);
-                }
-            }
-            // Scalar items: {item_var}
-            let placeholder = format!("{{{}}}", item_var);
-            let scalar = match item {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Null => String::new(),
-                other => other.to_string(),
+            let mut scope = match data {
+                serde_json::Value::Object(map) => map.clone(),
+                _ => serde_json::Map::new(),
             };
-            item_html = item_html.replace(&placeholder, &scalar);
-            expanded.push_str(&item_html);
+            scope.insert(item_var.to_string(), item.clone());
+            let scoped = serde_json::Value::Object(scope);
+
+            // Recursively process nested directives in the body, then run
+            // the placeholder substitution. The recursion lets `cl-iterate`
+            // nest inside another `cl-iterate` (e.g. matrix rows).
+            let body_with_directives = process_directives(&inner, &scoped);
+            let body_substituted = substitute_template(&body_with_directives, &scoped);
+
+            expanded.push_str(&opening_tag);
+            expanded.push_str(&body_substituted);
+            expanded.push_str(&closing_tag);
         }
 
         result = format!("{}{}{}", &result[..tag_start], expanded, &result[element_end..]);
@@ -6247,37 +6318,39 @@ mod tests {
     }
 
     // Regression: SERVER-UI-RENDER-PAGE-INTERP-STRICT-WHITESPACE
-    // Spec (HOST_BRIDGE.md): `{{ key }}` with optional whitespace; missing keys produce empty string.
+    // Spec (HOST_BRIDGE.md §UI templates): `{key}` single-brace syntax; dotted
+    // paths supported; missing keys produce empty string; `{{` and `}}` escape
+    // literal braces.
 
     #[test]
-    fn substitute_template_double_brace_with_whitespace() {
+    fn substitute_template_single_brace() {
         let data = serde_json::json!({"greeting": "hello"});
-        assert_eq!(substitute_template("<p>{{ greeting }}</p>", &data), "<p>hello</p>");
+        assert_eq!(substitute_template("<p>{greeting}</p>", &data), "<p>hello</p>");
     }
 
     #[test]
-    fn substitute_template_double_brace_no_whitespace() {
-        let data = serde_json::json!({"greeting": "hi"});
-        assert_eq!(substitute_template("<p>{{greeting}}</p>", &data), "<p>hi</p>");
-    }
-
-    #[test]
-    fn substitute_template_double_brace_extra_whitespace() {
-        let data = serde_json::json!({"key": "value"});
-        assert_eq!(substitute_template("[{{   key   }}]", &data), "[value]");
+    fn substitute_template_dotted_path() {
+        let data = serde_json::json!({"user": {"name": "Ada"}});
+        assert_eq!(substitute_template("Hi {user.name}!", &data), "Hi Ada!");
     }
 
     #[test]
     fn substitute_template_missing_key_becomes_empty_string() {
         let data = serde_json::json!({"present": "x"});
-        assert_eq!(substitute_template("a{{missing}}b", &data), "ab");
+        assert_eq!(substitute_template("a{missing}b", &data), "ab");
+    }
+
+    #[test]
+    fn substitute_template_missing_nested_path_becomes_empty() {
+        let data = serde_json::json!({"user": {}});
+        assert_eq!(substitute_template("[{user.name}]", &data), "[]");
     }
 
     #[test]
     fn substitute_template_multiple_substitutions() {
         let data = serde_json::json!({"a": "1", "b": "2"});
         assert_eq!(
-            substitute_template("{{a}} and {{ b }} and {{a}}", &data),
+            substitute_template("{a} and {b} and {a}", &data),
             "1 and 2 and 1"
         );
     }
@@ -6286,7 +6359,7 @@ mod tests {
     fn substitute_template_non_string_values_stringify() {
         let data = serde_json::json!({"n": 42, "f": 3.5, "t": true, "z": null});
         assert_eq!(
-            substitute_template("{{n}}|{{f}}|{{t}}|{{z}}|", &data),
+            substitute_template("{n}|{f}|{t}|{z}|", &data),
             "42|3.5|true||"
         );
     }
@@ -6295,26 +6368,28 @@ mod tests {
     fn substitute_template_unclosed_brace_left_literal() {
         let data = serde_json::json!({"x": "y"});
         assert_eq!(
-            substitute_template("before {{ unclosed text", &data),
-            "before {{ unclosed text"
+            substitute_template("before { unclosed text", &data),
+            "before { unclosed text"
         );
     }
 
     #[test]
-    fn substitute_template_preserves_single_brace_literal() {
-        let data = serde_json::json!({"key": "value"});
-        // Single brace is not template syntax per spec — left as literal.
-        assert_eq!(
-            substitute_template("{key} and { key } and {{key}}", &data),
-            "{key} and { key } and value"
-        );
+    fn substitute_template_escape_double_brace() {
+        let data = serde_json::json!({"x": "y"});
+        // `{{` → literal `{`, `}}` → literal `}`. Both pairs in `{{x}}`
+        // are escapes, so the input renders as literal `{x}` (no
+        // substitution). To wrap a substitution in literal braces, the
+        // user writes `{{{x}}}` (escape + placeholder + escape).
+        assert_eq!(substitute_template("{{x}}", &data), "{x}");
+        assert_eq!(substitute_template("{{{x}}}", &data), "{y}");
+        assert_eq!(substitute_template("price: {{USD}} {x}", &data), "price: {USD} y");
     }
 
     #[test]
     fn substitute_template_preserves_utf8() {
         let data = serde_json::json!({"name": "世界"});
         assert_eq!(
-            substitute_template("¡Hola, {{ name }}! 🎉", &data),
+            substitute_template("¡Hola, {name}! 🎉", &data),
             "¡Hola, 世界! 🎉"
         );
     }
@@ -6323,8 +6398,91 @@ mod tests {
     fn substitute_template_empty_key_left_literal() {
         let data = serde_json::json!({});
         assert_eq!(
-            substitute_template("a{{}}b{{   }}c", &data),
-            "a{{}}b{{   }}c"
+            substitute_template("a{}b{   }c", &data),
+            "a{}b{   }c"
+        );
+    }
+
+    #[test]
+    fn substitute_template_newline_inside_braces_left_literal() {
+        let data = serde_json::json!({"x": "y"});
+        assert_eq!(
+            substitute_template("before {\nbroken} after", &data),
+            "before {\nbroken} after"
+        );
+    }
+
+    // --- cl-iterate wrapper preservation (RUNTIME-SSR-NEW-DIRECTIVES-NOT-IMPLEMENTED) ---
+
+    #[test]
+    fn iterate_preserves_wrapper_for_object_items() {
+        let data = serde_json::json!({"products": [
+            {"name": "Apple", "price": "1.00"},
+            {"name": "Banana", "price": "0.50"}
+        ]});
+        let html = r#"<ul><li cl-iterate="product in products" class="card">{product.name} - {product.price}</li></ul>"#;
+        let result = process_iterate_directive(html, &data);
+        assert_eq!(
+            result,
+            r#"<ul><li class="card">Apple - 1.00</li><li class="card">Banana - 0.50</li></ul>"#,
+            "cl-iterate must repeat the wrapper element with attributes (minus cl-iterate) preserved"
+        );
+    }
+
+    #[test]
+    fn iterate_preserves_wrapper_for_scalar_items() {
+        let data = serde_json::json!({"fruits": ["apple", "banana"]});
+        let html = r#"<ul><li cl-iterate="fruit in fruits">{fruit}</li></ul>"#;
+        let result = process_iterate_directive(html, &data);
+        assert_eq!(
+            result,
+            "<ul><li>apple</li><li>banana</li></ul>",
+            "scalar iteration must keep the wrapper per item"
+        );
+    }
+
+    #[test]
+    fn iterate_can_reference_outer_scope() {
+        let data = serde_json::json!({
+            "prefix": "Item",
+            "items": ["a", "b"]
+        });
+        let html = r#"<ul><li cl-iterate="x in items">{prefix}: {x}</li></ul>"#;
+        let result = process_iterate_directive(html, &data);
+        assert_eq!(result, "<ul><li>Item: a</li><li>Item: b</li></ul>");
+    }
+
+    #[test]
+    fn iterate_with_empty_array_removes_element() {
+        let data = serde_json::json!({"items": []});
+        let html = r#"<ul><li cl-iterate="x in items">{x}</li></ul>"#;
+        let result = process_iterate_directive(html, &data);
+        assert_eq!(result, "<ul></ul>", "empty array must produce zero iterations");
+    }
+
+    #[test]
+    fn iterate_missing_array_path_renders_zero_iterations() {
+        let data = serde_json::json!({});
+        let html = r#"<div><span cl-iterate="x in missing">{x}</span></div>"#;
+        let result = process_iterate_directive(html, &data);
+        assert_eq!(result, "<div></div>");
+    }
+
+    // --- End-to-end: render_page pipeline (directives → substitution) ---
+
+    #[test]
+    fn render_pipeline_handles_spec_canonical_pattern() {
+        // Mirrors the failing repro from RUNTIME-SSR-NEW-DIRECTIVES-NOT-IMPLEMENTED.
+        let data = serde_json::json!({
+            "title": "hi",
+            "fruits": ["apple", "banana"]
+        });
+        let template = "<h1>{title}</h1>\n<ul>\n  <li cl-iterate=\"fruit in fruits\">{fruit}</li>\n</ul>";
+        let with_directives = process_directives(template, &data);
+        let result = substitute_template(&with_directives, &data);
+        assert_eq!(
+            result,
+            "<h1>hi</h1>\n<ul>\n  <li>apple</li><li>banana</li>\n</ul>"
         );
     }
 }
