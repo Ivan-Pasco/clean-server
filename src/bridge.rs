@@ -3030,6 +3030,8 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
 /// `{{` (renders as `{`) or `}}` (renders as `}`). Malformed placeholders
 /// (empty key, newline inside braces) are preserved as literals.
 fn substitute_template(template: &str, data: &serde_json::Value) -> String {
+    // `{`, `}`, `\n`, `\r` are all ASCII, so byte-level scanning at char
+    // boundaries is safe inside a `&str`: every ASCII byte is its own char.
     let bytes = template.as_bytes();
     let mut result = String::with_capacity(template.len());
     let mut i = 0;
@@ -3037,35 +3039,31 @@ fn substitute_template(template: &str, data: &serde_json::Value) -> String {
         let c = bytes[i];
         if c == b'{' {
             // Escape: `{{` → literal `{`
-            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if bytes.get(i + 1) == Some(&b'{') {
                 result.push('{');
                 i += 2;
                 continue;
             }
-            // Find the matching close brace on the same line, with no nested `{`
+            // Find the matching close brace; reject nested `{` or newlines.
             let body_start = i + 1;
             let mut j = body_start;
             let mut bad = false;
             while j < bytes.len() {
-                let cj = bytes[j];
-                if cj == b'}' {
-                    break;
+                match bytes[j] {
+                    b'}' => break,
+                    b'{' | b'\n' | b'\r' => { bad = true; break; }
+                    _ => j += 1,
                 }
-                if cj == b'{' || cj == b'\n' || cj == b'\r' {
-                    bad = true;
-                    break;
-                }
-                j += 1;
             }
             if bad || j >= bytes.len() {
-                // Unclosed or malformed — leave the `{` as literal and advance one byte
+                // Unclosed or malformed — leave `{` as a literal, advance one ASCII byte.
                 result.push('{');
                 i += 1;
                 continue;
             }
             let key = template[body_start..j].trim();
             if key.is_empty() {
-                // `{}` or `{   }` is not a placeholder — preserve literally
+                // `{}` or `{   }` is not a placeholder — preserve literally.
                 result.push_str(&template[i..=j]);
                 i = j + 1;
                 continue;
@@ -3075,26 +3073,20 @@ fn substitute_template(template: &str, data: &serde_json::Value) -> String {
                 .unwrap_or_default();
             result.push_str(&replacement);
             i = j + 1;
-        } else if c == b'}' && i + 1 < bytes.len() && bytes[i + 1] == b'}' {
+        } else if c == b'}' && bytes.get(i + 1) == Some(&b'}') {
             // Escape: `}}` → literal `}`
             result.push('}');
             i += 2;
         } else {
-            // Push the full UTF-8 character (could be multi-byte)
-            let ch_len = utf8_char_len(c);
-            result.push_str(&template[i..i + ch_len]);
-            i += ch_len;
+            // Non-meta byte: copy the full UTF-8 char starting here. Using
+            // `chars().next()` works because `i` is always on a char boundary.
+            let ch = template[i..].chars().next().expect("non-empty by loop guard");
+            let len = ch.len_utf8();
+            result.push(ch);
+            i += len;
         }
     }
     result
-}
-
-fn utf8_char_len(first_byte: u8) -> usize {
-    if first_byte < 0x80 { 1 }
-    else if first_byte < 0xC0 { 1 } // continuation byte (shouldn't start a char, but be safe)
-    else if first_byte < 0xE0 { 2 }
-    else if first_byte < 0xF0 { 3 }
-    else { 4 }
 }
 
 /// Look up a dot-separated path against the data. Returns None when any path
