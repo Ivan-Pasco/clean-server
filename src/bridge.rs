@@ -3858,7 +3858,7 @@ fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
 }
 
 /// Register MCP bridge functions (_mcp_stdio_read, _mcp_stdio_write, _mcp_http_serve,
-/// _mcp_http_accept, _mcp_sse_send, _mcp_log)
+/// _mcp_http_accept, _mcp_http_respond, _mcp_sse_send, _mcp_log)
 fn register_mcp_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _mcp_stdio_read — blocks reading one newline-terminated JSON-RPC message from stdin
     register_bridge_fn!(
@@ -3981,6 +3981,40 @@ fn register_mcp_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
                 Some(request.response_tx);
             debug!("_mcp_http_accept: received request {} bytes", request.body.len());
             write_string_to_caller(&mut caller, &request.body)
+        }
+    );
+
+    // _mcp_http_respond — deliver response to the client of the last _mcp_http_accept.
+    // Pairs 1:1 with _mcp_http_accept; clearer semantics than reusing _mcp_stdio_write
+    // in HTTP mode (which conflates stdio and http transports).
+    register_bridge_fn!(
+        linker,
+        "_mcp_http_respond",
+        |mut caller: Caller<'_, WasmState>, body_ptr: i32, body_len: i32| -> i32 {
+            let body = match read_raw_string(&mut caller, body_ptr, body_len) {
+                Some(s) => s,
+                None => {
+                    error!("_mcp_http_respond: failed to read body");
+                    return 0;
+                }
+            };
+            let tx = caller
+                .data()
+                .mcp
+                .current_http_response
+                .lock()
+                .expect("mcp response lock")
+                .take();
+            match tx {
+                Some(sender) => {
+                    debug!("_mcp_http_respond: sending {} bytes", body.len());
+                    if sender.send(body).is_ok() { 1 } else { 0 }
+                }
+                None => {
+                    error!("_mcp_http_respond: no in-flight HTTP request to respond to");
+                    0
+                }
+            }
         }
     );
 
