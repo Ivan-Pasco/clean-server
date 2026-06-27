@@ -375,6 +375,19 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // int64_to_string - Convert 64-bit integer to string
+    // Signature: (value: i64) -> i32. Distinct from int_to_string because the
+    // compiler routes `integer:64`.toString() here so the full signed-64 range
+    // round-trips without narrowing through int_to_string's i32 parameter.
+    linker.func_wrap(
+        "env",
+        "int64_to_string",
+        |mut caller: Caller<'_, S>, value: i64| -> i32 {
+            let s = value.to_string();
+            write_string_to_caller(&mut caller, &s)
+        },
+    )?;
+
     // float_to_string - Convert float to string
     // Signature: (value: f64) -> i32
     linker.func_wrap(
