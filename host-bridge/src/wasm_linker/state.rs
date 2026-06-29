@@ -130,6 +130,10 @@ pub struct WasmMemory {
     grow_count: u32,
     /// Peak allocation offset seen during this cycle
     peak_offset: usize,
+    /// Stack of save marks for nested `_arena_scope_push` / `_arena_scope_pop`
+    /// bridges. Each entry snapshots `offset` at push time; pop rewinds the
+    /// offset to the saved value, reclaiming all allocations made in between.
+    arena_marks: Vec<usize>,
 }
 
 impl WasmMemory {
@@ -146,6 +150,31 @@ impl WasmMemory {
             initial_offset,
             grow_count: 0,
             peak_offset: initial_offset,
+            arena_marks: Vec::new(),
+        }
+    }
+
+    /// Push the current allocation offset onto the arena mark stack and
+    /// return the new stack depth (always >= 1). Used by the compiler-emitted
+    /// `_arena_scope_push` bridge to bracket per-iteration scratch allocations
+    /// inside HIR-rewritten dual-accumulator loops. See
+    /// foundation/platform-architecture/HOST_BRIDGE.md.
+    pub fn push_arena_mark(&mut self) -> usize {
+        self.arena_marks.push(self.offset);
+        self.arena_marks.len()
+    }
+
+    /// Pop the arena mark stack down to `target_depth`, rewinding `offset` to
+    /// the saved mark each time. Allocations made between the matching push
+    /// and this pop are reclaimed in O(1). Tolerates handle 0 / mismatched
+    /// pops as a no-op so the bridge stays robust against early-return paths.
+    pub fn pop_arena_mark(&mut self, target_depth: usize) {
+        while self.arena_marks.len() > target_depth {
+            if let Some(saved_offset) = self.arena_marks.pop() {
+                if saved_offset <= self.offset {
+                    self.offset = saved_offset;
+                }
+            }
         }
     }
 
@@ -165,6 +194,7 @@ impl WasmMemory {
         self.offset = self.initial_offset;
         self.grow_count = 0;
         self.peak_offset = self.initial_offset;
+        self.arena_marks.clear();
     }
 
     /// Set the initial offset (e.g., from __heap_ptr)
@@ -172,6 +202,7 @@ impl WasmMemory {
         self.initial_offset = offset;
         self.offset = offset;
         self.peak_offset = offset;
+        self.arena_marks.clear();
     }
 
     /// Get current allocation offset
@@ -517,6 +548,43 @@ mod tests {
         mem.reset();
         assert_eq!(mem.grow_count(), 0);
         assert_eq!(mem.peak_offset(), 65536);
+    }
+
+    #[test]
+    fn test_arena_scope_push_pop_reclaims_allocations() {
+        let mut mem = WasmMemory::new();
+        let base = mem.current_offset();
+
+        // Open scope, allocate, pop — offset must rewind exactly.
+        let handle = mem.push_arena_mark();
+        assert_eq!(handle, 1);
+        mem.allocate(1000);
+        assert!(mem.current_offset() > base);
+        mem.pop_arena_mark(handle - 1);
+        assert_eq!(mem.current_offset(), base);
+
+        // Nested scopes — inner pop only rewinds inner allocations.
+        let h1 = mem.push_arena_mark();
+        mem.allocate(100);
+        let off_after_outer_alloc = mem.current_offset();
+        let h2 = mem.push_arena_mark();
+        assert_eq!(h2, h1 + 1);
+        mem.allocate(500);
+        mem.pop_arena_mark(h2 - 1);
+        assert_eq!(mem.current_offset(), off_after_outer_alloc);
+        mem.pop_arena_mark(h1 - 1);
+        assert_eq!(mem.current_offset(), base);
+    }
+
+    #[test]
+    fn test_arena_scope_pop_zero_handle_is_noop() {
+        let mut mem = WasmMemory::new();
+        mem.push_arena_mark();
+        mem.allocate(128);
+        let off = mem.current_offset();
+        // Defensive: handle 0 means "no scope" — do nothing.
+        mem.pop_arena_mark(usize::MAX); // target depth above current → no pop
+        assert_eq!(mem.current_offset(), off);
     }
 
     #[test]

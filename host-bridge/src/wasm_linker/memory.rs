@@ -171,6 +171,47 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // =========================================
+    // ARENA SCOPE (compiler 0.30.391+)
+    // =========================================
+    //
+    // The compiler's dual-accumulator HIR rewrite (rewrite_dual_accumulator_loops)
+    // brackets per-iteration scratch allocations with `_arena_scope_push` /
+    // `_arena_scope_pop` so the bump-arena offset can be rewound at the end of
+    // each iteration. Without these imports framework plugins built with
+    // cln >= 0.30.391 fail to instantiate with "unknown import".
+
+    // _arena_scope_push - snapshot the bump-arena offset and return the new
+    // mark-stack depth as an opaque handle (always >= 1).
+    linker.func_wrap(
+        "env",
+        "_arena_scope_push",
+        |mut caller: Caller<'_, S>| -> i32 {
+            let depth = caller.data_mut().memory_mut().push_arena_mark();
+            depth as i32
+        },
+    )?;
+
+    linker.alias("env", "_arena_scope_push", "env", "arena.scope_push")?;
+
+    // _arena_scope_pop - rewind the bump-arena offset to the mark saved by the
+    // matching push, reclaiming all allocations made in between. `handle <= 0`
+    // is treated as a no-op so generated code that early-returns past the push
+    // does not trap.
+    linker.func_wrap(
+        "env",
+        "_arena_scope_pop",
+        |mut caller: Caller<'_, S>, handle: i32| {
+            if handle <= 0 {
+                return;
+            }
+            let target_depth = (handle as usize).saturating_sub(1);
+            caller.data_mut().memory_mut().pop_arena_mark(target_depth);
+        },
+    )?;
+
+    linker.alias("env", "_arena_scope_pop", "env", "arena.scope_pop")?;
+
+    // =========================================
     // STATE RESET (compiler 0.30.155+)
     // =========================================
 
