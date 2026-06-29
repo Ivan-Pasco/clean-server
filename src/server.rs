@@ -1203,7 +1203,6 @@ fn handler_response_to_axum_response(
 
     let body = inject_head_tags(
         handler_response.body,
-        handler_response.head_css,
         handler_response.head_links,
     );
 
@@ -1301,8 +1300,8 @@ fn mask_db_url(url: &str) -> String {
 
 /// Inject accumulated `<style>` and `<link rel="stylesheet">` tags before `</head>`.
 /// If the response is not HTML or has no `</head>`, returns the body unchanged.
-fn inject_head_tags(body: String, css: Vec<String>, links: Vec<String>) -> String {
-    if css.is_empty() && links.is_empty() {
+fn inject_head_tags(body: String, links: Vec<String>) -> String {
+    if links.is_empty() {
         return body;
     }
     let close_head = body.find("</head>");
@@ -1314,9 +1313,6 @@ fn inject_head_tags(body: String, css: Vec<String>, links: Vec<String>) -> Strin
     let mut injection = String::new();
     for href in &links {
         injection.push_str(&format!("<link rel=\"stylesheet\" href=\"{}\">\n", href));
-    }
-    for style in &css {
-        injection.push_str(&format!("<style>{}</style>\n", style));
     }
 
     let mut result = String::with_capacity(body.len() + injection.len());

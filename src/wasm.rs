@@ -252,8 +252,6 @@ pub struct WasmState {
     pub permission_gate: PermissionGate,
     /// Resource limits for this Store (memory, tables, instances)
     pub limits: StoreLimits,
-    /// Accumulated CSS strings for injection into the response <head>
-    pub pending_head_css: Vec<String>,
     /// Accumulated stylesheet hrefs for injection into the response <head> (deduplicated)
     pub pending_head_links: Vec<String>,
     /// MCP bridge state (transport mode, request queue, SSE clients)
@@ -322,8 +320,6 @@ pub struct HandlerResponse {
     pub redirect: Option<(u16, String)>,
     /// Response status code (from _http_respond)
     pub status: Option<u16>,
-    /// CSS strings to inject into the response <head>
-    pub head_css: Vec<String>,
     /// Stylesheet hrefs to inject into the response <head> as <link> tags
     pub head_links: Vec<String>,
 }
@@ -426,7 +422,6 @@ impl WasmState {
             pending_component_attrs: None,
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
-            pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
             mcp: create_shared_mcp_bridge_state(),
             test_responses: std::collections::HashMap::new(),
@@ -465,7 +460,6 @@ impl WasmState {
             pending_component_attrs: None,
             permission_gate: PermissionGate::allow_all(),
             limits: build_store_limits(DEFAULT_MEMORY_LIMIT),
-            pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
             mcp: create_shared_mcp_bridge_state(),
             test_responses: std::collections::HashMap::new(),
@@ -514,7 +508,6 @@ impl WasmState {
             pending_component_attrs: None,
             permission_gate,
             limits: build_store_limits(memory_limit),
-            pending_head_css: Vec::new(),
             pending_head_links: Vec::new(),
             mcp: create_shared_mcp_bridge_state(),
             test_responses: std::collections::HashMap::new(),
@@ -544,7 +537,6 @@ impl WasmState {
         self.pending_set_cookie = None;
         self.pending_headers.clear();
         self.pending_redirect = None;
-        self.pending_head_css.clear();
         self.pending_head_links.clear();
     }
 
@@ -595,11 +587,6 @@ impl WasmState {
     /// Set a redirect response
     pub fn set_redirect(&mut self, status_code: u16, url: String) {
         self.pending_redirect = Some((status_code, url));
-    }
-
-    /// Take accumulated head CSS (consumes it)
-    pub fn take_pending_head_css(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pending_head_css)
     }
 
     /// Take accumulated head link hrefs (consumes them)
@@ -1069,7 +1056,6 @@ impl WasmInstance {
         let headers = store.data_mut().take_pending_headers();
         let redirect = store.data_mut().take_pending_redirect();
         let status = store.data_mut().take_pending_status();
-        let head_css = store.data_mut().take_pending_head_css();
         let head_links = store.data_mut().take_pending_head_links();
 
         Ok(HandlerResponse {
@@ -1078,7 +1064,6 @@ impl WasmInstance {
             headers,
             redirect,
             status,
-            head_css,
             head_links,
         })
     }

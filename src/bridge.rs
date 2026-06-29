@@ -19,7 +19,7 @@
 //! - Session management (_session_store, _session_get, _session_delete, _session_exists, _session_set_csrf, _session_get_csrf, _http_set_cookie)
 //! - Session auth (_auth_get_session, _auth_require_auth, _auth_require_role, _auth_can, _auth_has_any_role)
 //! - Roles (_roles_register, _role_has_permission, _role_get_permissions)
-//! - UI templates (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css, _ui_inject_head_link, _ui_register_component_html)
+//! - UI templates (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_link, _ui_register_component_html)
 
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
@@ -2752,7 +2752,7 @@ fn register_islands_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<(
     Ok(())
 }
 
-/// Register UI template bridge functions (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_css, _ui_inject_head_link)
+/// Register UI template bridge functions (_ui_load_layout, _ui_load_page, _ui_render_page, _ui_inject_head_link)
 fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _ui_load_layout - Load an HTML layout file. Caller provides the full relative path
     // (e.g. "app/ui/layouts/main.html"). Path resolution is the caller's responsibility.
@@ -2940,24 +2940,6 @@ fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
                 "text/html; charset=utf-8".to_string(),
             );
             write_string_to_caller(&mut caller, &rendered)
-        }
-    );
-
-    // _ui_inject_head_css - Accumulate CSS for injection into the response <head>
-    register_bridge_fn!(
-        linker,
-        "_ui_inject_head_css",
-        |mut caller: Caller<'_, WasmState>, css_ptr: i32, css_len: i32| -> i32 {
-            let css = match read_raw_string(&mut caller, css_ptr, css_len) {
-                Some(s) => s,
-                None => {
-                    error!("_ui_inject_head_css: Failed to read CSS string");
-                    return 0;
-                }
-            };
-
-            caller.data_mut().pending_head_css.push(css);
-            1
         }
     );
 
