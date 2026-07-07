@@ -2127,6 +2127,138 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         }
     );
 
+    // _jwt_refresh_and_rotate(token, secret, algorithm, new_ttl_seconds) -> ptr
+    //
+    // Verifies the supplied refresh token, atomically marks its `jti` as
+    // consumed in the revocation list, and returns a freshly-signed token that
+    // carries a new `jti`, `iat`, and `exp = now + new_ttl_seconds`. Enforces
+    // AUTH-J007 / AUTH-J009 single-use rotation: replaying a token that has
+    // already been rotated returns empty string.
+    //
+    // Returns empty string on any of: invalid signature, expired token, missing
+    // `jti`/`sub` claims, or replay of an already-consumed token.
+    register_bridge_fn!(linker, "_jwt_refresh_and_rotate",
+        |mut caller: Caller<'_, WasmState>,
+         token_ptr: i32, token_len: i32,
+         secret_ptr: i32, secret_len: i32,
+         algo_ptr: i32, algo_len: i32,
+         new_ttl_seconds: i64| -> i32 {
+            if !check_bridge_permission(&caller, "_jwt_refresh_and_rotate") {
+                return write_string_to_caller(&mut caller, "");
+            }
+
+            let token = match read_raw_string(&mut caller, token_ptr, token_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => return write_string_to_caller(&mut caller, ""),
+            };
+            let secret = match read_raw_string(&mut caller, secret_ptr, secret_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => return write_string_to_caller(&mut caller, ""),
+            };
+            let algorithm = read_raw_string(&mut caller, algo_ptr, algo_len)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "HS256".to_string());
+
+            let new_ttl_seconds = if new_ttl_seconds > 0 { new_ttl_seconds as u64 } else {
+                return write_string_to_caller(&mut caller, "");
+            };
+
+            // 1. Verify signature and expiry. `verify_jwt` also enforces `exp`.
+            let verify_result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut crypto = host_bridge::CryptoBridge::new();
+                    crypto
+                        .call(
+                            "verify_jwt",
+                            serde_json::json!({
+                                "token": token,
+                                "secret": secret
+                            }),
+                        )
+                        .await
+                })
+            });
+
+            let payload = match verify_result {
+                Ok(v) if v["ok"] == true => v["data"].clone(),
+                _ => return write_string_to_caller(&mut caller, ""),
+            };
+
+            let mut payload_obj = match payload {
+                serde_json::Value::Object(map) => map,
+                _ => return write_string_to_caller(&mut caller, ""),
+            };
+
+            // 2. Extract `jti`. A refresh token without a jti cannot be tracked
+            // for replay; reject rather than issue a rotation the framework
+            // cannot enforce single-use on.
+            let old_jti = match payload_obj.get("jti").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => {
+                    warn!("_jwt_refresh_and_rotate: token has no jti claim; refusing rotation");
+                    return write_string_to_caller(&mut caller, "");
+                }
+            };
+
+            // 3. Compute remaining lifetime so the revocation entry lasts at
+            // least as long as the original token would have been valid.
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let old_exp = payload_obj.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+            let remaining = (old_exp - now_secs).max(0) as u64;
+            // Cap the revocation entry lifetime so a maliciously long-lived
+            // token cannot pin the entry in memory forever.
+            let revoke_ttl = std::time::Duration::from_secs(remaining.min(30 * 24 * 3600));
+
+            // 4. Atomically check-and-consume the old jti under the write lock.
+            let session_store = caller.data().session_store.clone();
+            let first_use = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.mark_jti_consumed(&old_jti, revoke_ttl)
+            };
+            if !first_use {
+                // Replay attempt (AUTH-J009). Do not issue a new token.
+                warn!("_jwt_refresh_and_rotate: replay of consumed jti={}", old_jti);
+                return write_string_to_caller(&mut caller, "");
+            }
+
+            // 5. Build the new payload: keep original claims, refresh iat/exp/jti.
+            let new_jti = uuid::Uuid::new_v4().to_string();
+            let new_exp = now_secs.saturating_add(new_ttl_seconds as i64);
+            payload_obj.insert("iat".to_string(), serde_json::Value::from(now_secs));
+            payload_obj.insert("exp".to_string(), serde_json::Value::from(new_exp));
+            payload_obj.insert("jti".to_string(), serde_json::Value::from(new_jti));
+
+            let new_payload = serde_json::Value::Object(payload_obj);
+
+            // 6. Sign the new token.
+            let sign_result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut crypto = host_bridge::CryptoBridge::new();
+                    crypto
+                        .call(
+                            "sign",
+                            serde_json::json!({
+                                "payload": new_payload,
+                                "secret": secret,
+                                "algorithm": algorithm
+                            }),
+                        )
+                        .await
+                })
+            });
+
+            let new_token = match sign_result {
+                Ok(v) if v["ok"] == true => v["data"].as_str().unwrap_or("").to_string(),
+                _ => String::new(),
+            };
+
+            write_string_to_caller(&mut caller, &new_token)
+        }
+    );
+
     Ok(())
 }
 

@@ -95,6 +95,10 @@ pub struct SessionStore {
     raw_data: HashMap<String, (String, Instant)>,
     /// CSRF tokens indexed by session ID
     csrf_tokens: HashMap<String, String>,
+    /// Consumed JWT ids (jti) with the instant at which they expire from the
+    /// revocation list. Used by `_jwt_refresh_and_rotate` to enforce single-use
+    /// refresh tokens (spec AUTH-J007, AUTH-J009).
+    consumed_jti: HashMap<String, Instant>,
     /// Configuration
     config: SessionConfig,
 }
@@ -105,6 +109,7 @@ impl SessionStore {
             sessions: HashMap::new(),
             raw_data: HashMap::new(),
             csrf_tokens: HashMap::new(),
+            consumed_jti: HashMap::new(),
             config,
         }
     }
@@ -256,15 +261,45 @@ impl SessionStore {
         self.csrf_tokens.get(session_id).cloned()
     }
 
+    /// Mark a JWT `jti` as consumed. Returns `false` if the `jti` was already
+    /// present (i.e. a replay attempt); returns `true` on first consumption.
+    ///
+    /// `ttl` is how long the record should live in the revocation list — should
+    /// match the original token's remaining lifetime so the entry is still
+    /// blocking replays right up to natural expiry.
+    pub fn mark_jti_consumed(&mut self, jti: &str, ttl: Duration) -> bool {
+        // Opportunistically drop any expired entries so this map does not grow
+        // unbounded when tokens are refreshed frequently.
+        let now = Instant::now();
+        self.consumed_jti.retain(|_, expires_at| *expires_at > now);
+
+        if self.consumed_jti.contains_key(jti) {
+            return false;
+        }
+        self.consumed_jti.insert(jti.to_string(), now + ttl);
+        true
+    }
+
+    /// Returns true if `jti` has been consumed (and is still within its TTL).
+    pub fn is_jti_consumed(&self, jti: &str) -> bool {
+        match self.consumed_jti.get(jti) {
+            Some(expires_at) => *expires_at > Instant::now(),
+            None => false,
+        }
+    }
+
     /// Cleanup expired sessions (call periodically)
     pub fn cleanup_expired(&mut self) -> usize {
         let timeout = Duration::from_secs(self.config.timeout_seconds);
         let before = self.sessions.len() + self.raw_data.len();
+        let now = Instant::now();
 
         self.sessions
             .retain(|_, session| !session.is_expired(timeout));
         self.raw_data
             .retain(|_, (_, last_accessed)| last_accessed.elapsed() <= timeout);
+        self.consumed_jti
+            .retain(|_, expires_at| *expires_at > now);
 
         let after = self.sessions.len() + self.raw_data.len();
         let removed = before - after;
@@ -375,6 +410,28 @@ mod tests {
         assert_eq!(cookies.get("session"), Some(&"abc123".to_string()));
         assert_eq!(cookies.get("theme"), Some(&"dark".to_string()));
         assert_eq!(cookies.get("lang"), Some(&"en".to_string()));
+    }
+
+    #[test]
+    fn test_jti_first_consumption_succeeds_replay_fails() {
+        let mut store = SessionStore::new(SessionConfig::default());
+        let ttl = Duration::from_secs(60);
+
+        assert!(store.mark_jti_consumed("jti-abc", ttl));
+        assert!(store.is_jti_consumed("jti-abc"));
+        // Second call with the same jti must return false — this is the replay
+        // guard the spec (AUTH-J007, AUTH-J009) requires.
+        assert!(!store.mark_jti_consumed("jti-abc", ttl));
+    }
+
+    #[test]
+    fn test_jti_expires_after_ttl() {
+        let mut store = SessionStore::new(SessionConfig::default());
+        // Zero-duration entry is considered expired on the next `Instant::now()`.
+        assert!(store.mark_jti_consumed("jti-short", Duration::from_millis(0)));
+        std::thread::sleep(Duration::from_millis(5));
+        // Expired entries are treated as not-consumed so the caller can reissue.
+        assert!(!store.is_jti_consumed("jti-short"));
     }
 
     #[test]
