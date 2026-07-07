@@ -2127,6 +2127,97 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
         }
     );
 
+    // _auth_create_reset_token(user_id, ttl_seconds) -> ptr
+    //
+    // Generates a cryptographically random opaque token, persists
+    // (sha256(token), user_id, expires_at) in the SessionStore, and returns
+    // the plaintext token as a length-prefixed string. The store never sees
+    // the plaintext, so a memory dump does not leak usable tokens.
+    //
+    // Backs `auth.createResetToken(userId, ttlSeconds)` per frame.auth spec §16.
+    // Returns empty string on invalid inputs (non-positive ttl or user_id ≤ 0).
+    register_bridge_fn!(linker, "_auth_create_reset_token",
+        |mut caller: Caller<'_, WasmState>,
+         user_id: i64,
+         ttl_seconds: i64| -> i32 {
+            if !check_bridge_permission(&caller, "_auth_create_reset_token") {
+                return write_string_to_caller(&mut caller, "");
+            }
+            if user_id <= 0 || ttl_seconds <= 0 {
+                return write_string_to_caller(&mut caller, "");
+            }
+            let user_id_i32 = if user_id > i32::MAX as i64 {
+                warn!("_auth_create_reset_token: user_id {} exceeds i32 range", user_id);
+                return write_string_to_caller(&mut caller, "");
+            } else {
+                user_id as i32
+            };
+
+            // 32 bytes of entropy from two v4 UUIDs (v4 uses OS RNG). Hex-encoded
+            // to a 64-char opaque token that is safe to embed in a URL.
+            let a = uuid::Uuid::new_v4();
+            let b = uuid::Uuid::new_v4();
+            let mut buf = [0u8; 32];
+            buf[..16].copy_from_slice(a.as_bytes());
+            buf[16..].copy_from_slice(b.as_bytes());
+            let token = hex::encode(buf);
+
+            use sha2::Digest;
+            let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+
+            let ttl = std::time::Duration::from_secs(ttl_seconds as u64);
+            let session_store = caller.data().session_store.clone();
+            let inserted = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.store_reset_token(&token_hash, user_id_i32, ttl)
+            };
+            if !inserted {
+                // Cryptographic collision is impossible in practice; only happens
+                // if the store already had a matching hash from a prior call
+                // this same nanosecond. Refuse rather than issue a duplicate.
+                warn!("_auth_create_reset_token: hash collision for user {}", user_id_i32);
+                return write_string_to_caller(&mut caller, "");
+            }
+
+            write_string_to_caller(&mut caller, &token)
+        }
+    );
+
+    // _auth_consume_reset_token(token) -> i64
+    //
+    // Atomically validates the presented token and, on success, removes the
+    // stored row so the token cannot be used again. Returns the associated
+    // user_id, or 0 if the token is invalid, expired, or already consumed.
+    //
+    // Backs `auth.consumeResetToken(token)` per frame.auth spec §16.
+    // Atomicity is provided by the SessionStore write lock — a second caller
+    // racing on the same token sees the row already gone.
+    register_bridge_fn!(linker, "_auth_consume_reset_token",
+        |mut caller: Caller<'_, WasmState>,
+         token_ptr: i32, token_len: i32| -> i64 {
+            if !check_bridge_permission(&caller, "_auth_consume_reset_token") {
+                return 0;
+            }
+            let token = match read_raw_string(&mut caller, token_ptr, token_len) {
+                Some(s) if !s.is_empty() => s,
+                _ => return 0,
+            };
+
+            use sha2::Digest;
+            let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+
+            let session_store = caller.data().session_store.clone();
+            let user_id = {
+                let mut store = session_store.write().expect("session store lock poisoned");
+                store.consume_reset_token(&token_hash)
+            };
+            match user_id {
+                Some(id) => id as i64,
+                None => 0,
+            }
+        }
+    );
+
     // _jwt_refresh_and_rotate(token, secret, algorithm, new_ttl_seconds) -> ptr
     //
     // Verifies the supplied refresh token, atomically marks its `jti` as

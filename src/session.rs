@@ -99,6 +99,11 @@ pub struct SessionStore {
     /// revocation list. Used by `_jwt_refresh_and_rotate` to enforce single-use
     /// refresh tokens (spec AUTH-J007, AUTH-J009).
     consumed_jti: HashMap<String, Instant>,
+    /// Active password reset tokens, keyed by the *hex sha256* of the plaintext
+    /// token so a store dump does not leak usable tokens. Value is
+    /// `(user_id, expires_at)`. Consumed atomically via `consume_reset_token()`
+    /// under the SessionStore write lock.
+    password_resets: HashMap<String, (i32, Instant)>,
     /// Configuration
     config: SessionConfig,
 }
@@ -110,6 +115,7 @@ impl SessionStore {
             raw_data: HashMap::new(),
             csrf_tokens: HashMap::new(),
             consumed_jti: HashMap::new(),
+            password_resets: HashMap::new(),
             config,
         }
     }
@@ -288,6 +294,44 @@ impl SessionStore {
         }
     }
 
+    /// Store a password reset token. Callers pass the SHA-256 hex digest of
+    /// the plaintext token — the plaintext is never held in the store so a
+    /// memory dump does not leak usable tokens. `ttl` is measured from now.
+    ///
+    /// Returns `true` if the row was inserted, `false` if a row with the same
+    /// hash was already present (collision on cryptographic random is
+    /// effectively impossible; this only happens if the caller supplies a
+    /// pre-existing hash).
+    pub fn store_reset_token(&mut self, token_hash: &str, user_id: i32, ttl: Duration) -> bool {
+        let now = Instant::now();
+        // Opportunistic cleanup keeps this map from growing unbounded when
+        // users churn reset requests without following through.
+        self.password_resets
+            .retain(|_, (_, expires_at)| *expires_at > now);
+
+        if self.password_resets.contains_key(token_hash) {
+            return false;
+        }
+        self.password_resets
+            .insert(token_hash.to_string(), (user_id, now + ttl));
+        true
+    }
+
+    /// Atomically validate and consume a password reset token. If the hash is
+    /// present AND not expired, the row is removed and the associated user_id
+    /// is returned. Returns `None` on invalid, expired, or already-consumed.
+    ///
+    /// Atomicity comes from the fact that both the check and the remove
+    /// happen while the caller holds the `SessionStore` write lock — a second
+    /// caller attempting the same hash will observe the row already gone.
+    pub fn consume_reset_token(&mut self, token_hash: &str) -> Option<i32> {
+        let now = Instant::now();
+        match self.password_resets.remove(token_hash) {
+            Some((user_id, expires_at)) if expires_at > now => Some(user_id),
+            _ => None,
+        }
+    }
+
     /// Cleanup expired sessions (call periodically)
     pub fn cleanup_expired(&mut self) -> usize {
         let timeout = Duration::from_secs(self.config.timeout_seconds);
@@ -300,6 +344,8 @@ impl SessionStore {
             .retain(|_, (_, last_accessed)| last_accessed.elapsed() <= timeout);
         self.consumed_jti
             .retain(|_, expires_at| *expires_at > now);
+        self.password_resets
+            .retain(|_, (_, expires_at)| *expires_at > now);
 
         let after = self.sessions.len() + self.raw_data.len();
         let removed = before - after;
@@ -432,6 +478,30 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         // Expired entries are treated as not-consumed so the caller can reissue.
         assert!(!store.is_jti_consumed("jti-short"));
+    }
+
+    #[test]
+    fn test_reset_token_store_and_consume() {
+        let mut store = SessionStore::new(SessionConfig::default());
+        let ttl = Duration::from_secs(900);
+        // Not-a-real-hash, but store treats it as an opaque key.
+        let hash = "0123456789abcdef".repeat(4);
+
+        assert!(store.store_reset_token(&hash, 42, ttl));
+        // First consume returns the user id; second consume must return None
+        // — this is the atomic single-use guarantee frame.auth relies on.
+        assert_eq!(store.consume_reset_token(&hash), Some(42));
+        assert_eq!(store.consume_reset_token(&hash), None);
+    }
+
+    #[test]
+    fn test_reset_token_expired_returns_none() {
+        let mut store = SessionStore::new(SessionConfig::default());
+        let hash = "abababab".repeat(8);
+        // TTL of 0 -> row is expired the moment the next Instant::now() fires.
+        assert!(store.store_reset_token(&hash, 7, Duration::from_millis(0)));
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(store.consume_reset_token(&hash), None);
     }
 
     #[test]
