@@ -1,6 +1,6 @@
 [package]
 name = "clean-server"
-version = "1.9.71"
+version = "1.9.72"
 edition = "2024"
 authors = ["Ivan Pasco"]
 license = "MIT OR Apache-2.0"
@@ -12,6 +12,10 @@ categories = ["web-programming::http-server", "wasm"]
 [[bin]]
 name = "clean-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "canary_runner"
+path = "src/bin/canary_runner.rs"
 
 [lib]
 name = "clean_server"

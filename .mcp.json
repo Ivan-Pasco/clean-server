@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "clean-language": {
+      "command": "/Users/earcandy/.cleen/bin/cln",
+      "args": ["mcp-server"]
+    }
+  }
+}

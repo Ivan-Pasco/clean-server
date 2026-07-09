@@ -1,0 +1,175 @@
+name: Nightly Canaries
+
+on:
+  schedule:
+    # 07:00 UTC every day — a few hours after the compiler nightly release
+    # so the tag it produces is already downloadable.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      compiler_ref:
+        description: 'Compiler ref to check out (branch, tag, or SHA). Defaults to latest release.'
+        required: false
+        default: ''
+      compiler_release:
+        description: 'Compiler release tag to pull canary WASM artifacts from. Empty = latest.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  COMPILER_REPO: Ivan-Pasco/clean-language-compiler
+  CANARY_ARTIFACT: canaries-wasm
+
+jobs:
+  canaries:
+    name: Layer 2 canaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout clean-server
+        uses: actions/checkout@v4
+        with:
+          path: clean-server
+
+      - name: Checkout clean-language-compiler (for canary .cln headers)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.COMPILER_REPO }}
+          ref: ${{ github.event.inputs.compiler_ref || 'master' }}
+          path: clean-language-compiler
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Setup cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            clean-server/target/
+          key: ${{ runner.os }}-cargo-canaries-${{ hashFiles('clean-server/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-canaries-
+            ${{ runner.os }}-cargo-
+
+      - name: Build canary_runner
+        working-directory: clean-server
+        run: cargo build --release --bin canary_runner
+
+      - name: Resolve compiler release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ -n "${{ github.event.inputs.compiler_release }}" ]]; then
+            tag="${{ github.event.inputs.compiler_release }}"
+          else
+            tag="$(gh release view --repo "$COMPILER_REPO" --json tagName -q .tagName)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved compiler release: $tag"
+
+      - name: Download canary WASM artifacts from compiler release
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: |
+          set -e
+          mkdir -p compiler-canaries
+          cd compiler-canaries
+          if gh release download "${{ steps.resolve.outputs.tag }}" \
+              --repo "$COMPILER_REPO" \
+              --pattern '*canaries*' \
+              --clobber 2>/dev/null; then
+            echo "Downloaded canary artifact from release."
+            # Unpack whatever archive format the release ships.
+            for f in *.tar.gz *.tgz; do
+              [[ -e "$f" ]] || continue
+              tar -xzf "$f"
+            done
+            for f in *.zip; do
+              [[ -e "$f" ]] || continue
+              unzip -o "$f"
+            done
+            echo "have_release_artifact=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No canaries artifact on release — will build from source."
+            echo "have_release_artifact=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build canaries from compiler source (fallback)
+        if: steps.download.outputs.have_release_artifact != 'true'
+        working-directory: clean-language-compiler
+        run: |
+          # Compile every canary .cln with --opt-level 2 --strict-hosts --plugins.
+          # The compiler ships a build target for this; if that changes, the
+          # invocation below needs to move in lock-step.
+          cargo build --release --bin clean-language-compiler
+          mkdir -p tests/output/canaries
+          for cln in tests/cln/canaries/*.cln; do
+            name="$(basename "$cln" .cln)"
+            ./target/release/clean-language-compiler compile \
+              -i "$cln" \
+              -o "tests/output/canaries/$name.wasm" \
+              --opt-level 2 --strict-hosts --plugins \
+              || {
+                echo "::warning::Failed to compile canary $name — will be reported as missing_wasm."
+              }
+          done
+
+      - name: Resolve WASM directory
+        id: wasm
+        run: |
+          if [[ -d "compiler-canaries/canaries" ]]; then
+            echo "dir=$GITHUB_WORKSPACE/compiler-canaries/canaries" >> "$GITHUB_OUTPUT"
+          elif compgen -G "compiler-canaries/*.wasm" > /dev/null; then
+            echo "dir=$GITHUB_WORKSPACE/compiler-canaries" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=$GITHUB_WORKSPACE/clean-language-compiler/tests/output/canaries" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run canaries
+        id: run
+        working-directory: clean-server
+        run: |
+          set +e
+          ./scripts/run_canaries.sh \
+            --cln-dir "$GITHUB_WORKSPACE/clean-language-compiler/tests/cln/canaries" \
+            --wasm-dir "${{ steps.wasm.outputs.dir }}" \
+            --runner "$GITHUB_WORKSPACE/clean-server/target/release/canary_runner" \
+            --verbose \
+            > canary-summary.txt \
+            2> canary-diffs.jsonl
+          rc=$?
+          cat canary-summary.txt
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Upload canary diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-report-${{ github.run_id }}
+          path: |
+            clean-server/canary-summary.txt
+            clean-server/canary-diffs.jsonl
+          if-no-files-found: warn
+
+      - name: Fail job if canaries failed
+        if: steps.run.outputs.exit_code != '0'
+        run: |
+          echo "One or more canaries failed. See canary-diffs.jsonl artifact." >&2
+          exit 1

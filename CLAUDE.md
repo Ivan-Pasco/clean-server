@@ -113,3 +113,17 @@ Facts about the language live in `foundation/spec/` (at the project root). Facts
 | New or changed plugin contract | `foundation/spec/plugins/plugin-contract.md` |
 
 The spec files are the single source of truth. Component documentation explains implementation — it does not redefine language rules.
+
+## Cross-component prompts
+
+The team publishes cross-component prompts, change requests, and handoffs at https://errors.cleanlanguage.dev/prompts.
+
+- `/team-prompt` publishes a prompt. Use it when this session discovered something a session in a **different** component must know before working: a required change there, a discovered contract, a blocker needing a decision from another maintainer, or a session-end handoff whose next reader is in a different repo.
+- `/team-prompts-list` fetches open prompts addressed to this component (inferred from `$PWD`). Consider running it at session start if the user asks for status.
+
+Do **not** use these skills for:
+- Compiler/plugin/runtime bug reports — those go through `report_error` via the MCP server.
+- Same-component notes — use `TASKS.md` or a session-handoff markdown file.
+- Chat.
+
+The API token lives at `~/.config/clean-errors/api_token` (mode 600). Team members without it get it from the team vault.
