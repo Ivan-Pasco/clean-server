@@ -619,7 +619,14 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // http_encode_url - URL-encode a string
+    // http_encode_url - percent-encode a string per RFC 3986 (unreserved set).
+    // Space becomes %20, NOT '+'. Form-urlencoding ('+' for space) is only
+    // valid inside application/x-www-form-urlencoded bodies; general URL
+    // encoding for path/query components must use %20. The canary corpus
+    // in the compiler (`tests/cln/canaries/http_client.cln`) asserts the
+    // RFC 3986 shape as the Layer 2 contract.
+    //
+    // RFC 3986 unreserved characters (never encoded): A-Z a-z 0-9 - . _ ~
     linker.func_wrap(
         "env",
         "http_encode_url",
@@ -628,7 +635,14 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 Some(s) => s,
                 None => return write_string_to_caller(&mut caller, ""),
             };
-            let encoded: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
+            const RFC3986_RESERVED: &percent_encoding::AsciiSet =
+                &percent_encoding::NON_ALPHANUMERIC
+                    .remove(b'-')
+                    .remove(b'.')
+                    .remove(b'_')
+                    .remove(b'~');
+            let encoded = percent_encoding::utf8_percent_encode(&url, RFC3986_RESERVED)
+                .to_string();
             write_string_to_caller(&mut caller, &encoded)
         },
     )?;
