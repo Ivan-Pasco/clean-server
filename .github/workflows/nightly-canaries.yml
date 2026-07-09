@@ -158,6 +158,84 @@ jobs:
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 
+      - name: Normalize into canary-report.json
+        if: always()
+        working-directory: clean-server
+        # Emits canary-report.json for the L3 cross-component matrix aggregator
+        # in clean-language-compiler/scripts/canary_matrix.py. One entry per
+        # canary this host actually attempted (excludes browser-only canaries).
+        #
+        # Inputs:
+        #   canary-summary.txt   — verbose stdout: `PASS <name>` / `SKIP <name>` lines
+        #   canary-diffs.jsonl   — one JSON record per failure with status + details
+        #
+        # Output shape:
+        #   { "results": { "<name>": { "passed": true|false, "reason": "<...>"? } } }
+        run: |
+          python3 - <<'PY'
+          import json, re, os
+
+          results = {}
+
+          # Pull failures (with reasons) from the JSONL stream first so a later
+          # PASS line — which shouldn't happen for the same name — can't shadow
+          # a real failure record.
+          try:
+              with open("canary-diffs.jsonl") as fh:
+                  for raw in fh:
+                      raw = raw.strip()
+                      if not raw:
+                          continue
+                      try:
+                          rec = json.loads(raw)
+                      except json.JSONDecodeError:
+                          continue
+                      name = rec.get("canary")
+                      if not name:
+                          continue
+                      status = rec.get("status", "fail")
+                      reason_bits = [status]
+                      if status == "runner_error" and rec.get("stderr"):
+                          reason_bits.append(rec["stderr"].strip().splitlines()[0])
+                      elif status == "diff":
+                          reason_bits.append("stdout diff")
+                      elif status == "missing_wasm":
+                          reason_bits.append(rec.get("expected_wasm", ""))
+                      results[name] = {
+                          "passed": False,
+                          "reason": ": ".join(b for b in reason_bits if b),
+                      }
+          except FileNotFoundError:
+              pass
+
+          # Add passes from the verbose summary. Skip browser-only canaries —
+          # they're not attempted by this host, so they don't belong in the
+          # per-host report at all.
+          pass_re = re.compile(r"^PASS\s+(\S+)")
+          try:
+              with open("canary-summary.txt") as fh:
+                  for line in fh:
+                      m = pass_re.match(line)
+                      if not m:
+                          continue
+                      name = m.group(1)
+                      if name in results:
+                          continue
+                      results[name] = {"passed": True}
+          except FileNotFoundError:
+              pass
+
+          report = {"results": results}
+          with open("canary-report.json", "w") as fh:
+              json.dump(report, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+
+          print(f"canary-report.json: {len(results)} canaries "
+                f"({sum(1 for v in results.values() if v['passed'])} pass, "
+                f"{sum(1 for v in results.values() if not v['passed'])} fail)")
+          PY
+          cat canary-report.json
+
       - name: Upload canary diff report
         if: always()
         uses: actions/upload-artifact@v4
@@ -166,6 +244,7 @@ jobs:
           path: |
             clean-server/canary-summary.txt
             clean-server/canary-diffs.jsonl
+            clean-server/canary-report.json
           if-no-files-found: warn
 
       - name: Fail job if canaries failed
