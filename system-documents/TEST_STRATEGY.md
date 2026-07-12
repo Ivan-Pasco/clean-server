@@ -84,13 +84,20 @@ Duration target: < 3 minutes.
 
 ### 3.3 CI on PR / push to master (T3, workflow)
 
-Full T2 lane plus:
+CI runs the full T2 lane plus:
 
-- `cargo test --lib -- test_layer3_spec_compliance` (currently skipped in CI — this strategy re-enables it)
+- `cargo test --lib -- test_layer3_spec_compliance` (was previously skipped in CI — this strategy re-enables it)
 - `cd host-bridge && cargo test --lib -- test_spec_compliance`
 - `cargo test --test host_functions_test` (the E2E HTTP suite; requires a compiled `cln` binary — CI installs one, per compiler CI convention)
 - `cargo test --test server_smoke_test` (see § 4)
 - `scripts/check_test_policy.sh --tier 3`
+
+**Monorepo-only integration tests in CI.** Four T2 tests read files from monorepo siblings that don't ship with this repo:
+
+- `bridge_contract_test` / `bridge_compliance_test` read `../foundation/platform-architecture/function-registry.toml`
+- `canvas_stubs_test` / `ui_stubs_test` read `clean-framework/plugins/frame.{canvas,ui}/plugin.toml`
+
+The `integration-monorepo` CI job stages both siblings (from `Ivan-Pasco/clean-language-spec` for foundation and `Ivan-Pasco/clean-framework` for plugins) before running the tests. If `clean-framework` is private/unavailable to the runner, the canvas/ui pair is skipped with a warning — the pre-push hook still runs them locally, so the guard survives.
 
 Duration target: < 15 minutes.
 
