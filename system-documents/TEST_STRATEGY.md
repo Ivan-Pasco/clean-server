@@ -99,6 +99,8 @@ CI runs the full T2 lane plus:
 
 The `integration-monorepo` CI job stages both siblings (from `Ivan-Pasco/clean-language-spec` for foundation and `Ivan-Pasco/clean-framework` for plugins) before running the tests. If `clean-framework` is private/unavailable to the runner, the canvas/ui pair is skipped with a warning — the pre-push hook still runs them locally, so the guard survives.
 
+**`continue-on-error` on spec-compliance and integration-monorepo.** These two CI jobs run in **warn-only** mode. They surface pre-existing spec ↔ implementation drift (e.g. `_json_get` signature mismatch, missing browser-scoped `_ui_*` registrations) but do not block PR merges. Rationale: the drift predates this test strategy; blocking on it would gate every unrelated PR on cleanup work of unknown scope. The **pre-push hook runs the same tests strictly** — a developer working locally in the full monorepo cannot push code that regresses these tests further. This is a deliberate asymmetry: strict local enforcement, permissive CI surface, so drift is always visible but never a merge blocker. Remove `continue-on-error` when the pre-existing drift is closed.
+
 Duration target: < 15 minutes.
 
 ### 3.4 Nightly canaries (T4, workflow)
