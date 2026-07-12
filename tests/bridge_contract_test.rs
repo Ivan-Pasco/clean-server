@@ -69,6 +69,7 @@ fn expand_param_type(t: &str) -> Vec<&str> {
         "boolean" => vec!["i32"],
         "i32"     => vec!["i32"],
         "i64"     => vec!["i64"],
+        "any"     => vec!["i32"],
         other => panic!("Unknown param type in registry: '{}'", other),
     }
 }
@@ -83,6 +84,7 @@ fn expand_return_type(t: &str) -> Option<&str> {
         "boolean" => Some("i32"),
         "integer" => Some("i64"),
         "number"  => Some("f64"),
+        "any"     => Some("i32"),
         other => panic!("Unknown return type in registry: '{}'", other),
     }
 }

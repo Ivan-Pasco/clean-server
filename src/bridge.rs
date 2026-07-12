@@ -2767,6 +2767,82 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
     Ok(())
 }
 
+/// Read a boxed Any struct at `ptr`. Layout: `[tag@0:i32][value1@4:i32][value2@8:i32]`.
+/// Tag values match `AnyTypeTag` in the compiler: 0=Null, 1=Integer, 2=Boolean,
+/// 3=Number, 4=String, 5=List, 6=Object.
+fn read_boxed_any(caller: &mut Caller<'_, WasmState>, ptr: i32) -> Option<(i32, i32, i32)> {
+    let memory = caller.get_export("memory").and_then(|e| e.into_memory())?;
+    let data = memory.data(&*caller);
+    let p = ptr as usize;
+    if p + 12 > data.len() {
+        error!("read_boxed_any: ptr {} out of bounds (memory size: {})", ptr, data.len());
+        return None;
+    }
+    let tag = i32::from_le_bytes(data[p..p + 4].try_into().ok()?);
+    let v1 = i32::from_le_bytes(data[p + 4..p + 8].try_into().ok()?);
+    let v2 = i32::from_le_bytes(data[p + 8..p + 12].try_into().ok()?);
+    Some((tag, v1, v2))
+}
+
+/// Allocate a 12-byte boxed Any of tag=String (4) whose value1 points at the
+/// given length-prefixed string pointer, returning the box pointer.
+///
+/// Uses the WASM module's exported `malloc` so the allocation is coordinated
+/// with the guest heap (same convention as `write_bytes_to_caller`).
+fn write_boxed_any_string(caller: &mut Caller<'_, WasmState>, s: &str) -> i32 {
+    // First allocate the length-prefixed string payload.
+    let str_ptr = write_string_to_caller(caller, s);
+    if str_ptr == 0 {
+        return 0;
+    }
+
+    // Allocate the 12-byte box via WASM malloc.
+    let malloc = match caller.get_export("malloc").and_then(|e| e.into_func()) {
+        Some(f) => f,
+        None => {
+            error!("write_boxed_any_string: no malloc export found");
+            return 0;
+        }
+    };
+    let typed_malloc = match malloc.typed::<i32, i32>(&*caller) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("write_boxed_any_string: malloc type mismatch: {}", e);
+            return 0;
+        }
+    };
+    let box_ptr = match typed_malloc.call(&mut *caller, 12) {
+        Ok(p) if p > 0 => p,
+        Ok(p) => {
+            error!("write_boxed_any_string: malloc returned invalid ptr {}", p);
+            return 0;
+        }
+        Err(e) => {
+            error!("write_boxed_any_string: malloc call failed: {}", e);
+            return 0;
+        }
+    };
+
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => {
+            error!("write_boxed_any_string: no memory export found");
+            return 0;
+        }
+    };
+
+    // Write [tag=4 (String), value1=str_ptr, value2=0].
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&4i32.to_le_bytes());
+    buf[4..8].copy_from_slice(&str_ptr.to_le_bytes());
+    buf[8..12].copy_from_slice(&0i32.to_le_bytes());
+    if let Err(e) = memory.write(&mut *caller, box_ptr as usize, &buf) {
+        error!("write_boxed_any_string: failed to write box: {}", e);
+        return 0;
+    }
+    box_ptr
+}
+
 /// Register JSON encode/decode/query functions (_json_encode, _json_decode, _json_get)
 fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _json_encode - Serialize value to JSON string
@@ -2833,29 +2909,61 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_decode: {}", e)))?;
 
-    // _json_get - Extract value from JSON by dot-separated path
+    // _json_get - Extract value from JSON by dot-separated path.
+    //
+    // Signature (frame.server v2.8.4+ / compiler 0.33.54+):
+    //   _json_get(any: i32, path: i32) -> any (i32)
+    //
+    // The first parameter is a pointer to a boxed Any value
+    // ([tag@0:i32][value1@4:i32][value2@8:i32]). Common shapes:
+    //   - tag=4 (String):  value1 is a length-prefixed string pointer holding
+    //                       the JSON payload (the case from `json.get("{}", k)`
+    //                       and from `_db_query` results boxed as Any-string).
+    //   - tag=0 (Null):    the source was null — return a null-boxed Any.
+    //   - other tags:      treat value1 as an lp-str pointer as a best-effort
+    //                       fallback so the runtime does not trap on unfamiliar
+    //                       shapes. Parse failures return "" boxed as String.
+    //
+    // The second parameter is a bare length-prefixed string pointer (single
+    // i32) holding the dot-separated path. Returns a boxed Any whose tag is
+    // String (4) and whose value1 points at the extracted value, serialised
+    // as a string (matching the previous ptr-returning behaviour so downstream
+    // string coercion continues to work).
     linker
         .func_wrap(
             "env",
             "_json_get",
-            |mut caller: Caller<'_, WasmState>,
-             json_ptr: i32,
-             json_len: i32,
-             path_ptr: i32,
-             path_len: i32|
-             -> i32 {
-                let json_str = match read_raw_string(&mut caller, json_ptr, json_len) {
-                    Some(s) => s,
-                    None => return write_string_to_caller(&mut caller, ""),
+            |mut caller: Caller<'_, WasmState>, any_ptr: i32, path_ptr: i32| -> i32 {
+                let (tag, value1, _value2) = match read_boxed_any(&mut caller, any_ptr) {
+                    Some(t) => t,
+                    None => return write_boxed_any_string(&mut caller, ""),
                 };
-                let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+
+                if tag == 0 {
+                    debug!("_json_get: source is Null-boxed, returning empty");
+                    return write_boxed_any_string(&mut caller, "");
+                }
+
+                // For String/Object/List tags the JSON payload lives at value1
+                // as a length-prefixed string. For other tags value1 is not a
+                // string pointer, but we still attempt to read it defensively
+                // so the closure never traps — a parse failure returns "".
+                let json_str = match read_string_from_caller(&mut caller, value1) {
                     Some(s) => s,
-                    None => return write_string_to_caller(&mut caller, ""),
+                    None => {
+                        debug!("_json_get: could not read source string (tag={}, value1={})", tag, value1);
+                        return write_boxed_any_string(&mut caller, "");
+                    }
+                };
+
+                let path = match read_string_from_caller(&mut caller, path_ptr) {
+                    Some(s) => s,
+                    None => return write_boxed_any_string(&mut caller, ""),
                 };
 
                 let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
                     Ok(v) => v,
-                    Err(_) => return write_string_to_caller(&mut caller, ""),
+                    Err(_) => return write_boxed_any_string(&mut caller, ""),
                 };
 
                 let mut current = &parsed;
@@ -2868,7 +2976,7 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                     };
                     match next {
                         Some(v) => current = v,
-                        None => return write_string_to_caller(&mut caller, ""),
+                        None => return write_boxed_any_string(&mut caller, ""),
                     }
                 }
 
@@ -2879,7 +2987,7 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                 };
 
                 debug!("_json_get: path='{}' -> '{}'", path, result);
-                write_string_to_caller(&mut caller, &result)
+                write_boxed_any_string(&mut caller, &result)
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_get: {}", e)))?;
@@ -6321,6 +6429,7 @@ mod tests {
             "boolean" => vec!["i32"],
             "i32" => vec!["i32"],
             "i64" => vec!["i64"],
+            "any" => vec!["i32"],
             other => panic!("Unknown param type in registry: '{}'", other),
         }
     }
@@ -6335,6 +6444,7 @@ mod tests {
             "boolean" => Some("i32"),
             "integer" => Some("i64"),
             "number" => Some("f64"),
+            "any" => Some("i32"),
             other => panic!("Unknown return type in registry: '{}'", other),
         }
     }

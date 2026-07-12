@@ -969,6 +969,7 @@ dependencies = [
  "libc",
  "md-5",
  "once_cell",
+ "percent-encoding",
  "rand 0.8.5",
  "reqwest",
  "serde",

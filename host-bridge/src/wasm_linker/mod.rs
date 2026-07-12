@@ -320,6 +320,7 @@ mod tests {
             "boolean" => vec!["i32"],
             "i32" => vec!["i32"],
             "i64" => vec!["i64"],
+            "any" => vec!["i32"],
             other => panic!("Unknown param type in registry: '{}'", other),
         }
     }
@@ -334,6 +335,7 @@ mod tests {
             "boolean" => Some("i32"),
             "integer" => Some("i64"),
             "number" => Some("f64"),
+            "any" => Some("i32"),
             other => panic!("Unknown return type in registry: '{}'", other),
         }
     }
