@@ -11,23 +11,69 @@ on:
 permissions:
   contents: read
 
+# Tiered CI matching system-documents/TEST_STRATEGY.md.
+#
+#   policy          T1 gate  — placeholder scan, fmt, clippy   (fast-fail)
+#   unit            T1       — cargo test --lib (server + host-bridge)
+#   integration     T2       — bridge/registry/plugin/wasm tests
+#   spec-compliance T3       — full registry ↔ linker parity (was skipped)
+#   e2e             T3       — host_functions_test + server_smoke_test
+#
+# Each job is independent; a T1 failure short-circuits the rest via `needs`.
+
 jobs:
-  test:
-    name: Build & Test
+  # ---------------------------------------------------------------
+  # T1 · Policy + fmt + clippy — fast-fail gate for every PR
+  # ---------------------------------------------------------------
+  policy:
+    name: T1 · Policy (fmt, clippy, placeholder scan)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          # The placeholder scan needs sibling foundation/ paths for the
+          # spec compliance tests to resolve. Repo checkout is enough because
+          # only clean-server/ is scanned; foundation/ is referenced by T3.
+          fetch-depth: 1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Install system dependencies
+      - name: System deps
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Setup cargo cache
+      - name: Placeholder / test-quality policy (T3 = full ruleset)
+        run: scripts/check_test_policy.sh --tier 3
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy -- -D warnings
+        run: cargo clippy -- -D warnings
+
+  # ---------------------------------------------------------------
+  # T1 · Unit tests (skips spec compliance — that runs in T3)
+  # ---------------------------------------------------------------
+  unit:
+    name: T1 · Unit (lib tests)
+    runs-on: ubuntu-latest
+    needs: policy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cargo cache
         uses: actions/cache@v4
         with:
           path: |
@@ -36,43 +82,53 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-unit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-unit-
 
-      - name: Build
+      - name: cargo build
         run: cargo build
 
-      - name: Run server unit tests (skip spec compliance — needs external registry file)
+      - name: cargo test --lib (server)
         run: cargo test --lib -- --skip test_layer3_spec_compliance
 
-      - name: Run host-bridge unit tests (skip spec compliance — needs external registry file)
+      - name: cargo test --lib (host-bridge)
         run: cd host-bridge && cargo test --lib -- --skip test_spec_compliance
 
-      - name: Run WASM alignment tests
-        run: cargo test --test wasm_alignment_test
-
-      - name: Run integration tests
-        run: cargo test --test host_functions_test
-
-  clippy:
-    name: Clippy
+  # ---------------------------------------------------------------
+  # T2 · Integration tests (bridge / plugin stubs / wasm alignment)
+  # ---------------------------------------------------------------
+  integration:
+    name: T2 · Integration
     runs-on: ubuntu-latest
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - bridge_contract_test
+          - bridge_compliance_test
+          - canvas_stubs_test
+          - ui_stubs_test
+          - jwt_refresh_rotation_test
+          - reset_token_bridge_test
+          - jobs_bridge_test
+          - page_guard_redirect_test
+          - string_split_test
+          - http_bridge_defaults_test
+          - jobs_persistence_test
+          - wasm_alignment_test
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
-      - name: Install system dependencies
+      - name: System deps
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Setup cargo cache
+      - name: Cargo cache
         uses: actions/cache@v4
         with:
           path: |
@@ -81,9 +137,148 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integration-
 
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
+      - name: cargo test --test ${{ matrix.test }}
+        run: cargo test --test ${{ matrix.test }}
+
+  # ---------------------------------------------------------------
+  # T3 · Spec compliance (registry ↔ implementation, full run — was skipped)
+  # ---------------------------------------------------------------
+  spec-compliance:
+    name: T3 · Spec compliance
+    runs-on: ubuntu-latest
+    needs: policy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Spec compliance reads ../foundation/platform-architecture/function-registry.toml.
+          # The foundation/ directory is expected as a sibling of the checkout
+          # when this repo is cloned inside the Clean Language monorepo layout.
+          # In CI we clone directly to $GITHUB_WORKSPACE/clean-server so we
+          # need to fetch the foundation sibling here.
+          path: clean-server
+
+      - name: Checkout foundation specs
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan-Pasco/clean-language-compiler
+          path: clean-language-compiler
+          # Only paths under foundation/ are consumed. sparse-checkout keeps
+          # the download small.
+          sparse-checkout: |
+            foundation
+
+      - name: Stage foundation as sibling of clean-server
+        # The tests read `../foundation/...` relative to CARGO_MANIFEST_DIR.
+        # Layout on disk must therefore be:
+        #   $GITHUB_WORKSPACE/clean-server/
+        #   $GITHUB_WORKSPACE/foundation/
+        run: mv clean-language-compiler/foundation ./foundation
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            clean-server/target/
+          key: ${{ runner.os }}-cargo-spec-${{ hashFiles('clean-server/**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-spec-
+
+      - name: Layer 3 spec compliance (bridge.rs)
+        working-directory: clean-server
+        run: cargo test --lib test_layer3_spec_compliance -- --nocapture
+
+      - name: Layer 2 spec compliance (host-bridge)
+        working-directory: clean-server/host-bridge
+        run: cargo test --lib test_spec_compliance -- --nocapture
+
+  # ---------------------------------------------------------------
+  # T3 · End-to-end HTTP suite + server binary smoke test
+  # ---------------------------------------------------------------
+  e2e:
+    name: T3 · E2E (HTTP + smoke)
+    runs-on: ubuntu-latest
+    needs: [unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-e2e-
+
+      - name: Build clean-server binary (needed by smoke test)
+        run: cargo build --bin clean-server
+
+      - name: server_smoke_test (no external compiler)
+        run: cargo test --test server_smoke_test -- --nocapture
+
+      # host_functions_test requires the `cln` compiler. It's kept as a
+      # separate step so its absence produces a clear skip rather than a
+      # confusing linker error mixed with the smoke test.
+      - name: Install cln compiler for HTTP E2E suite
+        id: install_cln
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p "$HOME/.cleen/bin"
+          tag="$(gh release view --repo Ivan-Pasco/clean-language-compiler --json tagName -q .tagName)"
+          echo "Fetching cln from compiler release: $tag"
+          if gh release download "$tag" \
+              --repo Ivan-Pasco/clean-language-compiler \
+              --pattern 'cln-linux*' \
+              --clobber -D "$HOME/.cleen/bin" 2>/dev/null; then
+            # Unpack whichever archive format shipped.
+            (cd "$HOME/.cleen/bin" && for f in *.tar.gz *.tgz; do [ -e "$f" ] && tar -xzf "$f"; done)
+            (cd "$HOME/.cleen/bin" && for f in *.zip; do [ -e "$f" ] && unzip -o "$f"; done)
+            # Ensure the binary is named `cln` and executable.
+            if [[ ! -x "$HOME/.cleen/bin/cln" ]]; then
+              find "$HOME/.cleen/bin" -maxdepth 3 -type f -name 'cln' -exec cp {} "$HOME/.cleen/bin/cln" \;
+            fi
+            chmod +x "$HOME/.cleen/bin/cln" || true
+            "$HOME/.cleen/bin/cln" --version && echo "cln_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cln compiler not available on release — skipping HTTP E2E suite."
+            echo "cln_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: host_functions_test (HTTP E2E)
+        if: steps.install_cln.outputs.cln_available == 'true'
+        run: cargo test --test host_functions_test
+
+      - name: HTTP E2E skipped (no cln binary available on latest release)
+        if: steps.install_cln.outputs.cln_available != 'true'
+        run: |
+          echo "::warning::host_functions_test skipped because the cln compiler binary was not \
+                published under a recognised name in the latest compiler release. See \
+                system-documents/TEST_STRATEGY.md § 3.3."

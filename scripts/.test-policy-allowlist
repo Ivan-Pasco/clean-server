@@ -1,0 +1,17 @@
+# scripts/.test-policy-allowlist
+#
+# Format: <rule> <path>:<line> <one-line reason>
+#
+# One entry per line. Comments start with `#`.
+# See system-documents/TEST_STRATEGY.md § 5 for policy details.
+#
+# Rules:
+#   P1 = todo!/unimplemented!/panic!("not implemented") in production code
+#   P2 = // TODO / // FIXME in production code
+#   P3 = test function with no assert!/expect/unwrap
+#   P4 = #[ignore] without an "// allowlisted: <reason>" marker
+#   P5 = tests/*.rs orphan (not assigned to a tier)
+#   P6 = tests/*.rs with no #[test] functions
+#
+# When an allowlisted line moves, update the line number here. The scanner
+# does not auto-track drift; leaving stale entries defeats the purpose.

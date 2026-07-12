@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# scripts/hooks/pre-push — clean-server T2 (medium) lane.
+#
+# Target: < 3 min on a warm cache.
+# Runs T1 first, then every integration test that does not require an
+# external `cln` compiler (that suite is T3, gated by CI).
+#
+# See system-documents/TEST_STRATEGY.md § 3.2.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "[pre-push] T2 · placeholder policy"
+scripts/check_test_policy.sh --tier 2
+
+echo "[pre-push] T2 · cargo test --lib (server + host-bridge, incl. spec compliance)"
+cargo test --lib --quiet
+(cd host-bridge && cargo test --lib --quiet)
+
+echo "[pre-push] T2 · integration tests (no external compiler required)"
+# These are ordered fastest → slowest so failure messages surface quickly.
+INTEGRATION_TESTS=(
+  bridge_contract_test
+  bridge_compliance_test
+  canvas_stubs_test
+  ui_stubs_test
+  jwt_refresh_rotation_test
+  reset_token_bridge_test
+  jobs_bridge_test
+  page_guard_redirect_test
+  string_split_test
+  http_bridge_defaults_test
+  jobs_persistence_test
+  wasm_alignment_test
+)
+
+for t in "${INTEGRATION_TESTS[@]}"; do
+  echo "  → $t"
+  cargo test --test "$t" --quiet
+done
+
+echo "[pre-push] PASSED"

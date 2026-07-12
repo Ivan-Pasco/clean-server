@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# scripts/hooks/pre-commit — clean-server T1 (fast) lane.
+#
+# Target: < 30 s on a warm cache.
+# Bypass: `git commit --no-verify` for emergencies only.
+#
+# See system-documents/TEST_STRATEGY.md § 3.1 and § 5.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "[pre-commit] T1 · placeholder policy"
+scripts/check_test_policy.sh --tier 1
+
+echo "[pre-commit] T1 · cargo fmt --check"
+cargo fmt --check
+
+echo "[pre-commit] T1 · clippy (lib only, warnings deny)"
+cargo clippy --lib --quiet -- -D warnings
+
+echo "[pre-commit] T1 · cargo test --lib"
+# --lib scope keeps this under 30s; integration tests run in pre-push.
+# Spec compliance is skipped here because it needs the external registry
+# TOML and is guaranteed to run in pre-push + CI.
+cargo test --lib --quiet -- --skip test_layer3_spec_compliance --skip test_spec_compliance
+
+echo "[pre-commit] PASSED"

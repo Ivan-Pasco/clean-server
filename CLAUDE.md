@@ -37,6 +37,38 @@ Clean Server is the runtime server for Clean Language applications compiled to W
 
 See `../foundation/management/USER_TYPES_AND_ERROR_REPORTING.md` for the full policy.
 
+## Test Strategy
+
+**Authoritative doc:** [`system-documents/TEST_STRATEGY.md`](system-documents/TEST_STRATEGY.md). Read it before adding or moving tests. Do not duplicate its content here.
+
+Quick summary:
+
+| Tier | Trigger | Command |
+|------|---------|---------|
+| T1 · Fast | `pre-commit` hook | `scripts/hooks/pre-commit` (fmt, clippy, `cargo test --lib`, policy scan) |
+| T2 · Medium | `pre-push` hook | `scripts/hooks/pre-push` (T1 + all bridge/plugin/wasm integration tests) |
+| T3 · Full | CI on PR / push | `.github/workflows/ci.yml` (T2 + spec compliance + `host_functions_test` + `server_smoke_test`) |
+| T4 · Deep | Nightly workflow | `.github/workflows/nightly-canaries.yml` (Layer 2 canaries) |
+
+**Policies enforced by `scripts/check_test_policy.sh`** — CI fails if any is violated:
+
+- P1 No `todo!()` / `unimplemented!()` / `panic!("not implemented")` in `src/` or `host-bridge/src/`
+- P2 No `// TODO` / `// FIXME` in production code (use `TASKS.md` or `report_error`)
+- P3 Every `#[test]` / `#[tokio::test]` fn must contain at least one `assert!`/`expect(`/`unwrap(` — no empty tests
+- P4 No `#[ignore]` without an `// allowlisted: <reason>` marker on the same line
+- P5 Every file in `tests/*.rs` must be assigned to a tier in `scripts/check_test_policy.sh`
+- P6 No test file may be empty (must contain at least one `#[test]`)
+
+**Install the hooks locally** once per checkout:
+
+```bash
+scripts/install_hooks.sh
+```
+
+**When you add a test file**, you must also assign it to a tier in `scripts/check_test_policy.sh` (`TIER1_FILES`, `TIER2_FILES`, `TIER3_FILES`) in the same commit. The policy scanner (P5) blocks landing without this.
+
+**Never modify a test to make it pass.** Fix the underlying code. If a test contradicts the spec, fix the test to match `foundation/spec/grammar.ebnf` (authoritative).
+
 ## Function Registry Spec Compliance
 
 **CRITICAL: All host function signatures are enforced by the shared function registry.**

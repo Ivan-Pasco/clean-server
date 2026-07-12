@@ -46,9 +46,15 @@ struct HttpLastResponse {
 
 impl Default for HttpLastResponse {
     fn default() -> Self {
+        // headers_json is "" (not "{}") before any request has run so that
+        // http.getResponseHeaders() returns an empty string, matching the
+        // Layer 2 canary contract (CANARY-HTTP-RESP-HEADERS-INIT-001). A
+        // real response overwrites this via store_last_response(), which
+        // still stores the JSON object (or "{}" when the bridge omits a
+        // headers field) as expected by get_response_header().
         Self {
             status_code: 0,
-            headers_json: "{}".to_string(),
+            headers_json: String::new(),
             body: String::new(),
         }
     }
@@ -664,39 +670,51 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // http_build_query - Build query string from JSON params
+    // http_build_query - Build query string from a JSON object of params, OR
+    // pass through a pre-formed query string unchanged.
+    //
+    // Contract (canary CANARY-HTTP-BUILD-QUERY-001):
+    //   * If the input parses as a JSON object, form-urlencode each key/value
+    //     pair and join with '&'.
+    //   * If the input is anything else — a raw query string like
+    //     "a=1&b=two", a bare word, a JSON array, `null`, etc. — return the
+    //     original input unchanged. This lets Clean callers hand the
+    //     function either shape without a wrapper, and matches the canary
+    //     assertion `http.buildQuery("a=1&b=two") == "a=1&b=two"`.
+    //   * If the input pointer can't be read at all, return "".
     linker.func_wrap(
         "env",
         "http_build_query",
         |mut caller: Caller<'_, S>, params_ptr: i32, params_len: i32| -> i32 {
-            let params_json = match read_raw_string(&mut caller, params_ptr, params_len) {
+            let params_str = match read_raw_string(&mut caller, params_ptr, params_len) {
                 Some(s) => s,
                 None => return write_string_to_caller(&mut caller, ""),
             };
 
-            let params: serde_json::Value =
-                serde_json::from_str(&params_json).unwrap_or_default();
-
-            let query = if let Some(obj) = params.as_object() {
-                let pairs: Vec<String> = obj
-                    .iter()
-                    .map(|(k, v)| {
-                        let val = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        format!(
-                            "{}={}",
-                            url::form_urlencoded::byte_serialize(k.as_bytes())
-                                .collect::<String>(),
-                            url::form_urlencoded::byte_serialize(val.as_bytes())
-                                .collect::<String>()
-                        )
-                    })
-                    .collect();
-                pairs.join("&")
-            } else {
-                String::new()
+            // Try JSON first — only an object triggers the encoding branch.
+            // Any parse failure or non-object shape falls through to the
+            // identity path so pre-formed query strings pass through.
+            let query = match serde_json::from_str::<serde_json::Value>(&params_str) {
+                Ok(serde_json::Value::Object(obj)) => {
+                    let pairs: Vec<String> = obj
+                        .iter()
+                        .map(|(k, v)| {
+                            let val = match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            format!(
+                                "{}={}",
+                                url::form_urlencoded::byte_serialize(k.as_bytes())
+                                    .collect::<String>(),
+                                url::form_urlencoded::byte_serialize(val.as_bytes())
+                                    .collect::<String>()
+                            )
+                        })
+                        .collect();
+                    pairs.join("&")
+                }
+                _ => params_str,
             };
 
             write_string_to_caller(&mut caller, &query)
