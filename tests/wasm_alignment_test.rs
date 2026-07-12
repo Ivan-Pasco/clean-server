@@ -42,9 +42,8 @@ fn make_store(engine: &Engine) -> Store<WasmState> {
 // ---------------------------------------------------------------------------
 
 fn try_instantiate_wasm_file(engine: &Engine, wasm_path: &std::path::Path) -> Result<(), String> {
-    let wasm_bytes = std::fs::read(wasm_path).map_err(|e| {
-        format!("Failed to read {}: {}", wasm_path.display(), e)
-    })?;
+    let wasm_bytes = std::fs::read(wasm_path)
+        .map_err(|e| format!("Failed to read {}: {}", wasm_path.display(), e))?;
 
     let module = Module::from_binary(engine, &wasm_bytes).map_err(|e| {
         format!(
@@ -54,9 +53,8 @@ fn try_instantiate_wasm_file(engine: &Engine, wasm_path: &std::path::Path) -> Re
         )
     })?;
 
-    let linker = create_linker(engine).map_err(|e| {
-        format!("Failed to create server linker: {}", e)
-    })?;
+    let linker =
+        create_linker(engine).map_err(|e| format!("Failed to create server linker: {}", e))?;
 
     let mut store = make_store(engine);
 

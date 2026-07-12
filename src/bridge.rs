@@ -24,8 +24,10 @@
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::router::HttpMethod;
 use crate::session::parse_cookies;
-use crate::wasm::{IslandEntry, McpBridgeState, McpPendingRequest, McpTransport, TestResponse, WasmState};
-use host_bridge::{read_string_from_caller, read_raw_string, write_string_to_caller};
+use crate::wasm::{
+    IslandEntry, McpBridgeState, McpPendingRequest, McpTransport, TestResponse, WasmState,
+};
+use host_bridge::{read_raw_string, read_string_from_caller, write_string_to_caller};
 use tracing::{debug, error, info, warn};
 use wasmtime::{Caller, Engine, Linker};
 
@@ -48,16 +50,16 @@ macro_rules! register_bridge_fn {
         let _stripped: &str = $name.trim_start_matches('_');
         if $name.starts_with('_') && !$name.starts_with("__") {
             if let Some(_dot_idx) = _stripped.find('_') {
-                let _dot_name = format!(
-                    "{}.{}",
-                    &_stripped[.._dot_idx],
-                    &_stripped[_dot_idx + 1..]
-                );
+                let _dot_name =
+                    format!("{}.{}", &_stripped[.._dot_idx], &_stripped[_dot_idx + 1..]);
                 $linker
                     .alias("env", $name, "env", &_dot_name)
-                    .map_err(|e| RuntimeError::wasm(format!(
-                        "Failed to alias {} -> {}: {}", $name, _dot_name, e
-                    )))?;
+                    .map_err(|e| {
+                        RuntimeError::wasm(format!(
+                            "Failed to alias {} -> {}: {}",
+                            $name, _dot_name, e
+                        ))
+                    })?;
             }
         }
     }};
@@ -219,47 +221,46 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
     // _http_redirect_route - Register a static redirect route (no WASM handler required)
     // Signature: (method_ptr, method_len, from_ptr, from_len, to_ptr, to_len, status) -> i32
     // The server returns the redirect immediately when the route is matched.
-    register_bridge_fn!(
-        linker,
-        "_http_redirect_route",
-        |mut caller: Caller<'_, WasmState>,
-         method_ptr: i32,
-         method_len: i32,
-         from_ptr: i32,
-         from_len: i32,
-         to_ptr: i32,
-         to_len: i32,
-         status: i32|
-         -> i32 {
-            let method_str = read_raw_string(&mut caller, method_ptr, method_len)
-                .unwrap_or_else(|| "GET".to_string());
-            let from_path = read_raw_string(&mut caller, from_ptr, from_len)
-                .unwrap_or_else(|| "/".to_string());
-            let to_path = read_raw_string(&mut caller, to_ptr, to_len)
-                .unwrap_or_else(|| "/".to_string());
-            let status_code = status as u16;
+    register_bridge_fn!(linker, "_http_redirect_route", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         method_ptr: i32,
+                                                         method_len: i32,
+                                                         from_ptr: i32,
+                                                         from_len: i32,
+                                                         to_ptr: i32,
+                                                         to_len: i32,
+                                                         status: i32|
+     -> i32 {
+        let method_str = read_raw_string(&mut caller, method_ptr, method_len)
+            .unwrap_or_else(|| "GET".to_string());
+        let from_path =
+            read_raw_string(&mut caller, from_ptr, from_len).unwrap_or_else(|| "/".to_string());
+        let to_path =
+            read_raw_string(&mut caller, to_ptr, to_len).unwrap_or_else(|| "/".to_string());
+        let status_code = status as u16;
 
-            debug!(
-                "_http_redirect_route: {} {} -> {} ({})",
-                method_str, from_path, to_path, status_code
-            );
+        debug!(
+            "_http_redirect_route: {} {} -> {} ({})",
+            method_str, from_path, to_path, status_code
+        );
 
-            let method = match HttpMethod::parse(&method_str) {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("Invalid HTTP method '{}': {}", method_str, e);
-                    return -1;
-                }
-            };
-
-            let router = caller.data().router.clone();
-            if let Err(e) = router.register_redirect(method, from_path.clone(), to_path, status_code) {
-                error!("Failed to register redirect route {}: {}", from_path, e);
+        let method = match HttpMethod::parse(&method_str) {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Invalid HTTP method '{}': {}", method_str, e);
                 return -1;
             }
-            0
+        };
+
+        let router = caller.data().router.clone();
+        if let Err(e) = router.register_redirect(method, from_path.clone(), to_path, status_code) {
+            error!("Failed to register redirect route {}: {}", from_path, e);
+            return -1;
         }
-    );
+        0
+    });
 
     // _http_route_protected - Register a protected route requiring authentication
     // Signature: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len, role_ptr, role_len) -> i32
@@ -284,8 +285,8 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                     .unwrap_or_else(|| "/".to_string());
                 let handler_name = read_raw_string(&mut caller, handler_ptr, handler_len)
                     .unwrap_or_else(|| "__route_handler_0".to_string());
-                let required_role = read_raw_string(&mut caller, role_ptr, role_len)
-                    .filter(|s| !s.is_empty());
+                let required_role =
+                    read_raw_string(&mut caller, role_ptr, role_len).filter(|s| !s.is_empty());
 
                 debug!(
                     "_http_route_protected: method={}, path={}, handler={}, role={:?}",
@@ -335,22 +336,20 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
              dir_ptr: i32,
              dir_len: i32|
              -> i32 {
-                let prefix =
-                    match read_raw_string(&mut caller, prefix_ptr, prefix_len) {
-                        Some(s) => s,
-                        None => {
-                            error!("_http_serve_static: Failed to read prefix");
-                            return 0;
-                        }
-                    };
-                let dir =
-                    match read_raw_string(&mut caller, dir_ptr, dir_len) {
-                        Some(s) => s,
-                        None => {
-                            error!("_http_serve_static: Failed to read dir");
-                            return 0;
-                        }
-                    };
+                let prefix = match read_raw_string(&mut caller, prefix_ptr, prefix_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_http_serve_static: Failed to read prefix");
+                        return 0;
+                    }
+                };
+                let dir = match read_raw_string(&mut caller, dir_ptr, dir_len) {
+                    Some(s) => s,
+                    None => {
+                        error!("_http_serve_static: Failed to read dir");
+                        return 0;
+                    }
+                };
 
                 debug!("_http_serve_static: prefix={}, dir={}", prefix, dir);
 
@@ -367,56 +366,56 @@ fn register_http_server_functions(linker: &mut Linker<WasmState>) -> RuntimeResu
                 }
             },
         )
-        .map_err(|e| {
-            RuntimeError::wasm(format!("Failed to define _http_serve_static: {}", e))
-        })?;
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _http_serve_static: {}", e)))?;
 
     // _http_sse_route - Register a STREAM (SSE) route handler
     // Signature: (method_ptr, method_len, path_ptr, path_len, handler_ptr, handler_len) -> i32
     // Always registers as GET; the method param is accepted for API symmetry with _http_route.
-    register_bridge_fn!(
-        linker,
-        "_http_sse_route",
-        |mut caller: Caller<'_, WasmState>,
-         _method_ptr: i32,
-         _method_len: i32,
-         path_ptr: i32,
-         path_len: i32,
-         handler_ptr: i32,
-         handler_len: i32|
-         -> i32 {
-            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
-                Some(s) => s,
-                None => {
-                    error!("_http_sse_route: Failed to read path");
-                    return -1;
-                }
-            };
-            let handler_name = match read_raw_string(&mut caller, handler_ptr, handler_len) {
-                Some(s) => s,
-                None => {
-                    error!("_http_sse_route: Failed to read handler name");
-                    return -1;
-                }
-            };
-
-            info!("_http_sse_route: path={}, handler={}", path, handler_name);
-
-            let router = caller.data().router.clone();
-            if let Err(e) = router.register(
-                HttpMethod::GET,
-                path.clone(),
-                handler_name,
-                false,
-                None,
-                true,
-            ) {
-                error!("_http_sse_route: Failed to register SSE route {}: {}", path, e);
+    register_bridge_fn!(linker, "_http_sse_route", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _method_ptr: i32,
+                                                    _method_len: i32,
+                                                    path_ptr: i32,
+                                                    path_len: i32,
+                                                    handler_ptr: i32,
+                                                    handler_len: i32|
+     -> i32 {
+        let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+            Some(s) => s,
+            None => {
+                error!("_http_sse_route: Failed to read path");
                 return -1;
             }
-            0
+        };
+        let handler_name = match read_raw_string(&mut caller, handler_ptr, handler_len) {
+            Some(s) => s,
+            None => {
+                error!("_http_sse_route: Failed to read handler name");
+                return -1;
+            }
+        };
+
+        info!("_http_sse_route: path={}, handler={}", path, handler_name);
+
+        let router = caller.data().router.clone();
+        if let Err(e) = router.register(
+            HttpMethod::GET,
+            path.clone(),
+            handler_name,
+            false,
+            None,
+            true,
+        ) {
+            error!(
+                "_http_sse_route: Failed to register SSE route {}: {}",
+                path, e
+            );
+            return -1;
         }
-    );
+        0
+    });
 
     Ok(())
 }
@@ -432,122 +431,116 @@ fn register_server_config_functions(linker: &mut Linker<WasmState>) -> RuntimeRe
     // _http_listen_on - Configure host AND port; supersedes _http_listen for
     // modules declaring `server: host: ...`. Returns 0 on success, -1 if the
     // host string can't be read or port is out of range.
-    register_bridge_fn!(
-        linker,
-        "_http_listen_on",
-        |mut caller: Caller<'_, WasmState>,
-         host_ptr: i32,
-         host_len: i32,
-         port: i32|
-         -> i32 {
-            let host = match read_raw_string(&mut caller, host_ptr, host_len) {
-                Some(s) => s,
-                None => {
-                    error!("_http_listen_on: failed to read host string");
-                    return -1;
-                }
-            };
-            if !(1..=65535).contains(&port) {
-                error!("_http_listen_on: port {} out of range", port);
+    register_bridge_fn!(linker, "_http_listen_on", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    host_ptr: i32,
+                                                    host_len: i32,
+                                                    port: i32|
+     -> i32 {
+        let host = match read_raw_string(&mut caller, host_ptr, host_len) {
+            Some(s) => s,
+            None => {
+                error!("_http_listen_on: failed to read host string");
                 return -1;
             }
-            let state = caller.data();
-            {
-                let mut cfg = state.runtime_config.write();
-                if !host.trim().is_empty() {
-                    cfg.listen_host = Some(host.clone());
-                }
-                cfg.listen_port = Some(port as u16);
-            }
-            // Keep the legacy per-instance field in sync for any caller that
-            // still reads it.
-            caller.data_mut().port = port as u16;
-            info!("_http_listen_on: configured to listen on {}:{}", host, port);
-            0
+        };
+        if !(1..=65535).contains(&port) {
+            error!("_http_listen_on: port {} out of range", port);
+            return -1;
         }
-    );
+        let state = caller.data();
+        {
+            let mut cfg = state.runtime_config.write();
+            if !host.trim().is_empty() {
+                cfg.listen_host = Some(host.clone());
+            }
+            cfg.listen_port = Some(port as u16);
+        }
+        // Keep the legacy per-instance field in sync for any caller that
+        // still reads it.
+        caller.data_mut().port = port as u16;
+        info!("_http_listen_on: configured to listen on {}:{}", host, port);
+        0
+    });
 
     // _cors_configure - Install real CORS settings honoring the `server: cors:`
     // block. All four list parameters are comma-separated UTF-8 strings; pass
     // "*" or empty to allow any. Returns 0 on success, -1 on parameter error.
-    register_bridge_fn!(
-        linker,
-        "_cors_configure",
-        |mut caller: Caller<'_, WasmState>,
-         origins_ptr: i32,
-         origins_len: i32,
-         methods_ptr: i32,
-         methods_len: i32,
-         headers_ptr: i32,
-         headers_len: i32,
-         max_age_secs: i32,
-         allow_credentials: i32|
-         -> i32 {
-            let origins = read_raw_string(&mut caller, origins_ptr, origins_len)
-                .unwrap_or_default();
-            let methods = read_raw_string(&mut caller, methods_ptr, methods_len)
-                .unwrap_or_default();
-            let headers = read_raw_string(&mut caller, headers_ptr, headers_len)
-                .unwrap_or_default();
-            if max_age_secs < 0 {
-                error!("_cors_configure: max_age_secs cannot be negative");
-                return -1;
-            }
-            let cfg = CorsConfig {
-                allowed_origins: split_csv(&origins),
-                allowed_methods: split_csv(&methods),
-                allowed_headers: split_csv(&headers),
-                max_age_secs: max_age_secs as u32,
-                allow_credentials: allow_credentials != 0,
-            };
-            info!(
-                "_cors_configure: origins={:?} methods={:?} headers={:?} max_age={}s credentials={}",
-                cfg.allowed_origins,
-                cfg.allowed_methods,
-                cfg.allowed_headers,
-                cfg.max_age_secs,
-                cfg.allow_credentials
-            );
-            caller.data().runtime_config.write().cors = Some(cfg);
-            0
+    register_bridge_fn!(linker, "_cors_configure", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    origins_ptr: i32,
+                                                    origins_len: i32,
+                                                    methods_ptr: i32,
+                                                    methods_len: i32,
+                                                    headers_ptr: i32,
+                                                    headers_len: i32,
+                                                    max_age_secs: i32,
+                                                    allow_credentials: i32|
+     -> i32 {
+        let origins = read_raw_string(&mut caller, origins_ptr, origins_len).unwrap_or_default();
+        let methods = read_raw_string(&mut caller, methods_ptr, methods_len).unwrap_or_default();
+        let headers = read_raw_string(&mut caller, headers_ptr, headers_len).unwrap_or_default();
+        if max_age_secs < 0 {
+            error!("_cors_configure: max_age_secs cannot be negative");
+            return -1;
         }
-    );
+        let cfg = CorsConfig {
+            allowed_origins: split_csv(&origins),
+            allowed_methods: split_csv(&methods),
+            allowed_headers: split_csv(&headers),
+            max_age_secs: max_age_secs as u32,
+            allow_credentials: allow_credentials != 0,
+        };
+        info!(
+            "_cors_configure: origins={:?} methods={:?} headers={:?} max_age={}s credentials={}",
+            cfg.allowed_origins,
+            cfg.allowed_methods,
+            cfg.allowed_headers,
+            cfg.max_age_secs,
+            cfg.allow_credentials
+        );
+        caller.data().runtime_config.write().cors = Some(cfg);
+        0
+    });
 
     // _rate_limit_configure - Install per-key token-bucket rate limiting.
     // `strategy` is "ip" or "user". Returns 0 on success, -1 if per_window or
     // window_secs are non-positive.
-    register_bridge_fn!(
-        linker,
-        "_rate_limit_configure",
-        |mut caller: Caller<'_, WasmState>,
-         per_window: i32,
-         window_secs: i32,
-         strategy_ptr: i32,
-         strategy_len: i32|
-         -> i32 {
-            if per_window <= 0 || window_secs <= 0 {
-                error!(
-                    "_rate_limit_configure: per_window ({}) and window_secs ({}) must be positive",
-                    per_window, window_secs
-                );
-                return -1;
-            }
-            let strategy_str = read_raw_string(&mut caller, strategy_ptr, strategy_len)
-                .unwrap_or_else(|| "ip".to_string());
-            let strategy = RateLimitStrategy::parse(&strategy_str);
-            let cfg = RateLimitConfig {
-                per_window: per_window as u32,
-                window_secs: window_secs as u32,
-                strategy,
-            };
-            info!(
-                "_rate_limit_configure: {} per {}s by {:?}",
-                cfg.per_window, cfg.window_secs, cfg.strategy
+    register_bridge_fn!(linker, "_rate_limit_configure", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          per_window: i32,
+                                                          window_secs: i32,
+                                                          strategy_ptr: i32,
+                                                          strategy_len: i32|
+     -> i32 {
+        if per_window <= 0 || window_secs <= 0 {
+            error!(
+                "_rate_limit_configure: per_window ({}) and window_secs ({}) must be positive",
+                per_window, window_secs
             );
-            caller.data().runtime_config.write().rate_limit = Some(cfg);
-            0
+            return -1;
         }
-    );
+        let strategy_str = read_raw_string(&mut caller, strategy_ptr, strategy_len)
+            .unwrap_or_else(|| "ip".to_string());
+        let strategy = RateLimitStrategy::parse(&strategy_str);
+        let cfg = RateLimitConfig {
+            per_window: per_window as u32,
+            window_secs: window_secs as u32,
+            strategy,
+        };
+        info!(
+            "_rate_limit_configure: {} per {}s by {:?}",
+            cfg.per_window, cfg.window_secs, cfg.strategy
+        );
+        caller.data().runtime_config.write().rate_limit = Some(cfg);
+        0
+    });
 
     // _http_set_global_error_handler - Register the WASM export name to invoke
     // when a route handler errors. The server falls back to this handler before
@@ -556,10 +549,7 @@ fn register_server_config_functions(linker: &mut Linker<WasmState>) -> RuntimeRe
     register_bridge_fn!(
         linker,
         "_http_set_global_error_handler",
-        |mut caller: Caller<'_, WasmState>,
-         name_ptr: i32,
-         name_len: i32|
-         -> i32 {
+        |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
             let name = match read_raw_string(&mut caller, name_ptr, name_len) {
                 Some(s) if !s.trim().is_empty() => s,
                 _ => {
@@ -606,7 +596,10 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                         .unwrap_or_default()
                 };
 
-                debug!("_req_param: Returning value '{}' for param '{}'", value, param_name);
+                debug!(
+                    "_req_param: Returning value '{}' for param '{}'",
+                    value, param_name
+                );
                 write_string_to_caller(&mut caller, &value)
             },
         )
@@ -671,7 +664,9 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                 let value = {
                     let state = caller.data();
                     if let Some(ctx) = state.request_context.as_ref() {
-                        let content_type = ctx.headers.iter()
+                        let content_type = ctx
+                            .headers
+                            .iter()
                             .find(|(k, _)| k.to_lowercase() == "content-type")
                             .map(|(_, v)| v.to_lowercase())
                             .unwrap_or_default();
@@ -683,7 +678,8 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                                 .map(|(_, v)| v)
                                 .unwrap_or_default()
                         } else {
-                            serde_json::from_str::<serde_json::Value>(&ctx.body).ok()
+                            serde_json::from_str::<serde_json::Value>(&ctx.body)
+                                .ok()
                                 .and_then(|json| {
                                     json.get(&field_name).map(|v| match v {
                                         serde_json::Value::String(s) => s.clone(),
@@ -908,7 +904,9 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                             ctx.headers
                                 .iter()
                                 .find(|(k, _)| k.to_lowercase() == "x-forwarded-for")
-                                .and_then(|(_, v)| v.split(',').next().map(|s| s.trim().to_string()))
+                                .and_then(|(_, v)| {
+                                    v.split(',').next().map(|s| s.trim().to_string())
+                                })
                                 .or_else(|| {
                                     // Try X-Real-IP
                                     ctx.headers
@@ -931,50 +929,77 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     // =========================================
 
     // _req_params() -> ptr (JSON map of path params)
-    register_bridge_fn!(linker, "_req_params",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let json = caller.data().request_context.as_ref()
-                .map(|ctx| serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string()))
-                .unwrap_or_else(|| "{}".to_string());
-            write_string_to_caller(&mut caller, &json)
-        }
-    );
+    register_bridge_fn!(linker, "_req_params", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let json = caller
+            .data()
+            .request_context
+            .as_ref()
+            .map(|ctx| serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        write_string_to_caller(&mut caller, &json)
+    });
 
     // _req_queries() -> ptr (JSON map of query params)
-    register_bridge_fn!(linker, "_req_queries",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let json = caller.data().request_context.as_ref()
-                .map(|ctx| serde_json::to_string(&ctx.query).unwrap_or_else(|_| "{}".to_string()))
-                .unwrap_or_else(|| "{}".to_string());
-            write_string_to_caller(&mut caller, &json)
-        }
-    );
+    register_bridge_fn!(linker, "_req_queries", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let json = caller
+            .data()
+            .request_context
+            .as_ref()
+            .map(|ctx| serde_json::to_string(&ctx.query).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        write_string_to_caller(&mut caller, &json)
+    });
 
     // _req_cookies() -> ptr (JSON map parsed from Cookie header)
-    register_bridge_fn!(linker, "_req_cookies",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let json = caller.data().request_context.as_ref()
-                .and_then(|ctx| {
-                    ctx.headers.iter()
-                        .find(|(k, _)| k.to_lowercase() == "cookie")
-                        .map(|(_, v)| parse_cookies(v))
-                })
-                .map(|m| serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string()))
-                .unwrap_or_else(|| "{}".to_string());
-            write_string_to_caller(&mut caller, &json)
-        }
-    );
+    register_bridge_fn!(linker, "_req_cookies", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let json = caller
+            .data()
+            .request_context
+            .as_ref()
+            .and_then(|ctx| {
+                ctx.headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                    .map(|(_, v)| parse_cookies(v))
+            })
+            .map(|m| serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        write_string_to_caller(&mut caller, &json)
+    });
 
     // _req_json() -> ptr — body if Content-Type contains application/json, "" otherwise
-    register_bridge_fn!(linker, "_req_json",
+    register_bridge_fn!(
+        linker,
+        "_req_json",
         |mut caller: Caller<'_, WasmState>| -> i32 {
-            let body = caller.data().request_context.as_ref()
+            let body = caller
+                .data()
+                .request_context
+                .as_ref()
                 .and_then(|ctx| {
-                    let is_json = ctx.headers.iter()
+                    let is_json = ctx
+                        .headers
+                        .iter()
                         .find(|(k, _)| k.to_lowercase() == "content-type")
                         .map(|(_, v)| v.to_lowercase().contains("application/json"))
                         .unwrap_or(false);
-                    if is_json { Some(ctx.body.clone()) } else { None }
+                    if is_json {
+                        Some(ctx.body.clone())
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or_default();
             write_string_to_caller(&mut caller, &body)
@@ -982,11 +1007,17 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     );
 
     // _req_is_json() -> boolean
-    register_bridge_fn!(linker, "_req_is_json",
+    register_bridge_fn!(
+        linker,
+        "_req_is_json",
         |caller: Caller<'_, WasmState>| -> i32 {
-            let is_json = caller.data().request_context.as_ref()
+            let is_json = caller
+                .data()
+                .request_context
+                .as_ref()
                 .map(|ctx| {
-                    ctx.headers.iter()
+                    ctx.headers
+                        .iter()
                         .find(|(k, _)| k.to_lowercase() == "content-type")
                         .map(|(_, v)| v.to_lowercase().contains("application/json"))
                         .unwrap_or(false)
@@ -997,49 +1028,67 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     );
 
     // _req_content_type() -> ptr
-    register_bridge_fn!(linker, "_req_content_type",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let v = caller.data().request_context.as_ref()
-                .and_then(|ctx| {
-                    ctx.headers.iter()
-                        .find(|(k, _)| k.to_lowercase() == "content-type")
-                        .map(|(_, val)| val.clone())
-                })
-                .unwrap_or_default();
-            write_string_to_caller(&mut caller, &v)
-        }
-    );
+    register_bridge_fn!(linker, "_req_content_type", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let v = caller
+            .data()
+            .request_context
+            .as_ref()
+            .and_then(|ctx| {
+                ctx.headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "content-type")
+                    .map(|(_, val)| val.clone())
+            })
+            .unwrap_or_default();
+        write_string_to_caller(&mut caller, &v)
+    });
 
     // _req_auth_token() -> ptr — Bearer token without "Bearer " prefix
-    register_bridge_fn!(linker, "_req_auth_token",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let v = caller.data().request_context.as_ref()
-                .and_then(|ctx| {
-                    ctx.headers.iter()
-                        .find(|(k, _)| k.to_lowercase() == "authorization")
-                        .map(|(_, val)| val.clone())
-                })
-                .map(|val| {
-                    let trimmed = val.trim();
-                    if let Some(rest) = trimmed.strip_prefix("Bearer ") {
-                        rest.trim().to_string()
-                    } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
-                        rest.trim().to_string()
-                    } else {
-                        trimmed.to_string()
-                    }
-                })
-                .unwrap_or_default();
-            write_string_to_caller(&mut caller, &v)
-        }
-    );
+    register_bridge_fn!(linker, "_req_auth_token", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let v = caller
+            .data()
+            .request_context
+            .as_ref()
+            .and_then(|ctx| {
+                ctx.headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "authorization")
+                    .map(|(_, val)| val.clone())
+            })
+            .map(|val| {
+                let trimmed = val.trim();
+                if let Some(rest) = trimmed.strip_prefix("Bearer ") {
+                    rest.trim().to_string()
+                } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
+                    rest.trim().to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            })
+            .unwrap_or_default();
+        write_string_to_caller(&mut caller, &v)
+    });
 
     // _req_has_auth() -> boolean (Authorization header present and non-empty)
-    register_bridge_fn!(linker, "_req_has_auth",
+    register_bridge_fn!(
+        linker,
+        "_req_has_auth",
         |caller: Caller<'_, WasmState>| -> i32 {
-            let has = caller.data().request_context.as_ref()
+            let has = caller
+                .data()
+                .request_context
+                .as_ref()
                 .map(|ctx| {
-                    ctx.headers.iter()
+                    ctx.headers
+                        .iter()
                         .any(|(k, v)| k.to_lowercase() == "authorization" && !v.is_empty())
                 })
                 .unwrap_or(false);
@@ -1048,50 +1097,72 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     );
 
     // _req_has_header(name) -> boolean (case-insensitive)
-    register_bridge_fn!(linker, "_req_has_header",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s.to_lowercase(),
-                None => return 0,
-            };
-            let has = caller.data().request_context.as_ref()
-                .map(|ctx| ctx.headers.iter().any(|(k, _)| k.to_lowercase() == name))
-                .unwrap_or(false);
-            if has { 1 } else { 0 }
-        }
-    );
+    register_bridge_fn!(linker, "_req_has_header", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    p: i32,
+                                                    l: i32|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s.to_lowercase(),
+            None => return 0,
+        };
+        let has = caller
+            .data()
+            .request_context
+            .as_ref()
+            .map(|ctx| ctx.headers.iter().any(|(k, _)| k.to_lowercase() == name))
+            .unwrap_or(false);
+        if has { 1 } else { 0 }
+    });
 
     // _req_has_query(name) -> boolean
-    register_bridge_fn!(linker, "_req_has_query",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let has = caller.data().request_context.as_ref()
-                .map(|ctx| ctx.query.contains_key(&name))
-                .unwrap_or(false);
-            if has { 1 } else { 0 }
-        }
-    );
+    register_bridge_fn!(linker, "_req_has_query", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   p: i32,
+                                                   l: i32|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let has = caller
+            .data()
+            .request_context
+            .as_ref()
+            .map(|ctx| ctx.query.contains_key(&name))
+            .unwrap_or(false);
+        if has { 1 } else { 0 }
+    });
 
     // _req_has_cookie(name) -> boolean
-    register_bridge_fn!(linker, "_req_has_cookie",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let has = caller.data().request_context.as_ref()
-                .and_then(|ctx| {
-                    ctx.headers.iter()
-                        .find(|(k, _)| k.to_lowercase() == "cookie")
-                        .map(|(_, v)| parse_cookies(v).contains_key(&name))
-                })
-                .unwrap_or(false);
-            if has { 1 } else { 0 }
-        }
-    );
+    register_bridge_fn!(linker, "_req_has_cookie", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    p: i32,
+                                                    l: i32|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let has = caller
+            .data()
+            .request_context
+            .as_ref()
+            .and_then(|ctx| {
+                ctx.headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                    .map(|(_, v)| parse_cookies(v).contains_key(&name))
+            })
+            .unwrap_or(false);
+        if has { 1 } else { 0 }
+    });
 
     Ok(())
 }
@@ -1138,7 +1209,12 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                     }
                 };
 
-                debug!("_session_store: id={}, key={}, value_len={}", session_id, key, value.len());
+                debug!(
+                    "_session_store: id={}, key={}, value_len={}",
+                    session_id,
+                    key,
+                    value.len()
+                );
 
                 // Store as key=value under the session ID
                 let data = if key.is_empty() {
@@ -1163,7 +1239,11 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
 
                 let session_store = caller.data().session_store.clone();
                 let mut store = session_store.write().expect("session store lock poisoned");
-                if store.store_raw(&session_id, &data) { 1 } else { 0 }
+                if store.store_raw(&session_id, &data) {
+                    1
+                } else {
+                    0
+                }
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _session_store: {}", e)))?;
@@ -1193,7 +1273,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                                     .find(|(k, _)| k.to_lowercase() == "cookie")
                                     .and_then(|(_, cookie_header)| {
                                         let cookies = parse_cookies(cookie_header);
-                                        cookies.get("session").cloned()
+                                        cookies
+                                            .get("session")
+                                            .cloned()
                                             .or_else(|| cookies.get("sid").cloned())
                                     })
                             })
@@ -1255,7 +1337,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                                     .find(|(k, _)| k.to_lowercase() == "cookie")
                                     .and_then(|(_, cookie_header)| {
                                         let cookies = parse_cookies(cookie_header);
-                                        cookies.get("session").cloned()
+                                        cookies
+                                            .get("session")
+                                            .cloned()
                                             .or_else(|| cookies.get("sid").cloned())
                                     })
                             })
@@ -1336,7 +1420,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                                     .find(|(k, _)| k.to_lowercase() == "cookie")
                                     .and_then(|(_, cookie_header)| {
                                         let cookies = parse_cookies(cookie_header);
-                                        cookies.get("session").cloned()
+                                        cookies
+                                            .get("session")
+                                            .cloned()
                                             .or_else(|| cookies.get("sid").cloned())
                                     })
                             })
@@ -1381,7 +1467,9 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
                                     .find(|(k, _)| k.to_lowercase() == "cookie")
                                     .and_then(|(_, cookie_header)| {
                                         let cookies = parse_cookies(cookie_header);
-                                        cookies.get("session").cloned()
+                                        cookies
+                                            .get("session")
+                                            .cloned()
                                             .or_else(|| cookies.get("sid").cloned())
                                     })
                             })
@@ -1411,10 +1499,7 @@ fn register_session_management_functions(linker: &mut Linker<WasmState>) -> Runt
         .func_wrap(
             "env",
             "_http_set_cookie",
-            |mut caller: Caller<'_, WasmState>,
-             name_ptr: i32,
-             value_ptr: i32|
-             -> i32 {
+            |mut caller: Caller<'_, WasmState>, name_ptr: i32, value_ptr: i32| -> i32 {
                 if !check_bridge_permission(&caller, "_http_set_cookie") {
                     return 0;
                 }
@@ -1503,12 +1588,14 @@ fn register_roles_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
 
                 let roles_store = caller.data().roles_store.clone();
                 let store = roles_store.read().expect("roles store lock poisoned");
-                if store.has_permission(&role, &permission) { 1 } else { 0 }
+                if store.has_permission(&role, &permission) {
+                    1
+                } else {
+                    0
+                }
             },
         )
-        .map_err(|e| {
-            RuntimeError::wasm(format!("Failed to define _role_has_permission: {}", e))
-        })?;
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _role_has_permission: {}", e)))?;
 
     // _role_get_permissions - Get all permissions for a role as JSON array
     // Args: role_ptr, role_len
@@ -1611,7 +1698,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
             "env",
             "_auth_can",
             |mut caller: Caller<'_, WasmState>, permission_ptr: i32, permission_len: i32| -> i32 {
-                let permission = match read_raw_string(&mut caller, permission_ptr, permission_len) {
+                let permission = match read_raw_string(&mut caller, permission_ptr, permission_len)
+                {
                     Some(s) => s,
                     None => return 0,
                 };
@@ -1680,10 +1768,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
                     }
                 };
 
-                let user_id = parsed
-                    .get("user_id")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0) as i32;
+                let user_id = parsed.get("user_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 let role = parsed
                     .get("role")
                     .and_then(|v| v.as_str())
@@ -1780,9 +1865,7 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
                 1
             },
         )
-        .map_err(|e| {
-            RuntimeError::wasm(format!("Failed to define _auth_clear_session: {}", e))
-        })?;
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _auth_clear_session: {}", e)))?;
 
     // _auth_user_id - Get the current user's ID
     linker
@@ -1820,14 +1903,22 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     // =========================================
 
     // _auth_check() -> boolean
-    register_bridge_fn!(linker, "_auth_check",
+    register_bridge_fn!(
+        linker,
+        "_auth_check",
         |caller: Caller<'_, WasmState>| -> i32 {
-            if caller.data().auth_context.is_some() { 1 } else { 0 }
+            if caller.data().auth_context.is_some() {
+                1
+            } else {
+                0
+            }
         }
     );
 
     // _auth_user() -> ptr — JSON {id, role, claims} or ""
-    register_bridge_fn!(linker, "_auth_user",
+    register_bridge_fn!(
+        linker,
+        "_auth_user",
         |mut caller: Caller<'_, WasmState>| -> i32 {
             let sid = match current_session_id(caller.data()) {
                 Some(s) => s,
@@ -1854,7 +1945,8 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
                         "id": a.user_id,
                         "role": a.role,
                         "claims": {},
-                    }).to_string(),
+                    })
+                    .to_string(),
                     None => String::new(),
                 },
             };
@@ -1863,7 +1955,9 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     );
 
     // _auth_is_admin() -> boolean
-    register_bridge_fn!(linker, "_auth_is_admin",
+    register_bridge_fn!(
+        linker,
+        "_auth_is_admin",
         |caller: Caller<'_, WasmState>| -> i32 {
             match &caller.data().auth_context {
                 Some(a) if a.role == "admin" => 1,
@@ -1873,259 +1967,319 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     );
 
     // _auth_is_owner(user_id) -> boolean — auth.user_id == arg OR is_admin
-    register_bridge_fn!(linker, "_auth_is_owner",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let arg = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return 0,
-            };
-            match &caller.data().auth_context {
-                Some(a) if a.role == "admin" => 1,
-                Some(a) => {
-                    let parsed = arg.trim().parse::<i32>().ok();
-                    match parsed {
-                        Some(id) if id == a.user_id => 1,
-                        // Allow string match too (in case the resource id is a string).
-                        _ => if arg == a.user_id.to_string() { 1 } else { 0 },
+    register_bridge_fn!(linker, "_auth_is_owner", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   p: i32,
+                                                   l: i32|
+     -> i32 {
+        let arg = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match &caller.data().auth_context {
+            Some(a) if a.role == "admin" => 1,
+            Some(a) => {
+                let parsed = arg.trim().parse::<i32>().ok();
+                match parsed {
+                    Some(id) if id == a.user_id => 1,
+                    // Allow string match too (in case the resource id is a string).
+                    _ => {
+                        if arg == a.user_id.to_string() {
+                            1
+                        } else {
+                            0
+                        }
                     }
                 }
-                _ => 0,
             }
+            _ => 0,
         }
-    );
+    });
 
     // _auth_require_any_role(roles_json) -> boolean
-    register_bridge_fn!(linker, "_auth_require_any_role",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let roles_json = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let roles: Vec<String> = serde_json::from_str(&roles_json).unwrap_or_default();
-            match &caller.data().auth_context {
-                Some(a) if a.role == "admin" => 1,
-                Some(a) if roles.iter().any(|r| r == &a.role) => 1,
-                _ => 0,
-            }
+    register_bridge_fn!(linker, "_auth_require_any_role", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           p: i32,
+                                                           l: i32|
+     -> i32 {
+        let roles_json = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let roles: Vec<String> = serde_json::from_str(&roles_json).unwrap_or_default();
+        match &caller.data().auth_context {
+            Some(a) if a.role == "admin" => 1,
+            Some(a) if roles.iter().any(|r| r == &a.role) => 1,
+            _ => 0,
         }
-    );
+    });
 
     // =========================================
     // PHASE 3 SESSION EXTRAS
     // =========================================
 
     // _session_create(user_id, role, claims_json) -> ptr (session id; sets cookie)
-    register_bridge_fn!(linker, "_session_create",
-        |mut caller: Caller<'_, WasmState>,
-         up: i32, ul: i32,
-         rp: i32, rl: i32,
-         cp: i32, cl: i32| -> i32 {
-            let user_id_str = read_raw_string(&mut caller, up, ul).unwrap_or_default();
-            let role = read_raw_string(&mut caller, rp, rl).unwrap_or_else(|| "user".to_string());
-            let claims = read_raw_string(&mut caller, cp, cl).unwrap_or_else(|| "{}".to_string());
-            let user_id: i32 = user_id_str.trim().parse().unwrap_or(0);
+    register_bridge_fn!(linker, "_session_create", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    up: i32,
+                                                    ul: i32,
+                                                    rp: i32,
+                                                    rl: i32,
+                                                    cp: i32,
+                                                    cl: i32|
+     -> i32 {
+        let user_id_str = read_raw_string(&mut caller, up, ul).unwrap_or_default();
+        let role = read_raw_string(&mut caller, rp, rl).unwrap_or_else(|| "user".to_string());
+        let claims = read_raw_string(&mut caller, cp, cl).unwrap_or_else(|| "{}".to_string());
+        let user_id: i32 = user_id_str.trim().parse().unwrap_or(0);
 
-            let session_store = caller.data().session_store.clone();
-            let session = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.create(user_id, &role, &claims)
-            };
-            let sid = session.session_id.clone();
-            let cookie = {
-                let store = session_store.read().expect("session store lock poisoned");
-                store.format_cookie(&sid)
-            };
-            caller.data_mut().pending_set_cookie = Some(cookie);
-            caller.data_mut().set_auth_from_session(user_id, role, sid.clone());
-            write_string_to_caller(&mut caller, &sid)
-        }
-    );
+        let session_store = caller.data().session_store.clone();
+        let session = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.create(user_id, &role, &claims)
+        };
+        let sid = session.session_id.clone();
+        let cookie = {
+            let store = session_store.read().expect("session store lock poisoned");
+            store.format_cookie(&sid)
+        };
+        caller.data_mut().pending_set_cookie = Some(cookie);
+        caller
+            .data_mut()
+            .set_auth_from_session(user_id, role, sid.clone());
+        write_string_to_caller(&mut caller, &sid)
+    });
 
     // _session_create_with_ttl(user_id, role, claims_json, ttl_seconds) -> ptr
-    register_bridge_fn!(linker, "_session_create_with_ttl",
-        |mut caller: Caller<'_, WasmState>,
-         up: i32, ul: i32,
-         rp: i32, rl: i32,
-         cp: i32, cl: i32,
-         ttl: i32| -> i32 {
-            let user_id_str = read_raw_string(&mut caller, up, ul).unwrap_or_default();
-            let role = read_raw_string(&mut caller, rp, rl).unwrap_or_else(|| "user".to_string());
-            let claims = read_raw_string(&mut caller, cp, cl).unwrap_or_else(|| "{}".to_string());
-            let user_id: i32 = user_id_str.trim().parse().unwrap_or(0);
-            let ttl = if ttl > 0 { ttl as u64 } else { 0 };
+    register_bridge_fn!(linker, "_session_create_with_ttl", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             up: i32,
+                                                             ul: i32,
+                                                             rp: i32,
+                                                             rl: i32,
+                                                             cp: i32,
+                                                             cl: i32,
+                                                             ttl: i32|
+     -> i32 {
+        let user_id_str = read_raw_string(&mut caller, up, ul).unwrap_or_default();
+        let role = read_raw_string(&mut caller, rp, rl).unwrap_or_else(|| "user".to_string());
+        let claims = read_raw_string(&mut caller, cp, cl).unwrap_or_else(|| "{}".to_string());
+        let user_id: i32 = user_id_str.trim().parse().unwrap_or(0);
+        let ttl = if ttl > 0 { ttl as u64 } else { 0 };
 
-            let session_store = caller.data().session_store.clone();
-            let session = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.create(user_id, &role, &claims)
-            };
-            let sid = session.session_id.clone();
-            // Take the default cookie format and substitute the Max-Age with the requested ttl.
-            let base = {
-                let store = session_store.read().expect("session store lock poisoned");
-                store.format_cookie(&sid)
-            };
-            let cookie = if ttl > 0 {
-                replace_cookie_max_age(&base, ttl)
-            } else {
-                base
-            };
-            caller.data_mut().pending_set_cookie = Some(cookie);
-            caller.data_mut().set_auth_from_session(user_id, role, sid.clone());
-            write_string_to_caller(&mut caller, &sid)
-        }
-    );
+        let session_store = caller.data().session_store.clone();
+        let session = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.create(user_id, &role, &claims)
+        };
+        let sid = session.session_id.clone();
+        // Take the default cookie format and substitute the Max-Age with the requested ttl.
+        let base = {
+            let store = session_store.read().expect("session store lock poisoned");
+            store.format_cookie(&sid)
+        };
+        let cookie = if ttl > 0 {
+            replace_cookie_max_age(&base, ttl)
+        } else {
+            base
+        };
+        caller.data_mut().pending_set_cookie = Some(cookie);
+        caller
+            .data_mut()
+            .set_auth_from_session(user_id, role, sid.clone());
+        write_string_to_caller(&mut caller, &sid)
+    });
 
     // _session_destroy() -> boolean
-    register_bridge_fn!(linker, "_session_destroy",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let sid = match current_session_id(caller.data()) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let session_store = caller.data().session_store.clone();
-            let removed = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.delete_raw(&sid)
-            };
-            let clear = {
-                let store = session_store.read().expect("session store lock poisoned");
-                store.format_clear_cookie()
-            };
-            caller.data_mut().pending_set_cookie = Some(clear);
-            caller.data_mut().auth_context = None;
-            if removed { 1 } else { 0 }
-        }
-    );
+    register_bridge_fn!(linker, "_session_destroy", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let sid = match current_session_id(caller.data()) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let session_store = caller.data().session_store.clone();
+        let removed = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.delete_raw(&sid)
+        };
+        let clear = {
+            let store = session_store.read().expect("session store lock poisoned");
+            store.format_clear_cookie()
+        };
+        caller.data_mut().pending_set_cookie = Some(clear);
+        caller.data_mut().auth_context = None;
+        if removed { 1 } else { 0 }
+    });
 
     // _session_extend(ttl_seconds) -> boolean — touches session, refreshes cookie max-age
-    register_bridge_fn!(linker, "_session_extend",
-        |mut caller: Caller<'_, WasmState>, ttl: i32| -> i32 {
-            let sid = match current_session_id(caller.data()) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let session_store = caller.data().session_store.clone();
-            let exists = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.get(&sid).is_some() || store.get_raw(&sid).is_some()
-            };
-            if !exists {
-                return 0;
-            }
-            let base = {
-                let store = session_store.read().expect("session store lock poisoned");
-                store.format_cookie(&sid)
-            };
-            let cookie = if ttl > 0 {
-                replace_cookie_max_age(&base, ttl as u64)
-            } else {
-                base
-            };
-            caller.data_mut().pending_set_cookie = Some(cookie);
-            1
+    register_bridge_fn!(linker, "_session_extend", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    ttl: i32|
+     -> i32 {
+        let sid = match current_session_id(caller.data()) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let session_store = caller.data().session_store.clone();
+        let exists = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.get(&sid).is_some() || store.get_raw(&sid).is_some()
+        };
+        if !exists {
+            return 0;
         }
-    );
+        let base = {
+            let store = session_store.read().expect("session store lock poisoned");
+            store.format_cookie(&sid)
+        };
+        let cookie = if ttl > 0 {
+            replace_cookie_max_age(&base, ttl as u64)
+        } else {
+            base
+        };
+        caller.data_mut().pending_set_cookie = Some(cookie);
+        1
+    });
 
     // _session_user_id() -> ptr (string of current user's id, "" if none)
-    register_bridge_fn!(linker, "_session_user_id",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let v = caller.data().auth_context.as_ref()
-                .map(|a| a.user_id.to_string())
-                .unwrap_or_default();
-            write_string_to_caller(&mut caller, &v)
-        }
-    );
+    register_bridge_fn!(linker, "_session_user_id", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let v = caller
+            .data()
+            .auth_context
+            .as_ref()
+            .map(|a| a.user_id.to_string())
+            .unwrap_or_default();
+        write_string_to_caller(&mut caller, &v)
+    });
 
     // _session_role() -> ptr
-    register_bridge_fn!(linker, "_session_role",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let v = caller.data().auth_context.as_ref()
-                .map(|a| a.role.clone())
-                .unwrap_or_default();
-            write_string_to_caller(&mut caller, &v)
-        }
-    );
+    register_bridge_fn!(linker, "_session_role", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let v = caller
+            .data()
+            .auth_context
+            .as_ref()
+            .map(|a| a.role.clone())
+            .unwrap_or_default();
+        write_string_to_caller(&mut caller, &v)
+    });
 
     // _session_claim(key) -> ptr — single claim from the typed session's claims JSON
-    register_bridge_fn!(linker, "_session_claim",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let key = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return write_string_to_caller(&mut caller, ""),
-            };
-            let sid = match current_session_id(caller.data()) {
-                Some(s) => s,
-                None => return write_string_to_caller(&mut caller, ""),
-            };
-            let session_store = caller.data().session_store.clone();
-            let session = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.get(&sid)
-            };
-            let value = session.and_then(|sd| {
-                serde_json::from_str::<serde_json::Value>(&sd.claims).ok()
+    register_bridge_fn!(linker, "_session_claim", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   p: i32,
+                                                   l: i32|
+     -> i32 {
+        let key = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return write_string_to_caller(&mut caller, ""),
+        };
+        let sid = match current_session_id(caller.data()) {
+            Some(s) => s,
+            None => return write_string_to_caller(&mut caller, ""),
+        };
+        let session_store = caller.data().session_store.clone();
+        let session = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.get(&sid)
+        };
+        let value = session
+            .and_then(|sd| {
+                serde_json::from_str::<serde_json::Value>(&sd.claims)
+                    .ok()
                     .and_then(|v| v.get(&key).cloned())
                     .map(|v| match v {
                         serde_json::Value::String(s) => s,
                         serde_json::Value::Null => String::new(),
                         other => other.to_string(),
                     })
-            }).unwrap_or_default();
-            write_string_to_caller(&mut caller, &value)
-        }
-    );
+            })
+            .unwrap_or_default();
+        write_string_to_caller(&mut caller, &value)
+    });
 
     // _session_get_value(key) -> ptr — value previously stored via _session_store (key=value JSON)
-    register_bridge_fn!(linker, "_session_get_value",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let key = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return write_string_to_caller(&mut caller, ""),
-            };
-            let sid = match current_session_id(caller.data()) {
-                Some(s) => s,
-                None => return write_string_to_caller(&mut caller, ""),
-            };
-            let session_store = caller.data().session_store.clone();
-            let raw = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.get_raw(&sid)
-            };
-            let value = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.get(&key).cloned())
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s,
-                    serde_json::Value::Null => String::new(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default();
-            write_string_to_caller(&mut caller, &value)
-        }
-    );
+    register_bridge_fn!(linker, "_session_get_value", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       p: i32,
+                                                       l: i32|
+     -> i32 {
+        let key = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return write_string_to_caller(&mut caller, ""),
+        };
+        let sid = match current_session_id(caller.data()) {
+            Some(s) => s,
+            None => return write_string_to_caller(&mut caller, ""),
+        };
+        let session_store = caller.data().session_store.clone();
+        let raw = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.get_raw(&sid)
+        };
+        let value = raw
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get(&key).cloned())
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
+        write_string_to_caller(&mut caller, &value)
+    });
 
     // _session_has_key(key) -> boolean
-    register_bridge_fn!(linker, "_session_has_key",
-        |mut caller: Caller<'_, WasmState>, p: i32, l: i32| -> i32 {
-            let key = match read_raw_string(&mut caller, p, l) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let sid = match current_session_id(caller.data()) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let session_store = caller.data().session_store.clone();
-            let raw = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.get_raw(&sid)
-            };
-            let present = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .map(|v| v.get(&key).is_some())
-                .unwrap_or(false);
-            if present { 1 } else { 0 }
-        }
-    );
+    register_bridge_fn!(linker, "_session_has_key", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     p: i32,
+                                                     l: i32|
+     -> i32 {
+        let key = match read_raw_string(&mut caller, p, l) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let sid = match current_session_id(caller.data()) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let session_store = caller.data().session_store.clone();
+        let raw = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.get_raw(&sid)
+        };
+        let present = raw
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .map(|v| v.get(&key).is_some())
+            .unwrap_or(false);
+        if present { 1 } else { 0 }
+    });
 
     // _auth_create_reset_token(user_id, ttl_seconds) -> ptr
     //
@@ -2136,52 +2290,60 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     //
     // Backs `auth.createResetToken(userId, ttlSeconds)` per frame.auth spec §16.
     // Returns empty string on invalid inputs (non-positive ttl or user_id ≤ 0).
-    register_bridge_fn!(linker, "_auth_create_reset_token",
-        |mut caller: Caller<'_, WasmState>,
-         user_id: i64,
-         ttl_seconds: i64| -> i32 {
-            if !check_bridge_permission(&caller, "_auth_create_reset_token") {
-                return write_string_to_caller(&mut caller, "");
-            }
-            if user_id <= 0 || ttl_seconds <= 0 {
-                return write_string_to_caller(&mut caller, "");
-            }
-            let user_id_i32 = if user_id > i32::MAX as i64 {
-                warn!("_auth_create_reset_token: user_id {} exceeds i32 range", user_id);
-                return write_string_to_caller(&mut caller, "");
-            } else {
-                user_id as i32
-            };
-
-            // 32 bytes of entropy from two v4 UUIDs (v4 uses OS RNG). Hex-encoded
-            // to a 64-char opaque token that is safe to embed in a URL.
-            let a = uuid::Uuid::new_v4();
-            let b = uuid::Uuid::new_v4();
-            let mut buf = [0u8; 32];
-            buf[..16].copy_from_slice(a.as_bytes());
-            buf[16..].copy_from_slice(b.as_bytes());
-            let token = hex::encode(buf);
-
-            use sha2::Digest;
-            let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
-
-            let ttl = std::time::Duration::from_secs(ttl_seconds as u64);
-            let session_store = caller.data().session_store.clone();
-            let inserted = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.store_reset_token(&token_hash, user_id_i32, ttl)
-            };
-            if !inserted {
-                // Cryptographic collision is impossible in practice; only happens
-                // if the store already had a matching hash from a prior call
-                // this same nanosecond. Refuse rather than issue a duplicate.
-                warn!("_auth_create_reset_token: hash collision for user {}", user_id_i32);
-                return write_string_to_caller(&mut caller, "");
-            }
-
-            write_string_to_caller(&mut caller, &token)
+    register_bridge_fn!(linker, "_auth_create_reset_token", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             user_id: i64,
+                                                             ttl_seconds: i64|
+     -> i32 {
+        if !check_bridge_permission(&caller, "_auth_create_reset_token") {
+            return write_string_to_caller(&mut caller, "");
         }
-    );
+        if user_id <= 0 || ttl_seconds <= 0 {
+            return write_string_to_caller(&mut caller, "");
+        }
+        let user_id_i32 = if user_id > i32::MAX as i64 {
+            warn!(
+                "_auth_create_reset_token: user_id {} exceeds i32 range",
+                user_id
+            );
+            return write_string_to_caller(&mut caller, "");
+        } else {
+            user_id as i32
+        };
+
+        // 32 bytes of entropy from two v4 UUIDs (v4 uses OS RNG). Hex-encoded
+        // to a 64-char opaque token that is safe to embed in a URL.
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let mut buf = [0u8; 32];
+        buf[..16].copy_from_slice(a.as_bytes());
+        buf[16..].copy_from_slice(b.as_bytes());
+        let token = hex::encode(buf);
+
+        use sha2::Digest;
+        let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+
+        let ttl = std::time::Duration::from_secs(ttl_seconds as u64);
+        let session_store = caller.data().session_store.clone();
+        let inserted = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.store_reset_token(&token_hash, user_id_i32, ttl)
+        };
+        if !inserted {
+            // Cryptographic collision is impossible in practice; only happens
+            // if the store already had a matching hash from a prior call
+            // this same nanosecond. Refuse rather than issue a duplicate.
+            warn!(
+                "_auth_create_reset_token: hash collision for user {}",
+                user_id_i32
+            );
+            return write_string_to_caller(&mut caller, "");
+        }
+
+        write_string_to_caller(&mut caller, &token)
+    });
 
     // _auth_consume_reset_token(token) -> i64
     //
@@ -2192,31 +2354,34 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     // Backs `auth.consumeResetToken(token)` per frame.auth spec §16.
     // Atomicity is provided by the SessionStore write lock — a second caller
     // racing on the same token sees the row already gone.
-    register_bridge_fn!(linker, "_auth_consume_reset_token",
-        |mut caller: Caller<'_, WasmState>,
-         token_ptr: i32, token_len: i32| -> i64 {
-            if !check_bridge_permission(&caller, "_auth_consume_reset_token") {
-                return 0;
-            }
-            let token = match read_raw_string(&mut caller, token_ptr, token_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => return 0,
-            };
-
-            use sha2::Digest;
-            let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
-
-            let session_store = caller.data().session_store.clone();
-            let user_id = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.consume_reset_token(&token_hash)
-            };
-            match user_id {
-                Some(id) => id as i64,
-                None => 0,
-            }
+    register_bridge_fn!(linker, "_auth_consume_reset_token", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                              token_ptr: i32,
+                                                              token_len: i32|
+     -> i64 {
+        if !check_bridge_permission(&caller, "_auth_consume_reset_token") {
+            return 0;
         }
-    );
+        let token = match read_raw_string(&mut caller, token_ptr, token_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => return 0,
+        };
+
+        use sha2::Digest;
+        let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+
+        let session_store = caller.data().session_store.clone();
+        let user_id = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.consume_reset_token(&token_hash)
+        };
+        match user_id {
+            Some(id) => id as i64,
+            None => 0,
+        }
+    });
 
     // _jwt_refresh_and_rotate(token, secret, algorithm, new_ttl_seconds) -> ptr
     //
@@ -2228,127 +2393,137 @@ fn register_session_auth_functions(linker: &mut Linker<WasmState>) -> RuntimeRes
     //
     // Returns empty string on any of: invalid signature, expired token, missing
     // `jti`/`sub` claims, or replay of an already-consumed token.
-    register_bridge_fn!(linker, "_jwt_refresh_and_rotate",
-        |mut caller: Caller<'_, WasmState>,
-         token_ptr: i32, token_len: i32,
-         secret_ptr: i32, secret_len: i32,
-         algo_ptr: i32, algo_len: i32,
-         new_ttl_seconds: i64| -> i32 {
-            if !check_bridge_permission(&caller, "_jwt_refresh_and_rotate") {
-                return write_string_to_caller(&mut caller, "");
-            }
-
-            let token = match read_raw_string(&mut caller, token_ptr, token_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => return write_string_to_caller(&mut caller, ""),
-            };
-            let secret = match read_raw_string(&mut caller, secret_ptr, secret_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => return write_string_to_caller(&mut caller, ""),
-            };
-            let algorithm = read_raw_string(&mut caller, algo_ptr, algo_len)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "HS256".to_string());
-
-            let new_ttl_seconds = if new_ttl_seconds > 0 { new_ttl_seconds as u64 } else {
-                return write_string_to_caller(&mut caller, "");
-            };
-
-            // 1. Verify signature and expiry. `verify_jwt` also enforces `exp`.
-            let verify_result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut crypto = host_bridge::CryptoBridge::new();
-                    crypto
-                        .call(
-                            "verify_jwt",
-                            serde_json::json!({
-                                "token": token,
-                                "secret": secret
-                            }),
-                        )
-                        .await
-                })
-            });
-
-            let payload = match verify_result {
-                Ok(v) if v["ok"] == true => v["data"].clone(),
-                _ => return write_string_to_caller(&mut caller, ""),
-            };
-
-            let mut payload_obj = match payload {
-                serde_json::Value::Object(map) => map,
-                _ => return write_string_to_caller(&mut caller, ""),
-            };
-
-            // 2. Extract `jti`. A refresh token without a jti cannot be tracked
-            // for replay; reject rather than issue a rotation the framework
-            // cannot enforce single-use on.
-            let old_jti = match payload_obj.get("jti").and_then(|v| v.as_str()) {
-                Some(s) if !s.is_empty() => s.to_string(),
-                _ => {
-                    warn!("_jwt_refresh_and_rotate: token has no jti claim; refusing rotation");
-                    return write_string_to_caller(&mut caller, "");
-                }
-            };
-
-            // 3. Compute remaining lifetime so the revocation entry lasts at
-            // least as long as the original token would have been valid.
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let old_exp = payload_obj.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
-            let remaining = (old_exp - now_secs).max(0) as u64;
-            // Cap the revocation entry lifetime so a maliciously long-lived
-            // token cannot pin the entry in memory forever.
-            let revoke_ttl = std::time::Duration::from_secs(remaining.min(30 * 24 * 3600));
-
-            // 4. Atomically check-and-consume the old jti under the write lock.
-            let session_store = caller.data().session_store.clone();
-            let first_use = {
-                let mut store = session_store.write().expect("session store lock poisoned");
-                store.mark_jti_consumed(&old_jti, revoke_ttl)
-            };
-            if !first_use {
-                // Replay attempt (AUTH-J009). Do not issue a new token.
-                warn!("_jwt_refresh_and_rotate: replay of consumed jti={}", old_jti);
-                return write_string_to_caller(&mut caller, "");
-            }
-
-            // 5. Build the new payload: keep original claims, refresh iat/exp/jti.
-            let new_jti = uuid::Uuid::new_v4().to_string();
-            let new_exp = now_secs.saturating_add(new_ttl_seconds as i64);
-            payload_obj.insert("iat".to_string(), serde_json::Value::from(now_secs));
-            payload_obj.insert("exp".to_string(), serde_json::Value::from(new_exp));
-            payload_obj.insert("jti".to_string(), serde_json::Value::from(new_jti));
-
-            let new_payload = serde_json::Value::Object(payload_obj);
-
-            // 6. Sign the new token.
-            let sign_result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut crypto = host_bridge::CryptoBridge::new();
-                    crypto
-                        .call(
-                            "sign",
-                            serde_json::json!({
-                                "payload": new_payload,
-                                "secret": secret,
-                                "algorithm": algorithm
-                            }),
-                        )
-                        .await
-                })
-            });
-
-            let new_token = match sign_result {
-                Ok(v) if v["ok"] == true => v["data"].as_str().unwrap_or("").to_string(),
-                _ => String::new(),
-            };
-
-            write_string_to_caller(&mut caller, &new_token)
+    register_bridge_fn!(linker, "_jwt_refresh_and_rotate", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            token_ptr: i32,
+                                                            token_len: i32,
+                                                            secret_ptr: i32,
+                                                            secret_len: i32,
+                                                            algo_ptr: i32,
+                                                            algo_len: i32,
+                                                            new_ttl_seconds: i64|
+     -> i32 {
+        if !check_bridge_permission(&caller, "_jwt_refresh_and_rotate") {
+            return write_string_to_caller(&mut caller, "");
         }
-    );
+
+        let token = match read_raw_string(&mut caller, token_ptr, token_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => return write_string_to_caller(&mut caller, ""),
+        };
+        let secret = match read_raw_string(&mut caller, secret_ptr, secret_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => return write_string_to_caller(&mut caller, ""),
+        };
+        let algorithm = read_raw_string(&mut caller, algo_ptr, algo_len)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "HS256".to_string());
+
+        let new_ttl_seconds = if new_ttl_seconds > 0 {
+            new_ttl_seconds as u64
+        } else {
+            return write_string_to_caller(&mut caller, "");
+        };
+
+        // 1. Verify signature and expiry. `verify_jwt` also enforces `exp`.
+        let verify_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut crypto = host_bridge::CryptoBridge::new();
+                crypto
+                    .call(
+                        "verify_jwt",
+                        serde_json::json!({
+                            "token": token,
+                            "secret": secret
+                        }),
+                    )
+                    .await
+            })
+        });
+
+        let payload = match verify_result {
+            Ok(v) if v["ok"] == true => v["data"].clone(),
+            _ => return write_string_to_caller(&mut caller, ""),
+        };
+
+        let mut payload_obj = match payload {
+            serde_json::Value::Object(map) => map,
+            _ => return write_string_to_caller(&mut caller, ""),
+        };
+
+        // 2. Extract `jti`. A refresh token without a jti cannot be tracked
+        // for replay; reject rather than issue a rotation the framework
+        // cannot enforce single-use on.
+        let old_jti = match payload_obj.get("jti").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                warn!("_jwt_refresh_and_rotate: token has no jti claim; refusing rotation");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
+
+        // 3. Compute remaining lifetime so the revocation entry lasts at
+        // least as long as the original token would have been valid.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let old_exp = payload_obj.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let remaining = (old_exp - now_secs).max(0) as u64;
+        // Cap the revocation entry lifetime so a maliciously long-lived
+        // token cannot pin the entry in memory forever.
+        let revoke_ttl = std::time::Duration::from_secs(remaining.min(30 * 24 * 3600));
+
+        // 4. Atomically check-and-consume the old jti under the write lock.
+        let session_store = caller.data().session_store.clone();
+        let first_use = {
+            let mut store = session_store.write().expect("session store lock poisoned");
+            store.mark_jti_consumed(&old_jti, revoke_ttl)
+        };
+        if !first_use {
+            // Replay attempt (AUTH-J009). Do not issue a new token.
+            warn!(
+                "_jwt_refresh_and_rotate: replay of consumed jti={}",
+                old_jti
+            );
+            return write_string_to_caller(&mut caller, "");
+        }
+
+        // 5. Build the new payload: keep original claims, refresh iat/exp/jti.
+        let new_jti = uuid::Uuid::new_v4().to_string();
+        let new_exp = now_secs.saturating_add(new_ttl_seconds as i64);
+        payload_obj.insert("iat".to_string(), serde_json::Value::from(now_secs));
+        payload_obj.insert("exp".to_string(), serde_json::Value::from(new_exp));
+        payload_obj.insert("jti".to_string(), serde_json::Value::from(new_jti));
+
+        let new_payload = serde_json::Value::Object(payload_obj);
+
+        // 6. Sign the new token.
+        let sign_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut crypto = host_bridge::CryptoBridge::new();
+                crypto
+                    .call(
+                        "sign",
+                        serde_json::json!({
+                            "payload": new_payload,
+                            "secret": secret,
+                            "algorithm": algorithm
+                        }),
+                    )
+                    .await
+            })
+        });
+
+        let new_token = match sign_result {
+            Ok(v) if v["ok"] == true => v["data"].as_str().unwrap_or("").to_string(),
+            _ => String::new(),
+        };
+
+        write_string_to_caller(&mut caller, &new_token)
+    });
 
     Ok(())
 }
@@ -2394,8 +2569,7 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
              -> i32 {
                 let content_type = read_raw_string(&mut caller, content_type_ptr, content_type_len)
                     .unwrap_or_else(|| "text/plain".to_string());
-                let body = read_raw_string(&mut caller, body_ptr, body_len)
-                    .unwrap_or_default();
+                let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
 
                 debug!(
                     "_http_respond: status={}, content_type={}, body_len={}",
@@ -2454,8 +2628,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
                     Some(s) => s,
                     None => return,
                 };
-                let header_value = read_raw_string(&mut caller, value_ptr, value_len)
-                    .unwrap_or_default();
+                let header_value =
+                    read_raw_string(&mut caller, value_ptr, value_len).unwrap_or_default();
 
                 debug!("_http_set_header: {}={}", header_name, header_value);
                 caller.data_mut().add_header(header_name, header_value);
@@ -2583,7 +2757,8 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
             "env",
             "_res_json",
             |mut caller: Caller<'_, WasmState>, json_ptr: i32, json_len: i32| {
-                let json_body = read_raw_string(&mut caller, json_ptr, json_len).unwrap_or_default();
+                let json_body =
+                    read_raw_string(&mut caller, json_ptr, json_len).unwrap_or_default();
                 debug!("_res_json: {} bytes", json_body.len());
                 caller
                     .data_mut()
@@ -2606,7 +2781,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
                 };
 
                 debug!("_http_set_cache: {}", cache_value);
-                caller.data_mut().add_header("Cache-Control".to_string(), cache_value);
+                caller
+                    .data_mut()
+                    .add_header("Cache-Control".to_string(), cache_value);
                 1
             },
         )
@@ -2623,8 +2800,12 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
                     "Cache-Control".to_string(),
                     "no-cache, no-store, must-revalidate".to_string(),
                 );
-                caller.data_mut().add_header("Pragma".to_string(), "no-cache".to_string());
-                caller.data_mut().add_header("Expires".to_string(), "0".to_string());
+                caller
+                    .data_mut()
+                    .add_header("Pragma".to_string(), "no-cache".to_string());
+                caller
+                    .data_mut()
+                    .add_header("Expires".to_string(), "0".to_string());
                 1
             },
         )
@@ -2633,17 +2814,21 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
     // _res_download - Set Content-Disposition: attachment header for file downloads
     // Args: filename_ptr, filename_len
     // Returns: void
-    register_bridge_fn!(linker, "_res_download",
+    register_bridge_fn!(
+        linker,
+        "_res_download",
         |mut caller: Caller<'_, WasmState>, filename_ptr: i32, filename_len: i32| {
-            let filename = read_raw_string(&mut caller, filename_ptr, filename_len)
-                .unwrap_or_default();
+            let filename =
+                read_raw_string(&mut caller, filename_ptr, filename_len).unwrap_or_default();
             let value = if filename.is_empty() {
                 "attachment".to_string()
             } else {
                 format!("attachment; filename=\"{}\"", filename.replace('"', "\\\""))
             };
             debug!("_res_download: Content-Disposition: {}", value);
-            caller.data_mut().add_header("Content-Disposition".to_string(), value);
+            caller
+                .data_mut()
+                .add_header("Content-Disposition".to_string(), value);
         }
     );
 
@@ -2652,14 +2837,18 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
     // =========================================
 
     // _http_set_status(i32) -> void  (companion to _res_status; no header touch)
-    register_bridge_fn!(linker, "_http_set_status",
+    register_bridge_fn!(
+        linker,
+        "_http_set_status",
         |mut caller: Caller<'_, WasmState>, code: i32| {
             caller.data_mut().set_status(code as u16);
         }
     );
 
     // _http_set_body(string) -> void  (raw body, no Content-Type touch)
-    register_bridge_fn!(linker, "_http_set_body",
+    register_bridge_fn!(
+        linker,
+        "_http_set_body",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
             caller.data_mut().set_body(body);
@@ -2667,7 +2856,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
     );
 
     // _http_json(string) -> void  (body + Content-Type: application/json)
-    register_bridge_fn!(linker, "_http_json",
+    register_bridge_fn!(
+        linker,
+        "_http_json",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let state = caller.data_mut();
@@ -2677,27 +2868,39 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
     );
 
     // _http_html(string) -> void  (body + Content-Type: text/html; charset=utf-8)
-    register_bridge_fn!(linker, "_http_html",
+    register_bridge_fn!(
+        linker,
+        "_http_html",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let state = caller.data_mut();
-            state.add_header("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
+            state.add_header(
+                "Content-Type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            );
             state.set_body(body);
         }
     );
 
     // _http_text(string) -> void  (body + Content-Type: text/plain; charset=utf-8)
-    register_bridge_fn!(linker, "_http_text",
+    register_bridge_fn!(
+        linker,
+        "_http_text",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let body = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let state = caller.data_mut();
-            state.add_header("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+            state.add_header(
+                "Content-Type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            );
             state.set_body(body);
         }
     );
 
     // Status-coded JSON error helpers. All share the same {ok:false, err:{code, message}} shape.
-    register_bridge_fn!(linker, "_http_not_found",
+    register_bridge_fn!(
+        linker,
+        "_http_not_found",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let body = err_body("NOT_FOUND", &msg);
@@ -2708,7 +2911,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         }
     );
 
-    register_bridge_fn!(linker, "_http_bad_request",
+    register_bridge_fn!(
+        linker,
+        "_http_bad_request",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let body = err_body("BAD_REQUEST", &msg);
@@ -2719,7 +2924,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         }
     );
 
-    register_bridge_fn!(linker, "_http_unauthorized",
+    register_bridge_fn!(
+        linker,
+        "_http_unauthorized",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let body = err_body("AUTH_ERROR", &msg);
@@ -2730,7 +2937,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         }
     );
 
-    register_bridge_fn!(linker, "_http_forbidden",
+    register_bridge_fn!(
+        linker,
+        "_http_forbidden",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let body = err_body("PERMISSION_DENIED", &msg);
@@ -2741,7 +2950,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
         }
     );
 
-    register_bridge_fn!(linker, "_http_server_error",
+    register_bridge_fn!(
+        linker,
+        "_http_server_error",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let msg = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let body = err_body("INTERNAL_ERROR", &msg);
@@ -2753,7 +2964,9 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
     );
 
     // _http_delete_cookie(name) -> void — clear cookie via max-age=0
-    register_bridge_fn!(linker, "_http_delete_cookie",
+    register_bridge_fn!(
+        linker,
+        "_http_delete_cookie",
         |mut caller: Caller<'_, WasmState>, p: i32, l: i32| {
             let name = read_raw_string(&mut caller, p, l).unwrap_or_default();
             if name.is_empty() {
@@ -2775,7 +2988,11 @@ fn read_boxed_any(caller: &mut Caller<'_, WasmState>, ptr: i32) -> Option<(i32, 
     let data = memory.data(&*caller);
     let p = ptr as usize;
     if p + 12 > data.len() {
-        error!("read_boxed_any: ptr {} out of bounds (memory size: {})", ptr, data.len());
+        error!(
+            "read_boxed_any: ptr {} out of bounds (memory size: {})",
+            ptr,
+            data.len()
+        );
         return None;
     }
     let tag = i32::from_le_bytes(data[p..p + 4].try_into().ok()?);
@@ -2867,8 +3084,8 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                     Err(_) => {
                         // If not valid JSON, treat as a string value and encode it
                         let json_str = serde_json::Value::String(value);
-                        let encoded = serde_json::to_string(&json_str)
-                            .unwrap_or_else(|_| "\"\"".to_string());
+                        let encoded =
+                            serde_json::to_string(&json_str).unwrap_or_else(|_| "\"\"".to_string());
                         debug!("_json_encode: encoded string as JSON");
                         write_string_to_caller(&mut caller, &encoded)
                     }
@@ -2890,8 +3107,8 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
 
                 match serde_json::from_str::<serde_json::Value>(&json_str) {
                     Ok(value) => {
-                        let decoded = serde_json::to_string(&value)
-                            .unwrap_or_else(|_| "null".to_string());
+                        let decoded =
+                            serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
                         debug!("_json_decode: decoded {} bytes", json_str.len());
                         write_string_to_caller(&mut caller, &decoded)
                     }
@@ -2951,7 +3168,10 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                 let json_str = match read_string_from_caller(&mut caller, value1) {
                     Some(s) => s,
                     None => {
-                        debug!("_json_get: could not read source string (tag={}, value1={})", tag, value1);
+                        debug!(
+                            "_json_get: could not read source string (tag={}, value1={})",
+                            tag, value1
+                        );
                         return write_boxed_any_string(&mut caller, "");
                     }
                 };
@@ -3087,214 +3307,222 @@ fn register_islands_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<(
 fn register_ui_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _ui_load_layout - Load an HTML layout file. Caller provides the full relative path
     // (e.g. "app/ui/layouts/main.html"). Path resolution is the caller's responsibility.
-    register_bridge_fn!(
-        linker,
-        "_ui_load_layout",
-        |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-            let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => {
-                    error!("_ui_load_layout: Failed to read path");
-                    return write_string_to_caller(&mut caller, "");
-                }
-            };
+    register_bridge_fn!(linker, "_ui_load_layout", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    name_ptr: i32,
+                                                    name_len: i32|
+     -> i32 {
+        let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                error!("_ui_load_layout: Failed to read path");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
 
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let path = cwd.join(&path_str);
-            debug!("_ui_load_layout: loading {:?}", path);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let path = cwd.join(&path_str);
+        debug!("_ui_load_layout: loading {:?}", path);
 
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => write_string_to_caller(&mut caller, &contents),
-                Err(e) => {
-                    error!("_ui_load_layout: Failed to read '{:?}': {}", path, e);
-                    write_string_to_caller(&mut caller, "")
-                }
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => write_string_to_caller(&mut caller, &contents),
+            Err(e) => {
+                error!("_ui_load_layout: Failed to read '{:?}': {}", path, e);
+                write_string_to_caller(&mut caller, "")
             }
         }
-    );
+    });
 
     // _ui_load_page - Load an HTML page template. Caller provides the full relative path
     // (e.g. "app/ui/pages/index.html"). Path resolution is the caller's responsibility.
-    register_bridge_fn!(
-        linker,
-        "_ui_load_page",
-        |mut caller: Caller<'_, WasmState>, name_ptr: i32, name_len: i32| -> i32 {
-            let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => {
-                    error!("_ui_load_page: Failed to read path");
-                    return write_string_to_caller(&mut caller, "");
-                }
-            };
+    register_bridge_fn!(linker, "_ui_load_page", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                  name_ptr: i32,
+                                                  name_len: i32|
+     -> i32 {
+        let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                error!("_ui_load_page: Failed to read path");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
 
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let path = cwd.join(&path_str);
-            debug!("_ui_load_page: loading {:?}", path);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let path = cwd.join(&path_str);
+        debug!("_ui_load_page: loading {:?}", path);
 
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => write_string_to_caller(&mut caller, &contents),
-                Err(e) => {
-                    error!("_ui_load_page: Failed to read '{:?}': {}", path, e);
-                    write_string_to_caller(&mut caller, "")
-                }
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => write_string_to_caller(&mut caller, &contents),
+            Err(e) => {
+                error!("_ui_load_page: Failed to read '{:?}': {}", path, e);
+                write_string_to_caller(&mut caller, "")
             }
         }
-    );
+    });
 
     // _ui_render_page - Render an HTML template with {{ key }} substitution.
     // Caller provides the full relative path (e.g. "app/ui/pages/index.html").
     // data is a JSON string; missing keys produce empty string.
-    register_bridge_fn!(
-        linker,
-        "_ui_render_page",
-        |mut caller: Caller<'_, WasmState>,
-         name_ptr: i32,
-         name_len: i32,
-         data_ptr: i32,
-         data_len: i32|
-         -> i32 {
-            let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => {
-                    error!("_ui_render_page: Failed to read path");
-                    return write_string_to_caller(&mut caller, "");
-                }
-            };
+    register_bridge_fn!(linker, "_ui_render_page", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    name_ptr: i32,
+                                                    name_len: i32,
+                                                    data_ptr: i32,
+                                                    data_len: i32|
+     -> i32 {
+        let path_str = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                error!("_ui_render_page: Failed to read path");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
 
-            let data_str = read_raw_string(&mut caller, data_ptr, data_len).unwrap_or_default();
+        let data_str = read_raw_string(&mut caller, data_ptr, data_len).unwrap_or_default();
 
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let path = cwd.join(&path_str);
-            debug!("_ui_render_page: rendering {:?}", path);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let path = cwd.join(&path_str);
+        debug!("_ui_render_page: rendering {:?}", path);
 
-            let template = match std::fs::read_to_string(&path) {
-                Ok(contents) => contents,
-                Err(e) => {
-                    error!("_ui_render_page: Failed to read '{:?}': {}", path, e);
-                    return write_string_to_caller(&mut caller, "");
-                }
-            };
+        let template = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                error!("_ui_render_page: Failed to read '{:?}': {}", path, e);
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
 
-            let data: serde_json::Value = if data_str.is_empty() {
+        let data: serde_json::Value = if data_str.is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&data_str).unwrap_or_else(|e| {
+                error!(
+                    "_ui_render_page: Failed to parse JSON data for '{}': {}",
+                    path_str, e
+                );
                 serde_json::Value::Object(serde_json::Map::new())
-            } else {
-                serde_json::from_str(&data_str).unwrap_or_else(|e| {
-                    error!("_ui_render_page: Failed to parse JSON data for '{}': {}", path_str, e);
-                    serde_json::Value::Object(serde_json::Map::new())
+            })
+        };
+
+        // Extract <page layout="..."> wrapper if present
+        let (page_content, layout_name) = extract_page_layout(&template);
+
+        // Evaluate server-side directives FIRST so that cl-iterate sees
+        // the raw `{items}` collection in `data` (a top-level substitute
+        // pass would stringify the array). Each directive expands its
+        // body with a scoped data context where the iteration variable
+        // is bound; remaining top-level `{var}` placeholders are then
+        // resolved by the substitute pass below.
+        let with_directives = process_directives(&page_content, &data);
+
+        // Substitute remaining top-level template variables ({key} format)
+        let substituted = substitute_template(&with_directives, &data);
+
+        // Expand registered custom component tags to their server-side HTML
+        let component_map = {
+            let reg = caller.data().component_registry.clone();
+            reg.read().map(|m| m.clone()).unwrap_or_default()
+        };
+        let with_components = expand_component_tags(&substituted, &component_map);
+
+        // SRV001: v2 callback-based dispatch. If a plugin declared
+        // `callback = { purpose = "component_tag_render", ... }` on
+        // `_ui_render_page` in its plugin.toml, scan the HTML for
+        // remaining custom (kebab-case) tags and substitute each one
+        // with the output of the matching `<tagname>_render` export.
+        // See foundation/spec/plugins/contracts/bridge-host-classes.md §4.1.
+        let contract = {
+            let cbs = caller.data().callbacks.clone();
+            cbs.iter()
+                .find(|c| {
+                    c.bridge == "_ui_render_page"
+                        && c.purpose
+                            == crate::build_manifest::callback_purpose::COMPONENT_TAG_RENDER
                 })
-            };
-
-            // Extract <page layout="..."> wrapper if present
-            let (page_content, layout_name) = extract_page_layout(&template);
-
-            // Evaluate server-side directives FIRST so that cl-iterate sees
-            // the raw `{items}` collection in `data` (a top-level substitute
-            // pass would stringify the array). Each directive expands its
-            // body with a scoped data context where the iteration variable
-            // is bound; remaining top-level `{var}` placeholders are then
-            // resolved by the substitute pass below.
-            let with_directives = process_directives(&page_content, &data);
-
-            // Substitute remaining top-level template variables ({key} format)
-            let substituted = substitute_template(&with_directives, &data);
-
-            // Expand registered custom component tags to their server-side HTML
-            let component_map = {
-                let reg = caller.data().component_registry.clone();
-                reg.read().map(|m| m.clone()).unwrap_or_default()
-            };
-            let with_components = expand_component_tags(&substituted, &component_map);
-
-            // SRV001: v2 callback-based dispatch. If a plugin declared
-            // `callback = { purpose = "component_tag_render", ... }` on
-            // `_ui_render_page` in its plugin.toml, scan the HTML for
-            // remaining custom (kebab-case) tags and substitute each one
-            // with the output of the matching `<tagname>_render` export.
-            // See foundation/spec/plugins/contracts/bridge-host-classes.md §4.1.
-            let contract = {
-                let cbs = caller.data().callbacks.clone();
-                cbs.iter()
-                    .find(|c| {
-                        c.bridge == "_ui_render_page"
-                            && c.purpose
-                                == crate::build_manifest::callback_purpose::COMPONENT_TAG_RENDER
-                    })
-                    .cloned()
-            };
-            let dispatched = match contract {
-                // Only `exports_matching` is implemented here. The spec
-                // (§4) reserves `manifest_lookup` and `explicit_argument`
-                // for future discovery modes — handling them silently with
-                // an exports_matching loop would mis-route their dispatch,
-                // so skip with a warning instead.
-                Some(c) if c.discovery == "exports_matching" => {
-                    dispatch_component_tags(&mut caller, &with_components, &c)
-                }
-                Some(c) => {
-                    warn!(
-                        "_ui_render_page: unsupported callback discovery '{}' for purpose '{}' \
+                .cloned()
+        };
+        let dispatched = match contract {
+            // Only `exports_matching` is implemented here. The spec
+            // (§4) reserves `manifest_lookup` and `explicit_argument`
+            // for future discovery modes — handling them silently with
+            // an exports_matching loop would mis-route their dispatch,
+            // so skip with a warning instead.
+            Some(c) if c.discovery == "exports_matching" => {
+                dispatch_component_tags(&mut caller, &with_components, &c)
+            }
+            Some(c) => {
+                warn!(
+                    "_ui_render_page: unsupported callback discovery '{}' for purpose '{}' \
                          (declared by '{}'); skipping dispatch",
-                        c.discovery, c.purpose, c.declared_by_plugin
-                    );
-                    with_components
-                }
-                None => with_components,
-            };
+                    c.discovery, c.purpose, c.declared_by_plugin
+                );
+                with_components
+            }
+            None => with_components,
+        };
 
-            // Wrap in layout if specified
-            let wrapped = match layout_name {
-                Some(ref name) => apply_layout(&dispatched, name, &cwd),
-                None => dispatched,
-            };
+        // Wrap in layout if specified
+        let wrapped = match layout_name {
+            Some(ref name) => apply_layout(&dispatched, name, &cwd),
+            None => dispatched,
+        };
 
-            // SRV003: If the final document contains hydration islands, inject the
-            // frame.ui loader.js <script> tag so the client runtime mounts components.
-            let with_loader = inject_loader_script(&wrapped);
+        // SRV003: If the final document contains hydration islands, inject the
+        // frame.ui loader.js <script> tag so the client runtime mounts components.
+        let with_loader = inject_loader_script(&wrapped);
 
-            // SRV004: Inject the full translation bundle as `window.__CLEAN_I18N__`
-            // so the browser-side i18n runtime (frame.ui/runtime/loader.js) can
-            // resolve translation keys without an additional network round-trip.
-            // Reads are done under a blocking lock since this bridge function is
-            // synchronous (not an async wasmtime func_wrap_async).
-            let locale_state = caller.data().locale_state.clone();
-            let i18n_json = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { locale_state.read().await.bundle_as_json() })
-            });
-            let rendered = match i18n_json {
-                Some(json) => inject_i18n_bundle(&with_loader, &json),
-                None => with_loader,
-            };
+        // SRV004: Inject the full translation bundle as `window.__CLEAN_I18N__`
+        // so the browser-side i18n runtime (frame.ui/runtime/loader.js) can
+        // resolve translation keys without an additional network round-trip.
+        // Reads are done under a blocking lock since this bridge function is
+        // synchronous (not an async wasmtime func_wrap_async).
+        let locale_state = caller.data().locale_state.clone();
+        let i18n_json = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { locale_state.read().await.bundle_as_json() })
+        });
+        let rendered = match i18n_json {
+            Some(json) => inject_i18n_bundle(&with_loader, &json),
+            None => with_loader,
+        };
 
-            caller.data_mut().add_header(
-                "Content-Type".to_string(),
-                "text/html; charset=utf-8".to_string(),
-            );
-            write_string_to_caller(&mut caller, &rendered)
-        }
-    );
+        caller.data_mut().add_header(
+            "Content-Type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        );
+        write_string_to_caller(&mut caller, &rendered)
+    });
 
     // _ui_inject_head_link - Inject <link rel="stylesheet" href="..."> into response <head>
     // Deduplicated: the same href injected multiple times produces a single <link> tag.
-    register_bridge_fn!(
-        linker,
-        "_ui_inject_head_link",
-        |mut caller: Caller<'_, WasmState>, href_ptr: i32, href_len: i32| -> i32 {
-            let href = match read_raw_string(&mut caller, href_ptr, href_len) {
-                Some(s) => s,
-                None => {
-                    error!("_ui_inject_head_link: Failed to read href string");
-                    return 0;
-                }
-            };
-
-            let links = &mut caller.data_mut().pending_head_links;
-            if !links.contains(&href) {
-                links.push(href);
+    register_bridge_fn!(linker, "_ui_inject_head_link", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         href_ptr: i32,
+                                                         href_len: i32|
+     -> i32 {
+        let href = match read_raw_string(&mut caller, href_ptr, href_len) {
+            Some(s) => s,
+            None => {
+                error!("_ui_inject_head_link: Failed to read href string");
+                return 0;
             }
-            1
+        };
+
+        let links = &mut caller.data_mut().pending_head_links;
+        if !links.contains(&href) {
+            links.push(href);
         }
-    );
+        1
+    });
 
     // _ui_register_component_html - Register a component's server-side HTML template.
     // Called during WASM init so that _ui_render_page can expand custom element tags.
@@ -3364,7 +3592,10 @@ fn substitute_template(template: &str, data: &serde_json::Value) -> String {
             while j < bytes.len() {
                 match bytes[j] {
                     b'}' => break,
-                    b'{' | b'\n' | b'\r' => { bad = true; break; }
+                    b'{' | b'\n' | b'\r' => {
+                        bad = true;
+                        break;
+                    }
                     _ => j += 1,
                 }
             }
@@ -3393,7 +3624,10 @@ fn substitute_template(template: &str, data: &serde_json::Value) -> String {
         } else {
             // Non-meta byte: copy the full UTF-8 char starting here. Using
             // `chars().next()` works because `i` is always on a char boundary.
-            let ch = template[i..].chars().next().expect("non-empty by loop guard");
+            let ch = template[i..]
+                .chars()
+                .next()
+                .expect("non-empty by loop guard");
             let len = ch.len_utf8();
             result.push(ch);
             i += len;
@@ -3437,7 +3671,10 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 /// - If unregistered but has `client` attr: emit `<div data-island="tag-name" data-client="MODE"></div>`
 ///
 /// Tags without a `client` attribute and without a registration are left unchanged.
-fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String, String>) -> String {
+fn expand_component_tags(
+    html: &str,
+    registry: &std::collections::HashMap<String, String>,
+) -> String {
     let mut result = html.to_string();
     let mut offset = 0;
 
@@ -3455,7 +3692,10 @@ fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String
         let tag_end_in_name = after_open.find([' ', '>', '/']);
         let tag_name = match tag_end_in_name {
             Some(n) => after_open[..n].trim().to_string(),
-            None => { offset = abs_open + 1; continue; }
+            None => {
+                offset = abs_open + 1;
+                continue;
+            }
         };
 
         if !tag_name.contains('-') || tag_name.starts_with('/') {
@@ -3466,7 +3706,10 @@ fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String
         // Find end of opening tag
         let close_bracket = match result[abs_open..].find('>') {
             Some(pos) => abs_open + pos,
-            None => { offset = abs_open + 1; continue; }
+            None => {
+                offset = abs_open + 1;
+                continue;
+            }
         };
 
         let opening_tag = &result[abs_open..=close_bracket];
@@ -3487,7 +3730,10 @@ fn expand_component_tags(html: &str, registry: &std::collections::HashMap<String
                     let end = inner_end + close_tag.len();
                     (result[inner_start..inner_end].to_string(), end)
                 }
-                None => { offset = abs_open + 1; continue; }
+                None => {
+                    offset = abs_open + 1;
+                    continue;
+                }
             }
         };
 
@@ -3705,9 +3951,9 @@ fn dispatch_component_tags(
         let replacement: Option<String> = match func_opt {
             Some(func) => match func.typed::<(), i32>(&*caller) {
                 Ok(typed) => match typed.call(&mut *caller, ()) {
-                    Ok(lp_ptr) if lp_ptr > 0 => host_bridge::read_string_from_caller(
-                        caller, lp_ptr,
-                    ),
+                    Ok(lp_ptr) if lp_ptr > 0 => {
+                        host_bridge::read_string_from_caller(caller, lp_ptr)
+                    }
                     Ok(lp_ptr) => {
                         debug!(
                             "dispatch_component_tags: export '{}' returned invalid pointer {}",
@@ -3785,7 +4031,8 @@ fn inject_loader_script(html: &str) -> String {
         return html.to_string();
     }
 
-    const SCRIPT_TAG: &str = "<script src=\"/loader.js\" defer data-wasm=\"/frontend.wasm\"></script>";
+    const SCRIPT_TAG: &str =
+        "<script src=\"/loader.js\" defer data-wasm=\"/frontend.wasm\"></script>";
 
     let lower = html.to_ascii_lowercase();
     if let Some(pos) = lower.rfind("</body>") {
@@ -3875,7 +4122,10 @@ fn extract_page_layout(html: &str) -> (String, Option<String>) {
         .unwrap_or(tag_start);
 
     let close_tag = "</page>";
-    let inner_end = html[open_end..].find(close_tag).map(|p| open_end + p).unwrap_or(html.len());
+    let inner_end = html[open_end..]
+        .find(close_tag)
+        .map(|p| open_end + p)
+        .unwrap_or(html.len());
     let inner = html[open_end..inner_end].trim().to_string();
 
     (inner, layout)
@@ -3900,7 +4150,10 @@ fn apply_layout(content: &str, layout_name: &str, cwd: &std::path::Path) -> Stri
         }
     }
 
-    debug!("apply_layout: layout '{}' not found, returning content as-is", layout_name);
+    debug!(
+        "apply_layout: layout '{}' not found, returning content as-is",
+        layout_name
+    );
     content.to_string()
 }
 
@@ -4066,7 +4319,12 @@ fn process_iterate_directive(html: &str, data: &serde_json::Value) -> String {
             expanded.push_str(&closing_tag);
         }
 
-        result = format!("{}{}{}", &result[..tag_start], expanded, &result[element_end..]);
+        result = format!(
+            "{}{}{}",
+            &result[..tag_start],
+            expanded,
+            &result[element_end..]
+        );
     }
 
     result
@@ -4078,7 +4336,6 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
     let mut result = html.to_string();
 
     while let Some(attr_pos) = result.find(MARKER) {
-
         let tag_start = match find_tag_start(&result, attr_pos) {
             Some(p) => p,
             None => break,
@@ -4100,9 +4357,8 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
         let attr_full = format!(" cl-if=\"{}\"", condition);
 
         // Check for a cl-else element immediately following (ignoring whitespace)
-        let rest_trimmed_offset = element_end
-            + result[element_end..].len()
-            - result[element_end..].trim_start().len();
+        let rest_trimmed_offset =
+            element_end + result[element_end..].len() - result[element_end..].trim_start().len();
         let rest = &result[rest_trimmed_offset..];
         let has_else = rest.starts_with('<') && {
             let tag_end = rest.find('>').unwrap_or(0);
@@ -4112,8 +4368,8 @@ fn process_if_directive(html: &str, data: &serde_json::Value) -> String {
         let (keep, total_end) = if has_else {
             let else_tag_start = rest_trimmed_offset;
             let else_tag_name = extract_tag_name(&result, else_tag_start);
-            let else_element_end = find_element_end(&result, else_tag_start, &else_tag_name)
-                .unwrap_or(else_tag_start);
+            let else_element_end =
+                find_element_end(&result, else_tag_start, &else_tag_name).unwrap_or(else_tag_start);
 
             if is_truthy {
                 let full_element = result[tag_start..element_end].replace(&attr_full, "");
@@ -4141,7 +4397,6 @@ fn process_show_directive(html: &str, data: &serde_json::Value) -> String {
     let mut result = html.to_string();
 
     while let Some(attr_pos) = result.find(MARKER) {
-
         let val_start = attr_pos + MARKER.len();
         let val_end = match result[val_start..].find('"') {
             Some(p) => val_start + p,
@@ -4166,15 +4421,24 @@ fn process_show_directive(html: &str, data: &serde_json::Value) -> String {
             };
             let opening_tag = result[tag_start..tag_end + 1].to_string();
             let new_tag = if opening_tag.contains("style=\"") {
-                opening_tag
-                    .replacen(&attr_full, "", 1)
-                    .replacen("style=\"", "style=\"display:none;", 1)
+                opening_tag.replacen(&attr_full, "", 1).replacen(
+                    "style=\"",
+                    "style=\"display:none;",
+                    1,
+                )
             } else {
-                opening_tag
-                    .replacen(&attr_full, "", 1)
-                    .replacen('>', " style=\"display:none;\">", 1)
+                opening_tag.replacen(&attr_full, "", 1).replacen(
+                    '>',
+                    " style=\"display:none;\">",
+                    1,
+                )
             };
-            result = format!("{}{}{}", &result[..tag_start], new_tag, &result[tag_end + 1..]);
+            result = format!(
+                "{}{}{}",
+                &result[..tag_start],
+                new_tag,
+                &result[tag_end + 1..]
+            );
         }
     }
 
@@ -4201,22 +4465,21 @@ fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
 
     // _async_await — blocking async: lower `later x = expr`
     // Signature: (fn_name_ptr: i32, fn_name_len: i32, args_ptr: i32, args_len: i32) -> i32 (ptr)
-    register_bridge_fn!(
-        linker,
-        "_async_await",
-        |mut caller: Caller<'_, WasmState>,
-         fn_name_ptr: i32,
-         fn_name_len: i32,
-         _args_ptr: i32,
-         _args_len: i32|
-         -> i32 {
-            let fn_name = read_raw_string(&mut caller, fn_name_ptr, fn_name_len)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            debug!("_async_await: blocking call to '{}'", fn_name);
-            // Write an empty string result into WASM memory and return its pointer
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_async_await", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                 fn_name_ptr: i32,
+                                                 fn_name_len: i32,
+                                                 _args_ptr: i32,
+                                                 _args_len: i32|
+     -> i32 {
+        let fn_name = read_raw_string(&mut caller, fn_name_ptr, fn_name_len)
+            .unwrap_or_else(|| "<unknown>".to_string());
+        debug!("_async_await: blocking call to '{}'", fn_name);
+        // Write an empty string result into WASM memory and return its pointer
+        write_string_to_caller(&mut caller, "")
+    });
 
     // _server_sleep — suspend for N milliseconds
     // Signature: (ms: i64) -> void
@@ -4237,218 +4500,224 @@ fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
 /// _mcp_http_accept, _mcp_http_respond, _mcp_sse_send, _mcp_log)
 fn register_mcp_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _mcp_stdio_read — blocks reading one newline-terminated JSON-RPC message from stdin
-    register_bridge_fn!(
-        linker,
-        "_mcp_stdio_read",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            use std::io::BufRead;
-            let mut line = String::new();
-            match std::io::stdin().lock().read_line(&mut line) {
-                Ok(0) => write_string_to_caller(&mut caller, ""),
-                Ok(_) => {
-                    if line.ends_with('\n') {
+    register_bridge_fn!(linker, "_mcp_stdio_read", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        use std::io::BufRead;
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) => write_string_to_caller(&mut caller, ""),
+            Ok(_) => {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
                         line.pop();
-                        if line.ends_with('\r') {
-                            line.pop();
-                        }
                     }
-                    debug!("_mcp_stdio_read: {} bytes", line.len());
-                    write_string_to_caller(&mut caller, &line)
                 }
-                Err(e) => {
-                    error!("_mcp_stdio_read: {}", e);
-                    write_string_to_caller(&mut caller, "")
-                }
+                debug!("_mcp_stdio_read: {} bytes", line.len());
+                write_string_to_caller(&mut caller, &line)
+            }
+            Err(e) => {
+                error!("_mcp_stdio_read: {}", e);
+                write_string_to_caller(&mut caller, "")
             }
         }
-    );
+    });
 
     // _mcp_stdio_write — write to stdout (stdio mode) or pending HTTP response (HTTP mode)
-    register_bridge_fn!(
-        linker,
-        "_mcp_stdio_write",
-        |mut caller: Caller<'_, WasmState>, msg_ptr: i32, msg_len: i32| -> i32 {
-            let msg = match read_raw_string(&mut caller, msg_ptr, msg_len) {
-                Some(s) => s,
-                None => {
-                    error!("_mcp_stdio_write: failed to read message");
-                    return 0;
-                }
-            };
-            let mcp = caller.data().mcp.clone();
-            let transport = mcp.transport.lock().expect("mcp transport lock").clone();
-            match transport {
-                McpTransport::Stdio => {
-                    use std::io::Write;
-                    let mut stdout = std::io::stdout().lock();
-                    if stdout
-                        .write_all(format!("{}\n", msg).as_bytes())
-                        .is_ok()
-                    {
-                        let _ = stdout.flush();
-                        debug!("_mcp_stdio_write: stdio {} bytes", msg.len());
-                        1
-                    } else {
-                        0
-                    }
-                }
-                McpTransport::Http => {
-                    let tx = mcp
-                        .current_http_response
-                        .lock()
-                        .expect("mcp response lock")
-                        .take();
-                    match tx {
-                        Some(sender) => {
-                            debug!("_mcp_stdio_write: http {} bytes", msg.len());
-                            if sender.send(msg).is_ok() { 1 } else { 0 }
-                        }
-                        None => {
-                            error!("_mcp_stdio_write: no pending HTTP response context");
-                            0
-                        }
-                    }
-                }
+    register_bridge_fn!(linker, "_mcp_stdio_write", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     msg_ptr: i32,
+                                                     msg_len: i32|
+     -> i32 {
+        let msg = match read_raw_string(&mut caller, msg_ptr, msg_len) {
+            Some(s) => s,
+            None => {
+                error!("_mcp_stdio_write: failed to read message");
+                return 0;
             }
-        }
-    );
-
-    // _mcp_http_serve — start background MCP HTTP+SSE server
-    register_bridge_fn!(
-        linker,
-        "_mcp_http_serve",
-        |mut caller: Caller<'_, WasmState>, port: i32, host_ptr: i32, host_len: i32| -> i32 {
-            let host = read_raw_string(&mut caller, host_ptr, host_len)
-                .unwrap_or_else(|| "0.0.0.0".to_string());
-            let mcp = caller.data().mcp.clone();
-            *mcp.transport.lock().expect("mcp transport lock") = McpTransport::Http;
-            let addr = format!("{}:{}", host, port);
-            match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    handle.spawn(run_mcp_http_server(addr.clone(), mcp));
-                    info!("_mcp_http_serve: MCP HTTP server starting on {}", addr);
+        };
+        let mcp = caller.data().mcp.clone();
+        let transport = mcp.transport.lock().expect("mcp transport lock").clone();
+        match transport {
+            McpTransport::Stdio => {
+                use std::io::Write;
+                let mut stdout = std::io::stdout().lock();
+                if stdout.write_all(format!("{}\n", msg).as_bytes()).is_ok() {
+                    let _ = stdout.flush();
+                    debug!("_mcp_stdio_write: stdio {} bytes", msg.len());
                     1
-                }
-                Err(e) => {
-                    error!("_mcp_http_serve: no tokio runtime: {}", e);
+                } else {
                     0
                 }
             }
+            McpTransport::Http => {
+                let tx = mcp
+                    .current_http_response
+                    .lock()
+                    .expect("mcp response lock")
+                    .take();
+                match tx {
+                    Some(sender) => {
+                        debug!("_mcp_stdio_write: http {} bytes", msg.len());
+                        if sender.send(msg).is_ok() { 1 } else { 0 }
+                    }
+                    None => {
+                        error!("_mcp_stdio_write: no pending HTTP response context");
+                        0
+                    }
+                }
+            }
         }
-    );
+    });
+
+    // _mcp_http_serve — start background MCP HTTP+SSE server
+    register_bridge_fn!(linker, "_mcp_http_serve", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    port: i32,
+                                                    host_ptr: i32,
+                                                    host_len: i32|
+     -> i32 {
+        let host = read_raw_string(&mut caller, host_ptr, host_len)
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let mcp = caller.data().mcp.clone();
+        *mcp.transport.lock().expect("mcp transport lock") = McpTransport::Http;
+        let addr = format!("{}:{}", host, port);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(run_mcp_http_server(addr.clone(), mcp));
+                info!("_mcp_http_serve: MCP HTTP server starting on {}", addr);
+                1
+            }
+            Err(e) => {
+                error!("_mcp_http_serve: no tokio runtime: {}", e);
+                0
+            }
+        }
+    });
 
     // _mcp_http_accept — block until next POST /mcp request, return body
-    register_bridge_fn!(
-        linker,
-        "_mcp_http_accept",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let mcp = caller.data().mcp.clone();
-            let request = {
-                let (ref queue_mutex, ref condvar) = mcp.request_queue;
-                let mut q = queue_mutex.lock().expect("mcp queue lock");
-                loop {
-                    if let Some(req) = q.pop_front() {
-                        break req;
-                    }
-                    q = condvar.wait(q).expect("mcp condvar wait");
+    register_bridge_fn!(linker, "_mcp_http_accept", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let mcp = caller.data().mcp.clone();
+        let request = {
+            let (ref queue_mutex, ref condvar) = mcp.request_queue;
+            let mut q = queue_mutex.lock().expect("mcp queue lock");
+            loop {
+                if let Some(req) = q.pop_front() {
+                    break req;
                 }
-            };
-            *mcp.current_http_response.lock().expect("mcp response lock") =
-                Some(request.response_tx);
-            debug!("_mcp_http_accept: received request {} bytes", request.body.len());
-            write_string_to_caller(&mut caller, &request.body)
-        }
-    );
+                q = condvar.wait(q).expect("mcp condvar wait");
+            }
+        };
+        *mcp.current_http_response.lock().expect("mcp response lock") = Some(request.response_tx);
+        debug!(
+            "_mcp_http_accept: received request {} bytes",
+            request.body.len()
+        );
+        write_string_to_caller(&mut caller, &request.body)
+    });
 
     // _mcp_http_respond — deliver response to the client of the last _mcp_http_accept.
     // Pairs 1:1 with _mcp_http_accept; clearer semantics than reusing _mcp_stdio_write
     // in HTTP mode (which conflates stdio and http transports).
-    register_bridge_fn!(
-        linker,
-        "_mcp_http_respond",
-        |mut caller: Caller<'_, WasmState>, body_ptr: i32, body_len: i32| -> i32 {
-            let body = match read_raw_string(&mut caller, body_ptr, body_len) {
-                Some(s) => s,
-                None => {
-                    error!("_mcp_http_respond: failed to read body");
-                    return 0;
-                }
-            };
-            let tx = caller
-                .data()
-                .mcp
-                .current_http_response
-                .lock()
-                .expect("mcp response lock")
-                .take();
-            match tx {
-                Some(sender) => {
-                    debug!("_mcp_http_respond: sending {} bytes", body.len());
-                    if sender.send(body).is_ok() { 1 } else { 0 }
-                }
-                None => {
-                    error!("_mcp_http_respond: no in-flight HTTP request to respond to");
-                    0
-                }
+    register_bridge_fn!(linker, "_mcp_http_respond", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      body_ptr: i32,
+                                                      body_len: i32|
+     -> i32 {
+        let body = match read_raw_string(&mut caller, body_ptr, body_len) {
+            Some(s) => s,
+            None => {
+                error!("_mcp_http_respond: failed to read body");
+                return 0;
+            }
+        };
+        let tx = caller
+            .data()
+            .mcp
+            .current_http_response
+            .lock()
+            .expect("mcp response lock")
+            .take();
+        match tx {
+            Some(sender) => {
+                debug!("_mcp_http_respond: sending {} bytes", body.len());
+                if sender.send(body).is_ok() { 1 } else { 0 }
+            }
+            None => {
+                error!("_mcp_http_respond: no in-flight HTTP request to respond to");
+                0
             }
         }
-    );
+    });
 
     // _mcp_sse_send — send raw SSE-formatted event to a specific connected client
-    register_bridge_fn!(
-        linker,
-        "_mcp_sse_send",
-        |mut caller: Caller<'_, WasmState>,
-         client_id_ptr: i32,
-         client_id_len: i32,
-         event_ptr: i32,
-         event_len: i32|
-         -> i32 {
-            let client_id = match read_raw_string(&mut caller, client_id_ptr, client_id_len) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let event = match read_raw_string(&mut caller, event_ptr, event_len) {
-                Some(s) => s,
-                None => return 0,
-            };
-            let clients = caller.data().mcp.sse_clients.lock().expect("sse clients lock");
-            match clients.get(&client_id) {
-                Some(tx) => {
-                    if tx.send(event).is_ok() {
-                        debug!("_mcp_sse_send: sent to client {}", client_id);
-                        1
-                    } else {
-                        debug!("_mcp_sse_send: client {} disconnected", client_id);
-                        0
-                    }
-                }
-                None => {
-                    debug!("_mcp_sse_send: unknown client {}", client_id);
+    register_bridge_fn!(linker, "_mcp_sse_send", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                  client_id_ptr: i32,
+                                                  client_id_len: i32,
+                                                  event_ptr: i32,
+                                                  event_len: i32|
+     -> i32 {
+        let client_id = match read_raw_string(&mut caller, client_id_ptr, client_id_len) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let event = match read_raw_string(&mut caller, event_ptr, event_len) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let clients = caller
+            .data()
+            .mcp
+            .sse_clients
+            .lock()
+            .expect("sse clients lock");
+        match clients.get(&client_id) {
+            Some(tx) => {
+                if tx.send(event).is_ok() {
+                    debug!("_mcp_sse_send: sent to client {}", client_id);
+                    1
+                } else {
+                    debug!("_mcp_sse_send: client {} disconnected", client_id);
                     0
                 }
             }
+            None => {
+                debug!("_mcp_sse_send: unknown client {}", client_id);
+                0
+            }
         }
-    );
+    });
 
     // _mcp_log — write structured log to stderr (never stdout, which would corrupt stdio transport)
-    register_bridge_fn!(
-        linker,
-        "_mcp_log",
-        |mut caller: Caller<'_, WasmState>,
-         level_ptr: i32,
-         level_len: i32,
-         msg_ptr: i32,
-         msg_len: i32|
-         -> i32 {
-            let level = read_raw_string(&mut caller, level_ptr, level_len)
-                .unwrap_or_else(|| "info".to_string());
-            let msg = read_raw_string(&mut caller, msg_ptr, msg_len).unwrap_or_default();
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr(), "[frame.mcp] {}: {}", level, msg);
-            1
-        }
-    );
+    register_bridge_fn!(linker, "_mcp_log", |mut caller: Caller<'_, WasmState>,
+                                             level_ptr: i32,
+                                             level_len: i32,
+                                             msg_ptr: i32,
+                                             msg_len: i32|
+     -> i32 {
+        let level = read_raw_string(&mut caller, level_ptr, level_len)
+            .unwrap_or_else(|| "info".to_string());
+        let msg = read_raw_string(&mut caller, msg_ptr, msg_len).unwrap_or_default();
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "[frame.mcp] {}: {}", level, msg);
+        1
+    });
 
     Ok(())
 }
@@ -4462,7 +4731,10 @@ type McpAxumState = std::sync::Arc<McpBridgeState>;
 ///
 /// Called by `_mcp_http_serve` on the current tokio runtime.
 async fn run_mcp_http_server(addr: String, mcp: McpAxumState) {
-    use axum::{Router, routing::{get, post}};
+    use axum::{
+        Router,
+        routing::{get, post},
+    };
     use tower_http::cors::{Any, CorsLayer};
 
     let cors = CorsLayer::new()
@@ -4586,178 +4858,182 @@ fn register_test_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     // Signature: (method_ptr, method_len, path_ptr, path_len, body_ptr, body_len,
     //             hkey_ptr, hkey_len, hval_ptr, hval_len) -> i32
     // Returns: handle >= 0 on success, -1 if route not found or dispatch fails
-    register_bridge_fn!(
-        linker,
-        "_test_http_request",
-        |mut caller: Caller<'_, WasmState>,
-         method_ptr: i32,
-         method_len: i32,
-         path_ptr: i32,
-         path_len: i32,
-         body_ptr: i32,
-         body_len: i32,
-         hkey_ptr: i32,
-         hkey_len: i32,
-         hval_ptr: i32,
-         hval_len: i32|
-         -> i32 {
-            let method = read_raw_string(&mut caller, method_ptr, method_len)
-                .unwrap_or_else(|| "GET".to_string());
-            let full_path = read_raw_string(&mut caller, path_ptr, path_len)
-                .unwrap_or_else(|| "/".to_string());
-            let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
-            let hkey = read_raw_string(&mut caller, hkey_ptr, hkey_len).unwrap_or_default();
-            let hval = read_raw_string(&mut caller, hval_ptr, hval_len).unwrap_or_default();
+    register_bridge_fn!(linker, "_test_http_request", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       method_ptr: i32,
+                                                       method_len: i32,
+                                                       path_ptr: i32,
+                                                       path_len: i32,
+                                                       body_ptr: i32,
+                                                       body_len: i32,
+                                                       hkey_ptr: i32,
+                                                       hkey_len: i32,
+                                                       hval_ptr: i32,
+                                                       hval_len: i32|
+     -> i32 {
+        let method = read_raw_string(&mut caller, method_ptr, method_len)
+            .unwrap_or_else(|| "GET".to_string());
+        let full_path =
+            read_raw_string(&mut caller, path_ptr, path_len).unwrap_or_else(|| "/".to_string());
+        let body = read_raw_string(&mut caller, body_ptr, body_len).unwrap_or_default();
+        let hkey = read_raw_string(&mut caller, hkey_ptr, hkey_len).unwrap_or_default();
+        let hval = read_raw_string(&mut caller, hval_ptr, hval_len).unwrap_or_default();
 
-            // Strip query string from path for route lookup
-            let (clean_path, query_str) = match full_path.find('?') {
-                Some(qi) => (full_path[..qi].to_string(), full_path[qi + 1..].to_string()),
-                None => (full_path.clone(), String::new()),
-            };
+        // Strip query string from path for route lookup
+        let (clean_path, query_str) = match full_path.find('?') {
+            Some(qi) => (full_path[..qi].to_string(), full_path[qi + 1..].to_string()),
+            None => (full_path.clone(), String::new()),
+        };
 
-            let http_method = match HttpMethod::parse(&method) {
-                Ok(m) => m,
-                Err(_) => {
-                    error!("_test_http_request: invalid method '{}'", method);
-                    return -1;
-                }
-            };
+        let http_method = match HttpMethod::parse(&method) {
+            Ok(m) => m,
+            Err(_) => {
+                error!("_test_http_request: invalid method '{}'", method);
+                return -1;
+            }
+        };
 
-            // Look up route and extract path params
-            let (handler_name, path_params) = {
-                let state = caller.data();
-                match state.router.find(http_method, &clean_path) {
-                    Some((handler, params)) => (handler.handler_name.clone(), params),
-                    None => {
-                        debug!("_test_http_request: no route for {} {}", method, clean_path);
-                        return -1;
-                    }
-                }
-            };
-
-            // Get the handler export before mutably borrowing caller
-            let handler_func = caller.get_export(&handler_name).and_then(|e| e.into_func());
-            let handler_func = match handler_func {
-                Some(f) => f,
+        // Look up route and extract path params
+        let (handler_name, path_params) = {
+            let state = caller.data();
+            match state.router.find(http_method, &clean_path) {
+                Some((handler, params)) => (handler.handler_name.clone(), params),
                 None => {
-                    error!(
-                        "_test_http_request: handler export '{}' not found",
-                        handler_name
-                    );
+                    debug!("_test_http_request: no route for {} {}", method, clean_path);
                     return -1;
                 }
-            };
-
-            // Parse query string into a map
-            let query: std::collections::HashMap<String, String> = if query_str.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                use url::form_urlencoded;
-                form_urlencoded::parse(query_str.as_bytes())
-                    .into_owned()
-                    .collect()
-            };
-
-            // Build request headers
-            let mut headers = vec![
-                ("Content-Type".to_string(), "application/json".to_string()),
-            ];
-            if !hkey.is_empty() {
-                headers.push((hkey, hval));
             }
+        };
 
-            // Set test request context and clear pending response state
-            {
-                let state = caller.data_mut();
-                state.request_context = Some(crate::wasm::RequestContext {
-                    method: method.clone(),
-                    path: clean_path.clone(),
-                    headers,
-                    body,
-                    params: path_params,
-                    query,
-                });
-                state.pending_status = None;
-                state.pending_body = None;
-                state.pending_headers.clear();
-                state.pending_redirect = None;
-                state.auth_context = None;
+        // Get the handler export before mutably borrowing caller
+        let handler_func = caller.get_export(&handler_name).and_then(|e| e.into_func());
+        let handler_func = match handler_func {
+            Some(f) => f,
+            None => {
+                error!(
+                    "_test_http_request: handler export '{}' not found",
+                    handler_name
+                );
+                return -1;
             }
+        };
 
-            // Determine result buffer size and call the handler
-            let result_count = handler_func.ty(&caller).results().len();
-            let mut results = vec![wasmtime::Val::I32(0); result_count];
-            let call_ok = handler_func.call(&mut caller, &[], &mut results).is_ok();
+        // Parse query string into a map
+        let query: std::collections::HashMap<String, String> = if query_str.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            use url::form_urlencoded;
+            form_urlencoded::parse(query_str.as_bytes())
+                .into_owned()
+                .collect()
+        };
 
-            // Capture and store the response
-            let handle = {
-                let state = caller.data_mut();
-                let status = state.pending_status.unwrap_or(200) as i32;
-                let body = state.pending_body.clone().unwrap_or_default();
-                // Clear request state
-                state.request_context = None;
-                state.pending_status = None;
-                state.pending_body = None;
-                state.pending_headers.clear();
-                state.auth_context = None;
-
-                if !call_ok {
-                    debug!("_test_http_request: handler '{}' returned an error", handler_name);
-                    return -1;
-                }
-
-                let h = state.next_test_handle;
-                state.next_test_handle += 1;
-                state.test_responses.insert(h, TestResponse { status, body });
-                h
-            };
-
-            debug!(
-                "_test_http_request: {} {} -> handle {}",
-                method, clean_path, handle
-            );
-            handle
+        // Build request headers
+        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        if !hkey.is_empty() {
+            headers.push((hkey, hval));
         }
-    );
+
+        // Set test request context and clear pending response state
+        {
+            let state = caller.data_mut();
+            state.request_context = Some(crate::wasm::RequestContext {
+                method: method.clone(),
+                path: clean_path.clone(),
+                headers,
+                body,
+                params: path_params,
+                query,
+            });
+            state.pending_status = None;
+            state.pending_body = None;
+            state.pending_headers.clear();
+            state.pending_redirect = None;
+            state.auth_context = None;
+        }
+
+        // Determine result buffer size and call the handler
+        let result_count = handler_func.ty(&caller).results().len();
+        let mut results = vec![wasmtime::Val::I32(0); result_count];
+        let call_ok = handler_func.call(&mut caller, &[], &mut results).is_ok();
+
+        // Capture and store the response
+        let handle = {
+            let state = caller.data_mut();
+            let status = state.pending_status.unwrap_or(200) as i32;
+            let body = state.pending_body.clone().unwrap_or_default();
+            // Clear request state
+            state.request_context = None;
+            state.pending_status = None;
+            state.pending_body = None;
+            state.pending_headers.clear();
+            state.auth_context = None;
+
+            if !call_ok {
+                debug!(
+                    "_test_http_request: handler '{}' returned an error",
+                    handler_name
+                );
+                return -1;
+            }
+
+            let h = state.next_test_handle;
+            state.next_test_handle += 1;
+            state
+                .test_responses
+                .insert(h, TestResponse { status, body });
+            h
+        };
+
+        debug!(
+            "_test_http_request: {} {} -> handle {}",
+            method, clean_path, handle
+        );
+        handle
+    });
 
     // _test_response_status - Get HTTP status from a test response handle
     // Signature: (handle: i32) -> i32
     // Returns: status code (e.g. 200), or -1 if handle unknown
-    register_bridge_fn!(
-        linker,
-        "_test_response_status",
-        |caller: Caller<'_, WasmState>, handle: i32| -> i32 {
-            let state = caller.data();
-            match state.test_responses.get(&handle) {
-                Some(r) => r.status,
-                None => {
-                    debug!("_test_response_status: unknown handle {}", handle);
-                    -1
-                }
+    register_bridge_fn!(linker, "_test_response_status", |caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          handle: i32|
+     -> i32 {
+        let state = caller.data();
+        match state.test_responses.get(&handle) {
+            Some(r) => r.status,
+            None => {
+                debug!("_test_response_status: unknown handle {}", handle);
+                -1
             }
         }
-    );
+    });
 
     // _test_response_body - Get response body JSON from a test response handle
     // Signature: (handle: i32) -> i32 (length-prefixed pointer)
     // Returns: empty string if handle unknown
-    register_bridge_fn!(
-        linker,
-        "_test_response_body",
-        |mut caller: Caller<'_, WasmState>, handle: i32| -> i32 {
-            let body = {
-                let state = caller.data();
-                match state.test_responses.get(&handle) {
-                    Some(r) => r.body.clone(),
-                    None => {
-                        debug!("_test_response_body: unknown handle {}", handle);
-                        String::new()
-                    }
+    register_bridge_fn!(linker, "_test_response_body", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        handle: i32|
+     -> i32 {
+        let body = {
+            let state = caller.data();
+            match state.test_responses.get(&handle) {
+                Some(r) => r.body.clone(),
+                None => {
+                    debug!("_test_response_body: unknown handle {}", handle);
+                    String::new()
                 }
-            };
-            write_string_to_caller(&mut caller, &body)
-        }
-    );
+            }
+        };
+        write_string_to_caller(&mut caller, &body)
+    });
 
     Ok(())
 }
@@ -4769,49 +5045,47 @@ fn register_test_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
 /// functions can write formatted SSE frames directly to the live HTTP response.
 fn register_sse_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // _sse_emit — write `data: {payload}\n\n`
-    register_bridge_fn!(
-        linker,
-        "_sse_emit",
-        |mut caller: Caller<'_, WasmState>, data_ptr: i32, data_len: i32| -> i32 {
-            let data = match read_raw_string(&mut caller, data_ptr, data_len) {
-                Some(s) => s,
-                None => return -1,
-            };
-            let frame = format!("data: {}\n\n", data);
-            let tx = caller.data().sse_sender.clone();
-            match tx {
-                Some(tx) if tx.send(frame).is_ok() => 0,
-                _ => -1,
-            }
+    register_bridge_fn!(linker, "_sse_emit", |mut caller: Caller<'_, WasmState>,
+                                              data_ptr: i32,
+                                              data_len: i32|
+     -> i32 {
+        let data = match read_raw_string(&mut caller, data_ptr, data_len) {
+            Some(s) => s,
+            None => return -1,
+        };
+        let frame = format!("data: {}\n\n", data);
+        let tx = caller.data().sse_sender.clone();
+        match tx {
+            Some(tx) if tx.send(frame).is_ok() => 0,
+            _ => -1,
         }
-    );
+    });
 
     // _sse_emit_event — write `event: {name}\ndata: {payload}\n\n`
-    register_bridge_fn!(
-        linker,
-        "_sse_emit_event",
-        |mut caller: Caller<'_, WasmState>,
-         name_ptr: i32,
-         name_len: i32,
-         data_ptr: i32,
-         data_len: i32|
-         -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) => s,
-                None => return -1,
-            };
-            let data = match read_raw_string(&mut caller, data_ptr, data_len) {
-                Some(s) => s,
-                None => return -1,
-            };
-            let frame = format!("event: {}\ndata: {}\n\n", name, data);
-            let tx = caller.data().sse_sender.clone();
-            match tx {
-                Some(tx) if tx.send(frame).is_ok() => 0,
-                _ => -1,
-            }
+    register_bridge_fn!(linker, "_sse_emit_event", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    name_ptr: i32,
+                                                    name_len: i32,
+                                                    data_ptr: i32,
+                                                    data_len: i32|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) => s,
+            None => return -1,
+        };
+        let data = match read_raw_string(&mut caller, data_ptr, data_len) {
+            Some(s) => s,
+            None => return -1,
+        };
+        let frame = format!("event: {}\ndata: {}\n\n", name, data);
+        let tx = caller.data().sse_sender.clone();
+        match tx {
+            Some(tx) if tx.send(frame).is_ok() => 0,
+            _ => -1,
         }
-    );
+    });
 
     // _sse_close — drop the sender so the stream EOF is delivered to the client
     register_bridge_fn!(
@@ -4824,30 +5098,28 @@ fn register_sse_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     );
 
     // _sse_retry — write `retry: {ms}\n\n`
-    register_bridge_fn!(
-        linker,
-        "_sse_retry",
-        |caller: Caller<'_, WasmState>, ms: i32| -> i32 {
-            let frame = format!("retry: {}\n\n", ms);
-            let tx = caller.data().sse_sender.clone();
-            match tx {
-                Some(tx) if tx.send(frame).is_ok() => 0,
-                _ => -1,
-            }
+    register_bridge_fn!(linker, "_sse_retry", |caller: Caller<'_, WasmState>,
+                                               ms: i32|
+     -> i32 {
+        let frame = format!("retry: {}\n\n", ms);
+        let tx = caller.data().sse_sender.clone();
+        match tx {
+            Some(tx) if tx.send(frame).is_ok() => 0,
+            _ => -1,
         }
-    );
+    });
 
     // _sse_is_connected — returns 1 if the client is still connected, 0 if not
-    register_bridge_fn!(
-        linker,
-        "_sse_is_connected",
-        |caller: Caller<'_, WasmState>| -> i32 {
-            match &caller.data().sse_sender {
-                Some(tx) if !tx.is_closed() => 1,
-                _ => 0,
-            }
+    register_bridge_fn!(linker, "_sse_is_connected", |caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        match &caller.data().sse_sender {
+            Some(tx) if !tx.is_closed() => 1,
+            _ => 0,
         }
-    );
+    });
 
     Ok(())
 }
@@ -4861,146 +5133,148 @@ fn register_sse_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
 fn register_browser_stub_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     // ── DOM Query stubs (FEXT-2) ────────────────────────────────────────────
 
-    register_bridge_fn!(
-        linker,
-        "_ui_get_bounds",
-        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_get_bounds", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _sel_ptr: i32,
+                                                   _sel_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_get_offset_bounds",
-        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_get_offset_bounds", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _sel_ptr: i32,
+                                                          _sel_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_get_scroll",
-        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_get_scroll", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _sel_ptr: i32,
+                                                   _sel_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_set_scroll",
-        |_caller: Caller<'_, WasmState>,
-         _sel_ptr: i32,
-         _sel_len: i32,
-         _x: f64,
-         _y: f64|
-         -> i32 { 0 }
-    );
+    register_bridge_fn!(linker, "_ui_set_scroll", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _sel_ptr: i32,
+                                                   _sel_len: i32,
+                                                   _x: f64,
+                                                   _y: f64|
+     -> i32 { 0 });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_query_all",
-        |mut caller: Caller<'_, WasmState>, _sel_ptr: i32, _sel_len: i32| -> i32 {
-            write_string_to_caller(&mut caller, "[]")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_query_all", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                  _sel_ptr: i32,
+                                                  _sel_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "[]")
+    });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_get_computed_style",
-        |mut caller: Caller<'_, WasmState>,
-         _sel_ptr: i32,
-         _sel_len: i32,
-         _prop_ptr: i32,
-         _prop_len: i32|
-         -> i32 {
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_get_computed_style", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _sel_ptr: i32,
+                                                           _sel_len: i32,
+                                                           _prop_ptr: i32,
+                                                           _prop_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
 
     // ── DOM Patching stub (FEXT-5) ──────────────────────────────────────────
 
-    register_bridge_fn!(
-        linker,
-        "_ui_patch",
-        |_caller: Caller<'_, WasmState>,
-         _sel_ptr: i32,
-         _sel_len: i32,
-         _html_ptr: i32,
-         _html_len: i32|
-         -> i32 { 0 }
-    );
+    register_bridge_fn!(linker, "_ui_patch", |_caller: Caller<'_, WasmState>,
+                                              _sel_ptr: i32,
+                                              _sel_len: i32,
+                                              _html_ptr: i32,
+                                              _html_len: i32|
+     -> i32 { 0 });
 
     // ── iframe Communication stubs (FEXT-3) ────────────────────────────────
 
-    register_bridge_fn!(
-        linker,
-        "_ui_iframe_send",
-        |_caller: Caller<'_, WasmState>,
-         _sel_ptr: i32,
-         _sel_len: i32,
-         _msg_ptr: i32,
-         _msg_len: i32|
-         -> i32 { 0 }
-    );
+    register_bridge_fn!(linker, "_ui_iframe_send", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _sel_ptr: i32,
+                                                    _sel_len: i32,
+                                                    _msg_ptr: i32,
+                                                    _msg_len: i32|
+     -> i32 { 0 });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_iframe_on_message",
-        |_caller: Caller<'_, WasmState>, _handler_ptr: i32, _handler_len: i32| -> i32 { 0 }
-    );
+    register_bridge_fn!(linker, "_ui_iframe_on_message", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _handler_ptr: i32,
+                                                          _handler_len: i32|
+     -> i32 { 0 });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_iframe_get_bounds",
-        |mut caller: Caller<'_, WasmState>,
-         _iframe_sel_ptr: i32,
-         _iframe_sel_len: i32,
-         _inner_sel_ptr: i32,
-         _inner_sel_len: i32|
-         -> i32 {
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_iframe_get_bounds", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _iframe_sel_ptr: i32,
+                                                          _iframe_sel_len: i32,
+                                                          _inner_sel_ptr: i32,
+                                                          _inner_sel_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_iframe_inject",
-        |_caller: Caller<'_, WasmState>,
-         _sel_ptr: i32,
-         _sel_len: i32,
-         _script_ptr: i32,
-         _script_len: i32|
-         -> i32 { 0 }
-    );
+    register_bridge_fn!(linker, "_ui_iframe_inject", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _sel_ptr: i32,
+                                                      _sel_len: i32,
+                                                      _script_ptr: i32,
+                                                      _script_len: i32|
+     -> i32 { 0 });
 
     // ── Drag Data stubs (FEXT-1) ────────────────────────────────────────────
 
-    register_bridge_fn!(
-        linker,
-        "_ui_set_drag_data",
-        |_caller: Caller<'_, WasmState>,
-         _key_ptr: i32,
-         _key_len: i32,
-         _val_ptr: i32,
-         _val_len: i32|
-         -> i32 { 0 }
-    );
+    register_bridge_fn!(linker, "_ui_set_drag_data", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _key_ptr: i32,
+                                                      _key_len: i32,
+                                                      _val_ptr: i32,
+                                                      _val_len: i32|
+     -> i32 { 0 });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_get_drag_data",
-        |mut caller: Caller<'_, WasmState>, _key_ptr: i32, _key_len: i32| -> i32 {
-            write_string_to_caller(&mut caller, "")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_get_drag_data", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _key_ptr: i32,
+                                                      _key_len: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
 
-    register_bridge_fn!(
-        linker,
-        "_ui_event_data_json",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            write_string_to_caller(&mut caller, "{}")
-        }
-    );
+    register_bridge_fn!(linker, "_ui_event_data_json", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        write_string_to_caller(&mut caller, "{}")
+    });
 
     Ok(())
 }
@@ -5011,21 +5285,39 @@ fn register_email_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
 
     // _email_configure — store SMTP settings during startup
     // Args: host(ptr,len), port(i64), secure(i32), username(ptr,len), password(ptr,len), from(ptr,len)
-    register_bridge_fn!(linker, "_email_configure",
+    register_bridge_fn!(
+        linker,
+        "_email_configure",
         |mut caller: Caller<'_, WasmState>,
-         host_ptr: i32, host_len: i32,
+         host_ptr: i32,
+         host_len: i32,
          port: i64,
          secure: i32,
-         user_ptr: i32, user_len: i32,
-         pass_ptr: i32, pass_len: i32,
-         from_ptr: i32, from_len: i32| {
+         user_ptr: i32,
+         user_len: i32,
+         pass_ptr: i32,
+         pass_len: i32,
+         from_ptr: i32,
+         from_len: i32| {
             let host = read_raw_string(&mut caller, host_ptr, host_len).unwrap_or_default();
             let username = read_raw_string(&mut caller, user_ptr, user_len).unwrap_or_default();
             let password = read_raw_string(&mut caller, pass_ptr, pass_len).unwrap_or_default();
             let from_address = read_raw_string(&mut caller, from_ptr, from_len).unwrap_or_default();
             let port = port.clamp(1, 65535) as u16;
-            debug!("_email_configure: host={} port={} secure={}", host, port, secure != 0);
-            let config = SmtpConfig { host, port, secure: secure != 0, username, password, from_address };
+            debug!(
+                "_email_configure: host={} port={} secure={}",
+                host,
+                port,
+                secure != 0
+            );
+            let config = SmtpConfig {
+                host,
+                port,
+                secure: secure != 0,
+                username,
+                password,
+                from_address,
+            };
             caller.data().smtp_state.lock().config = Some(config);
         }
     );
@@ -5033,107 +5325,120 @@ fn register_email_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
     // _email_send — send an email via SMTP
     // Args: to(ptr,len), subject(ptr,len), html(ptr,len), text(ptr,len), from_override(ptr,len)
     // Returns: 1 on success, 0 on failure
-    register_bridge_fn!(linker, "_email_send",
-        |mut caller: Caller<'_, WasmState>,
-         to_ptr: i32, to_len: i32,
-         subject_ptr: i32, subject_len: i32,
-         html_ptr: i32, html_len: i32,
-         text_ptr: i32, text_len: i32,
-         from_ptr: i32, from_len: i32|
-         -> i32 {
-            let to = read_raw_string(&mut caller, to_ptr, to_len).unwrap_or_default();
-            let subject = read_raw_string(&mut caller, subject_ptr, subject_len).unwrap_or_default();
-            let html = read_raw_string(&mut caller, html_ptr, html_len).unwrap_or_default();
-            let text = read_raw_string(&mut caller, text_ptr, text_len).unwrap_or_default();
-            let from_override = read_raw_string(&mut caller, from_ptr, from_len).unwrap_or_default();
+    register_bridge_fn!(linker, "_email_send", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                to_ptr: i32,
+                                                to_len: i32,
+                                                subject_ptr: i32,
+                                                subject_len: i32,
+                                                html_ptr: i32,
+                                                html_len: i32,
+                                                text_ptr: i32,
+                                                text_len: i32,
+                                                from_ptr: i32,
+                                                from_len: i32|
+     -> i32 {
+        let to = read_raw_string(&mut caller, to_ptr, to_len).unwrap_or_default();
+        let subject = read_raw_string(&mut caller, subject_ptr, subject_len).unwrap_or_default();
+        let html = read_raw_string(&mut caller, html_ptr, html_len).unwrap_or_default();
+        let text = read_raw_string(&mut caller, text_ptr, text_len).unwrap_or_default();
+        let from_override = read_raw_string(&mut caller, from_ptr, from_len).unwrap_or_default();
 
-            let config = {
-                let guard = caller.data().smtp_state.lock();
-                match guard.config.clone() {
-                    Some(c) => c,
-                    None => {
-                        error!("_email_send: SMTP not configured — call email.configure first");
-                        caller.data().smtp_state.lock().last_error =
-                            "SMTP not configured".to_string();
-                        return 0;
-                    }
-                }
-            };
-
-            let from_addr = if from_override.is_empty() { &config.from_address } else { &from_override };
-
-            let result = tokio::task::block_in_place(|| {
-                use lettre::message::{header::ContentType, MultiPart, SinglePart};
-                use lettre::transport::smtp::authentication::Credentials;
-                use lettre::{Message, SmtpTransport, Transport};
-
-                let message = Message::builder()
-                    .from(match from_addr.parse() {
-                        Ok(m) => m,
-                        Err(e) => return Err(format!("Invalid from address '{}': {}", from_addr, e)),
-                    })
-                    .to(match to.parse() {
-                        Ok(m) => m,
-                        Err(e) => return Err(format!("Invalid to address '{}': {}", to, e)),
-                    })
-                    .subject(subject.clone())
-                    .multipart(
-                        MultiPart::alternative()
-                            .singlepart(
-                                SinglePart::builder()
-                                    .header(ContentType::TEXT_PLAIN)
-                                    .body(text.clone()),
-                            )
-                            .singlepart(
-                                SinglePart::builder()
-                                    .header(ContentType::TEXT_HTML)
-                                    .body(html.clone()),
-                            ),
-                    )
-                    .map_err(|e| format!("Failed to build email: {}", e))?;
-
-                let creds = Credentials::new(config.username.clone(), config.password.clone());
-
-                let transport = if config.secure {
-                    SmtpTransport::relay(&config.host)
-                        .map_err(|e| format!("SMTP relay error: {}", e))?
-                        .port(config.port)
-                        .credentials(creds)
-                        .build()
-                } else {
-                    SmtpTransport::builder_dangerous(&config.host)
-                        .port(config.port)
-                        .credentials(creds)
-                        .build()
-                };
-
-                transport.send(&message).map_err(|e| format!("SMTP send error: {}", e))?;
-                Ok(())
-            });
-
-            match result {
-                Ok(()) => {
-                    debug!("_email_send: sent to {}", to);
-                    caller.data().smtp_state.lock().last_error = String::new();
-                    1
-                }
-                Err(e) => {
-                    error!("_email_send: {}", e);
-                    caller.data().smtp_state.lock().last_error = e;
-                    0
+        let config = {
+            let guard = caller.data().smtp_state.lock();
+            match guard.config.clone() {
+                Some(c) => c,
+                None => {
+                    error!("_email_send: SMTP not configured — call email.configure first");
+                    caller.data().smtp_state.lock().last_error = "SMTP not configured".to_string();
+                    return 0;
                 }
             }
+        };
+
+        let from_addr = if from_override.is_empty() {
+            &config.from_address
+        } else {
+            &from_override
+        };
+
+        let result = tokio::task::block_in_place(|| {
+            use lettre::message::{MultiPart, SinglePart, header::ContentType};
+            use lettre::transport::smtp::authentication::Credentials;
+            use lettre::{Message, SmtpTransport, Transport};
+
+            let message = Message::builder()
+                .from(match from_addr.parse() {
+                    Ok(m) => m,
+                    Err(e) => return Err(format!("Invalid from address '{}': {}", from_addr, e)),
+                })
+                .to(match to.parse() {
+                    Ok(m) => m,
+                    Err(e) => return Err(format!("Invalid to address '{}': {}", to, e)),
+                })
+                .subject(subject.clone())
+                .multipart(
+                    MultiPart::alternative()
+                        .singlepart(
+                            SinglePart::builder()
+                                .header(ContentType::TEXT_PLAIN)
+                                .body(text.clone()),
+                        )
+                        .singlepart(
+                            SinglePart::builder()
+                                .header(ContentType::TEXT_HTML)
+                                .body(html.clone()),
+                        ),
+                )
+                .map_err(|e| format!("Failed to build email: {}", e))?;
+
+            let creds = Credentials::new(config.username.clone(), config.password.clone());
+
+            let transport = if config.secure {
+                SmtpTransport::relay(&config.host)
+                    .map_err(|e| format!("SMTP relay error: {}", e))?
+                    .port(config.port)
+                    .credentials(creds)
+                    .build()
+            } else {
+                SmtpTransport::builder_dangerous(&config.host)
+                    .port(config.port)
+                    .credentials(creds)
+                    .build()
+            };
+
+            transport
+                .send(&message)
+                .map_err(|e| format!("SMTP send error: {}", e))?;
+            Ok(())
+        });
+
+        match result {
+            Ok(()) => {
+                debug!("_email_send: sent to {}", to);
+                caller.data().smtp_state.lock().last_error = String::new();
+                1
+            }
+            Err(e) => {
+                error!("_email_send: {}", e);
+                caller.data().smtp_state.lock().last_error = e;
+                0
+            }
         }
-    );
+    });
 
     // _email_last_error — return the last SMTP error string
     // Returns: LP-encoded error string (empty if last send succeeded)
-    register_bridge_fn!(linker, "_email_last_error",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let err = caller.data().smtp_state.lock().last_error.clone();
-            write_string_to_caller(&mut caller, &err)
-        }
-    );
+    register_bridge_fn!(linker, "_email_last_error", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let err = caller.data().smtp_state.lock().last_error.clone();
+        write_string_to_caller(&mut caller, &err)
+    });
 
     Ok(())
 }
@@ -5184,14 +5489,16 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
                         return;
                     }
                 };
-                let on_connect = match read_raw_string(&mut caller, on_connect_ptr, on_connect_len) {
+                let on_connect = match read_raw_string(&mut caller, on_connect_ptr, on_connect_len)
+                {
                     Some(s) => s,
                     None => {
                         error!("_http_ws_route: Failed to read onConnect");
                         return;
                     }
                 };
-                let on_message = match read_raw_string(&mut caller, on_message_ptr, on_message_len) {
+                let on_message = match read_raw_string(&mut caller, on_message_ptr, on_message_len)
+                {
                     Some(s) => s,
                     None => {
                         error!("_http_ws_route: Failed to read onMessage");
@@ -5215,7 +5522,10 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
                 // handler can detect it as a WebSocket route.
                 let router = caller.data().router.clone();
                 if let Err(e) = router.register_ws(path.clone(), on_connect.clone()) {
-                    error!("_http_ws_route: Failed to register WS route {}: {}", path, e);
+                    error!(
+                        "_http_ws_route: Failed to register WS route {}: {}",
+                        path, e
+                    );
                     return;
                 }
 
@@ -5224,11 +5534,7 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
                 let ws_state = caller.data().ws_state.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(websocket::register_ws_route(
-                        &ws_state,
-                        path,
-                        on_connect,
-                        on_message,
-                        on_close,
+                        &ws_state, path, on_connect, on_message, on_close,
                     ))
                 });
             },
@@ -5253,11 +5559,8 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
             };
             let ws_state = caller.data().ws_state.clone();
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(websocket::ws_send(
-                    &ws_state,
-                    client_id,
-                    message,
-                ))
+                tokio::runtime::Handle::current()
+                    .block_on(websocket::ws_send(&ws_state, client_id, message))
             });
         }
     );
@@ -5319,23 +5622,21 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
     register_bridge_fn!(
         linker,
         "_ws_client_id",
-        |_caller: Caller<'_, WasmState>| -> i64 {
-            websocket::current_client_id()
-        }
+        |_caller: Caller<'_, WasmState>| -> i64 { websocket::current_client_id() }
     );
 
     // -----------------------------------------------------------------------
     // _ws_message — get the incoming message payload from task-local context
     // Signature: () -> i32 (LP string pointer)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_ws_message",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let msg = websocket::current_message();
-            write_string_to_caller(&mut caller, &msg)
-        }
-    );
+    register_bridge_fn!(linker, "_ws_message", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let msg = websocket::current_message();
+        write_string_to_caller(&mut caller, &msg)
+    });
 
     // -----------------------------------------------------------------------
     // _ws_room_join — add a client to a room
@@ -5423,7 +5724,6 @@ fn register_websocket_functions(linker: &mut Linker<WasmState>) -> RuntimeResult
     Ok(())
 }
 
-
 /// Register background job queue bridge functions (14 functions, frame.jobs contract).
 ///
 /// ## Dual naming
@@ -5457,20 +5757,30 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
             "env",
             "_job_register",
             |mut caller: Caller<'_, WasmState>,
-             name_ptr: i32, name_len: i32,
-             handler_ptr: i32, handler_len: i32,
+             name_ptr: i32,
+             name_len: i32,
+             handler_ptr: i32,
+             handler_len: i32,
              max_attempts: i32,
-             backoff_ptr: i32, backoff_len: i32,
+             backoff_ptr: i32,
+             backoff_len: i32,
              delay: i32,
              timeout: i32,
-             queue_ptr: i32, queue_len: i32| {
+             queue_ptr: i32,
+             queue_len: i32| {
                 let name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
-                    None => { error!("_job_register: failed to read name"); return; }
+                    None => {
+                        error!("_job_register: failed to read name");
+                        return;
+                    }
                 };
                 let handler = match read_raw_string(&mut caller, handler_ptr, handler_len) {
                     Some(s) => s,
-                    None => { error!("_job_register: failed to read handler"); return; }
+                    None => {
+                        error!("_job_register: failed to read handler");
+                        return;
+                    }
                 };
                 let backoff_str = read_raw_string(&mut caller, backoff_ptr, backoff_len)
                     .unwrap_or_else(|| "fixed".to_string());
@@ -5500,28 +5810,32 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     // _job_enqueue — enqueue a job for immediate execution
     // Signature: (name_ptr, name_len, argsJson_ptr, argsJson_len) -> i32 (LP string job ID)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_enqueue",
-        |mut caller: Caller<'_, WasmState>,
-         name_ptr: i32, name_len: i32,
-         args_ptr: i32, args_len: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) => s,
-                None => { error!("_job_enqueue: failed to read name"); return 0; }
-            };
-            let args = read_raw_string(&mut caller, args_ptr, args_len)
-                .unwrap_or_else(|| "{}".to_string());
+    register_bridge_fn!(linker, "_job_enqueue", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                 name_ptr: i32,
+                                                 name_len: i32,
+                                                 args_ptr: i32,
+                                                 args_len: i32|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) => s,
+            None => {
+                error!("_job_enqueue: failed to read name");
+                return 0;
+            }
+        };
+        let args =
+            read_raw_string(&mut caller, args_ptr, args_len).unwrap_or_else(|| "{}".to_string());
 
-            let jobs_state = caller.data().jobs_state.clone();
-            let job_id = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(jobs::enqueue_job(&jobs_state, name, args))
-            });
+        let jobs_state = caller.data().jobs_state.clone();
+        let job_id = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(jobs::enqueue_job(&jobs_state, name, args))
+        });
 
-            write_string_to_caller(&mut caller, &job_id)
-        }
-    );
+        write_string_to_caller(&mut caller, &job_id)
+    });
 
     // -----------------------------------------------------------------------
     // _job_enqueue_at — schedule a job for a specific future time
@@ -5530,152 +5844,166 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     // f64 can represent Unix epoch milliseconds with 53-bit integer precision —
     // sufficient for any realistic scheduling horizon.
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_enqueue_at",
-        |mut caller: Caller<'_, WasmState>,
-         name_ptr: i32, name_len: i32,
-         args_ptr: i32, args_len: i32,
-         run_at_ms: f64| -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) => s,
-                None => { error!("_job_enqueue_at: failed to read name"); return 0; }
-            };
-            let args = read_raw_string(&mut caller, args_ptr, args_len)
-                .unwrap_or_else(|| "{}".to_string());
+    register_bridge_fn!(linker, "_job_enqueue_at", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    name_ptr: i32,
+                                                    name_len: i32,
+                                                    args_ptr: i32,
+                                                    args_len: i32,
+                                                    run_at_ms: f64|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) => s,
+            None => {
+                error!("_job_enqueue_at: failed to read name");
+                return 0;
+            }
+        };
+        let args =
+            read_raw_string(&mut caller, args_ptr, args_len).unwrap_or_else(|| "{}".to_string());
 
-            // Cast f64 Unix-epoch milliseconds to u64 for internal storage.
-            // Negative or NaN values are clamped to 0 (enqueue immediately).
-            let run_at_u64 = if run_at_ms.is_nan() || run_at_ms < 0.0 {
-                0u64
-            } else {
-                run_at_ms as u64
-            };
+        // Cast f64 Unix-epoch milliseconds to u64 for internal storage.
+        // Negative or NaN values are clamped to 0 (enqueue immediately).
+        let run_at_u64 = if run_at_ms.is_nan() || run_at_ms < 0.0 {
+            0u64
+        } else {
+            run_at_ms as u64
+        };
 
-            let jobs_state = caller.data().jobs_state.clone();
-            let job_id = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(jobs::enqueue_job_at(
-                    &jobs_state,
-                    name,
-                    args,
-                    run_at_u64,
-                ))
-            });
+        let jobs_state = caller.data().jobs_state.clone();
+        let job_id = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(jobs::enqueue_job_at(
+                &jobs_state,
+                name,
+                args,
+                run_at_u64,
+            ))
+        });
 
-            write_string_to_caller(&mut caller, &job_id)
-        }
-    );
+        write_string_to_caller(&mut caller, &job_id)
+    });
 
     // -----------------------------------------------------------------------
     // _job_cancel — cancel a pending job
     // Signature: (id_ptr, id_len) -> i32  (0 = ok / cancelled, -1 = not found / not pending)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_cancel",
-        |mut caller: Caller<'_, WasmState>,
-         id_ptr: i32, id_len: i32| -> i32 {
-            let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
-                Some(s) => s,
-                None => { error!("_job_cancel: failed to read job id"); return -1; }
-            };
+    register_bridge_fn!(linker, "_job_cancel", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                id_ptr: i32,
+                                                id_len: i32|
+     -> i32 {
+        let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+            Some(s) => s,
+            None => {
+                error!("_job_cancel: failed to read job id");
+                return -1;
+            }
+        };
 
-            let jobs_state = caller.data().jobs_state.clone();
-            let cancelled = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(jobs::cancel_job(&jobs_state, &job_id))
-            });
+        let jobs_state = caller.data().jobs_state.clone();
+        let cancelled = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(jobs::cancel_job(&jobs_state, &job_id))
+        });
 
-            if cancelled { 0 } else { -1 }
-        }
-    );
+        if cancelled { 0 } else { -1 }
+    });
 
     // -----------------------------------------------------------------------
     // _job_status — get the current status string for a job ID
     // Signature: (id_ptr, id_len) -> i32 (LP string: "pending"|"running"|
     //            "succeeded"|"failed"|"cancelled")
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_status",
-        |mut caller: Caller<'_, WasmState>,
-         id_ptr: i32, id_len: i32| -> i32 {
-            let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
-                Some(s) => s,
-                None => { error!("_job_status: failed to read job id"); return 0; }
-            };
+    register_bridge_fn!(linker, "_job_status", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                id_ptr: i32,
+                                                id_len: i32|
+     -> i32 {
+        let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+            Some(s) => s,
+            None => {
+                error!("_job_status: failed to read job id");
+                return 0;
+            }
+        };
 
-            let jobs_state = caller.data().jobs_state.clone();
-            let status = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(jobs::job_status(&jobs_state, &job_id))
-            });
+        let jobs_state = caller.data().jobs_state.clone();
+        let status = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(jobs::job_status(&jobs_state, &job_id))
+        });
 
-            write_string_to_caller(&mut caller, &status)
-        }
-    );
+        write_string_to_caller(&mut caller, &status)
+    });
 
     // -----------------------------------------------------------------------
     // _job_result — get the result or error string for a job
     // Signature: (id_ptr, id_len) -> i32 (LP string)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_result",
-        |mut caller: Caller<'_, WasmState>,
-         id_ptr: i32, id_len: i32| -> i32 {
-            let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
-                Some(s) => s,
-                None => { error!("_job_result: failed to read job id"); return 0; }
-            };
+    register_bridge_fn!(linker, "_job_result", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                id_ptr: i32,
+                                                id_len: i32|
+     -> i32 {
+        let job_id = match read_raw_string(&mut caller, id_ptr, id_len) {
+            Some(s) => s,
+            None => {
+                error!("_job_result: failed to read job id");
+                return 0;
+            }
+        };
 
-            let jobs_state = caller.data().jobs_state.clone();
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(jobs::job_result(&jobs_state, &job_id))
-            });
+        let jobs_state = caller.data().jobs_state.clone();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(jobs::job_result(&jobs_state, &job_id))
+        });
 
-            write_string_to_caller(&mut caller, &result)
-        }
-    );
+        write_string_to_caller(&mut caller, &result)
+    });
 
     // -----------------------------------------------------------------------
     // _job_current_id — get the job ID of the currently executing job
     // Signature: () -> i32 (LP string)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_current_id",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let id = jobs::current_job_id();
-            write_string_to_caller(&mut caller, &id)
-        }
-    );
+    register_bridge_fn!(linker, "_job_current_id", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let id = jobs::current_job_id();
+        write_string_to_caller(&mut caller, &id)
+    });
 
     // -----------------------------------------------------------------------
     // _job_current_args — get the args JSON of the currently executing job
     // Signature: () -> i32 (LP string)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_current_args",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            let args = jobs::current_job_args();
-            write_string_to_caller(&mut caller, &args)
-        }
-    );
+    register_bridge_fn!(linker, "_job_current_args", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        let args = jobs::current_job_args();
+        write_string_to_caller(&mut caller, &args)
+    });
 
     // -----------------------------------------------------------------------
     // _job_current_attempt — get the 1-based attempt number of the current job
     // Signature: () -> i32
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_job_current_attempt",
-        |_caller: Caller<'_, WasmState>| -> i32 {
-            jobs::current_job_attempt()
-        }
-    );
+    register_bridge_fn!(linker, "_job_current_attempt", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        jobs::current_job_attempt()
+    });
 
     // -----------------------------------------------------------------------
     // _job_retry_after — request retry after a custom delay (overrides backoff)
@@ -5696,8 +6024,7 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     register_bridge_fn!(
         linker,
         "_job_fail",
-        |mut caller: Caller<'_, WasmState>,
-         reason_ptr: i32, reason_len: i32| {
+        |mut caller: Caller<'_, WasmState>, reason_ptr: i32, reason_len: i32| {
             let reason = read_raw_string(&mut caller, reason_ptr, reason_len)
                 .unwrap_or_else(|| "unknown".to_string());
             jobs::mark_explicit_fail(reason);
@@ -5711,10 +6038,8 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     register_bridge_fn!(
         linker,
         "_job_succeed",
-        |mut caller: Caller<'_, WasmState>,
-         result_ptr: i32, result_len: i32| {
-            let result = read_raw_string(&mut caller, result_ptr, result_len)
-                .unwrap_or_default();
+        |mut caller: Caller<'_, WasmState>, result_ptr: i32, result_len: i32| {
+            let result = read_raw_string(&mut caller, result_ptr, result_len).unwrap_or_default();
             jobs::mark_explicit_succeed(result);
         }
     );
@@ -5729,23 +6054,39 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
             "env",
             "_schedule_cron",
             |mut caller: Caller<'_, WasmState>,
-             name_ptr: i32, name_len: i32,
-             cron_ptr: i32, cron_len: i32,
-             handler_ptr: i32, handler_len: i32| -> i32 {
+             name_ptr: i32,
+             name_len: i32,
+             cron_ptr: i32,
+             cron_len: i32,
+             handler_ptr: i32,
+             handler_len: i32|
+             -> i32 {
                 let name = match read_raw_string(&mut caller, name_ptr, name_len) {
                     Some(s) => s,
-                    None => { error!("_schedule_cron: failed to read name"); return 0; }
+                    None => {
+                        error!("_schedule_cron: failed to read name");
+                        return 0;
+                    }
                 };
                 let cron_expr = match read_raw_string(&mut caller, cron_ptr, cron_len) {
                     Some(s) => s,
-                    None => { error!("_schedule_cron: failed to read cron expr"); return 0; }
+                    None => {
+                        error!("_schedule_cron: failed to read cron expr");
+                        return 0;
+                    }
                 };
                 let handler = match read_raw_string(&mut caller, handler_ptr, handler_len) {
                     Some(s) => s,
-                    None => { error!("_schedule_cron: failed to read handler"); return 0; }
+                    None => {
+                        error!("_schedule_cron: failed to read handler");
+                        return 0;
+                    }
                 };
 
-                debug!("_schedule_cron: name={}, expr={}, handler={}", name, cron_expr, handler);
+                debug!(
+                    "_schedule_cron: name={}, expr={}, handler={}",
+                    name, cron_expr, handler
+                );
 
                 let jobs_state = caller.data().jobs_state.clone();
                 let ok = tokio::task::block_in_place(|| {
@@ -5766,25 +6107,28 @@ fn register_jobs_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
     // _schedule_cancel — cancel a named cron schedule
     // Signature: (name_ptr, name_len) -> i32  (1 = cancelled, 0 = not found / already inactive)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_schedule_cancel",
-        |mut caller: Caller<'_, WasmState>,
-         name_ptr: i32, name_len: i32| -> i32 {
-            let name = match read_raw_string(&mut caller, name_ptr, name_len) {
-                Some(s) => s,
-                None => { error!("_schedule_cancel: failed to read name"); return 0; }
-            };
+    register_bridge_fn!(linker, "_schedule_cancel", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     name_ptr: i32,
+                                                     name_len: i32|
+     -> i32 {
+        let name = match read_raw_string(&mut caller, name_ptr, name_len) {
+            Some(s) => s,
+            None => {
+                error!("_schedule_cancel: failed to read name");
+                return 0;
+            }
+        };
 
-            let jobs_state = caller.data().jobs_state.clone();
-            let cancelled = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(jobs::schedule_cancel(&jobs_state, &name))
-            });
+        let jobs_state = caller.data().jobs_state.clone();
+        let cancelled = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(jobs::schedule_cancel(&jobs_state, &name))
+        });
 
-            if cancelled { 1 } else { 0 }
-        }
-    );
+        if cancelled { 1 } else { 0 }
+    });
 
     Ok(())
 }
@@ -5811,15 +6155,23 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
             "env",
             "_i18n_load",
             |mut caller: Caller<'_, WasmState>,
-             locale_ptr: i32, locale_len: i32,
-             path_ptr: i32,   path_len: i32| {
+             locale_ptr: i32,
+             locale_len: i32,
+             path_ptr: i32,
+             path_len: i32| {
                 let locale_tag = match read_raw_string(&mut caller, locale_ptr, locale_len) {
                     Some(s) if !s.is_empty() => s,
-                    _ => { error!("_i18n_load: failed to read locale tag"); return; }
+                    _ => {
+                        error!("_i18n_load: failed to read locale tag");
+                        return;
+                    }
                 };
                 let file_path = match read_raw_string(&mut caller, path_ptr, path_len) {
                     Some(s) if !s.is_empty() => s,
-                    _ => { error!("_i18n_load: failed to read file path"); return; }
+                    _ => {
+                        error!("_i18n_load: failed to read file path");
+                        return;
+                    }
                 };
 
                 let cwd = std::env::current_dir().unwrap_or_default();
@@ -5839,9 +6191,11 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
                         if let Err(e) = state.load_json(&locale_tag, &json_str) {
                             error!("{}", e);
                         } else {
-                            info!("_i18n_load: loaded {} translations for locale '{}'",
-                                  state.translations.get(&locale_tag).map_or(0, |m| m.len()),
-                                  locale_tag);
+                            info!(
+                                "_i18n_load: loaded {} translations for locale '{}'",
+                                state.translations.get(&locale_tag).map_or(0, |m| m.len()),
+                                locale_tag
+                            );
                         }
                     })
                 });
@@ -5871,16 +6225,18 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
                 warn!("_i18n_set_locale: called outside LOCALE scope; storing in state");
                 // Store as a synthetic pending header so the router middleware can
                 // access it on the next lookup. The store field is used as a scratchpad.
-                caller.data_mut().pending_headers.push(
-                    ("x-cl-locale-requested".to_string(), locale_tag.clone())
-                );
+                caller
+                    .data_mut()
+                    .pending_headers
+                    .push(("x-cl-locale-requested".to_string(), locale_tag.clone()));
             }
             let is_rtl = locale::is_rtl(&locale_tag);
             if is_rtl {
                 // Server-side RTL: schedule data-locale-dir="rtl" header for the renderer.
-                caller.data_mut().pending_headers.push(
-                    ("x-cl-locale-dir".to_string(), "rtl".to_string())
-                );
+                caller
+                    .data_mut()
+                    .pending_headers
+                    .push(("x-cl-locale-dir".to_string(), "rtl".to_string()));
             }
             debug!("_i18n_set_locale: locale='{}' rtl={}", locale_tag, is_rtl);
         }
@@ -5890,167 +6246,197 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
     // _i18n_locale — get the currently active locale
     // Signature: () -> i32 (LP string)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_i18n_locale",
-        |mut caller: Caller<'_, WasmState>| -> i32 {
-            // Read from task-local first.
-            let locale_tag = locale::current_locale();
-            if !locale_tag.is_empty() {
-                return write_string_to_caller(&mut caller, &locale_tag);
-            }
-            // Fall back to the configured default locale.
-            let default = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    caller.data().locale_state.read().await.default_locale.clone()
-                })
-            });
-            write_string_to_caller(&mut caller, &default)
+    register_bridge_fn!(linker, "_i18n_locale", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        // Read from task-local first.
+        let locale_tag = locale::current_locale();
+        if !locale_tag.is_empty() {
+            return write_string_to_caller(&mut caller, &locale_tag);
         }
-    );
+        // Fall back to the configured default locale.
+        let default = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                caller
+                    .data()
+                    .locale_state
+                    .read()
+                    .await
+                    .default_locale
+                    .clone()
+            })
+        });
+        write_string_to_caller(&mut caller, &default)
+    });
 
     // -----------------------------------------------------------------------
     // _i18n_t — translate a key with optional {placeholder} substitution
     // Signature: (key_ptr, key_len, params_ptr, params_len) -> i32 (LP string)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_i18n_t",
-        |mut caller: Caller<'_, WasmState>,
-         key_ptr: i32, key_len: i32,
-         params_ptr: i32, params_len: i32| -> i32 {
-            let key = match read_raw_string(&mut caller, key_ptr, key_len) {
-                Some(s) => s,
-                None => { error!("_i18n_t: failed to read key"); return write_string_to_caller(&mut caller, ""); }
-            };
-            let params = read_raw_string(&mut caller, params_ptr, params_len)
-                .unwrap_or_else(|| "{}".to_string());
+    register_bridge_fn!(linker, "_i18n_t", |mut caller: Caller<'_, WasmState>,
+                                            key_ptr: i32,
+                                            key_len: i32,
+                                            params_ptr: i32,
+                                            params_len: i32|
+     -> i32 {
+        let key = match read_raw_string(&mut caller, key_ptr, key_len) {
+            Some(s) => s,
+            None => {
+                error!("_i18n_t: failed to read key");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
+        let params = read_raw_string(&mut caller, params_ptr, params_len)
+            .unwrap_or_else(|| "{}".to_string());
 
-            let active_locale = locale::current_locale();
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let state = caller.data().locale_state.read().await;
-                    let locale = if active_locale.is_empty() {
-                        state.default_locale.clone()
-                    } else {
-                        active_locale.clone()
-                    };
-                    state.translate(&key, &locale, &params)
-                })
-            });
-            write_string_to_caller(&mut caller, &result)
-        }
-    );
+        let active_locale = locale::current_locale();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let state = caller.data().locale_state.read().await;
+                let locale = if active_locale.is_empty() {
+                    state.default_locale.clone()
+                } else {
+                    active_locale.clone()
+                };
+                state.translate(&key, &locale, &params)
+            })
+        });
+        write_string_to_caller(&mut caller, &result)
+    });
 
     // -----------------------------------------------------------------------
     // _i18n_t_count — translate a key with plural form selection
     // Signature: (key_ptr: i32, key_len: i32, count: i64, params_ptr: i32, params_len: i32) -> i32
     // (count is i64 per function-registry.toml.)
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_i18n_t_count",
-        |mut caller: Caller<'_, WasmState>,
-         key_ptr: i32, key_len: i32,
-         count: i64,
-         params_ptr: i32, params_len: i32| -> i32 {
-            let key = match read_raw_string(&mut caller, key_ptr, key_len) {
-                Some(s) => s,
-                None => { error!("_i18n_t_count: failed to read key"); return write_string_to_caller(&mut caller, ""); }
-            };
-            let params = read_raw_string(&mut caller, params_ptr, params_len)
-                .unwrap_or_else(|| "{}".to_string());
+    register_bridge_fn!(linker, "_i18n_t_count", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                  key_ptr: i32,
+                                                  key_len: i32,
+                                                  count: i64,
+                                                  params_ptr: i32,
+                                                  params_len: i32|
+     -> i32 {
+        let key = match read_raw_string(&mut caller, key_ptr, key_len) {
+            Some(s) => s,
+            None => {
+                error!("_i18n_t_count: failed to read key");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
+        let params = read_raw_string(&mut caller, params_ptr, params_len)
+            .unwrap_or_else(|| "{}".to_string());
 
-            let active_locale = locale::current_locale();
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let state = caller.data().locale_state.read().await;
-                    let locale = if active_locale.is_empty() {
-                        state.default_locale.clone()
-                    } else {
-                        active_locale.clone()
-                    };
-                    state.translate_count(&key, count as i32, &locale, &params)
-                })
-            });
-            write_string_to_caller(&mut caller, &result)
-        }
-    );
+        let active_locale = locale::current_locale();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let state = caller.data().locale_state.read().await;
+                let locale = if active_locale.is_empty() {
+                    state.default_locale.clone()
+                } else {
+                    active_locale.clone()
+                };
+                state.translate_count(&key, count as i32, &locale, &params)
+            })
+        });
+        write_string_to_caller(&mut caller, &result)
+    });
 
     // -----------------------------------------------------------------------
     // _i18n_format_number — format a number with locale-specific separators
     // Signature: (value: f64, locale_ptr, locale_len, options_ptr, options_len) -> i32
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_i18n_format_number",
-        |mut caller: Caller<'_, WasmState>,
-         value: f64,
-         locale_ptr: i32, locale_len: i32,
-         options_ptr: i32, options_len: i32| -> i32 {
-            let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len)
-                .unwrap_or_default();
-            let options = read_raw_string(&mut caller, options_ptr, options_len)
-                .unwrap_or_else(|| "{}".to_string());
+    register_bridge_fn!(linker, "_i18n_format_number", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        value: f64,
+                                                        locale_ptr: i32,
+                                                        locale_len: i32,
+                                                        options_ptr: i32,
+                                                        options_len: i32|
+     -> i32 {
+        let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len).unwrap_or_default();
+        let options = read_raw_string(&mut caller, options_ptr, options_len)
+            .unwrap_or_else(|| "{}".to_string());
 
-            let effective_locale = if locale_arg.is_empty() {
-                let active = locale::current_locale();
-                if active.is_empty() {
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            caller.data().locale_state.read().await.default_locale.clone()
-                        })
+        let effective_locale = if locale_arg.is_empty() {
+            let active = locale::current_locale();
+            if active.is_empty() {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        caller
+                            .data()
+                            .locale_state
+                            .read()
+                            .await
+                            .default_locale
+                            .clone()
                     })
-                } else {
-                    active
-                }
+                })
             } else {
-                locale_arg
-            };
+                active
+            }
+        } else {
+            locale_arg
+        };
 
-            let (decimals, use_grouping) = locale::parse_number_options(&options);
-            let result = locale::format_number(value, &effective_locale, decimals, use_grouping);
-            write_string_to_caller(&mut caller, &result)
-        }
-    );
+        let (decimals, use_grouping) = locale::parse_number_options(&options);
+        let result = locale::format_number(value, &effective_locale, decimals, use_grouping);
+        write_string_to_caller(&mut caller, &result)
+    });
 
     // -----------------------------------------------------------------------
     // _i18n_format_currency — format a monetary amount
     // Signature: (value: f64, currency_ptr, currency_len, locale_ptr, locale_len) -> i32
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_i18n_format_currency",
-        |mut caller: Caller<'_, WasmState>,
-         value: f64,
-         currency_ptr: i32, currency_len: i32,
-         locale_ptr: i32, locale_len: i32| -> i32 {
-            let currency = match read_raw_string(&mut caller, currency_ptr, currency_len) {
-                Some(s) if !s.is_empty() => s,
-                _ => { error!("_i18n_format_currency: empty currency code"); return write_string_to_caller(&mut caller, ""); }
-            };
-            let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len)
-                .unwrap_or_default();
+    register_bridge_fn!(linker, "_i18n_format_currency", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          value: f64,
+                                                          currency_ptr: i32,
+                                                          currency_len: i32,
+                                                          locale_ptr: i32,
+                                                          locale_len: i32|
+     -> i32 {
+        let currency = match read_raw_string(&mut caller, currency_ptr, currency_len) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                error!("_i18n_format_currency: empty currency code");
+                return write_string_to_caller(&mut caller, "");
+            }
+        };
+        let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len).unwrap_or_default();
 
-            let effective_locale = if locale_arg.is_empty() {
-                let active = locale::current_locale();
-                if active.is_empty() {
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            caller.data().locale_state.read().await.default_locale.clone()
-                        })
+        let effective_locale = if locale_arg.is_empty() {
+            let active = locale::current_locale();
+            if active.is_empty() {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        caller
+                            .data()
+                            .locale_state
+                            .read()
+                            .await
+                            .default_locale
+                            .clone()
                     })
-                } else {
-                    active
-                }
+                })
             } else {
-                locale_arg
-            };
+                active
+            }
+        } else {
+            locale_arg
+        };
 
-            let result = locale::format_currency(value, &currency, &effective_locale);
-            write_string_to_caller(&mut caller, &result)
-        }
-    );
+        let result = locale::format_currency(value, &currency, &effective_locale);
+        write_string_to_caller(&mut caller, &result)
+    });
 
     // -----------------------------------------------------------------------
     // _i18n_format_date — format a Unix timestamp as a locale-aware date string
@@ -6059,41 +6445,47 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
     // the spec cross-reference in the task says milliseconds for Intl.DateTimeFormat —
     // server-side we use seconds (chrono) which is what the spec says for Rust.
     // -----------------------------------------------------------------------
-    register_bridge_fn!(
-        linker,
-        "_i18n_format_date",
-        |mut caller: Caller<'_, WasmState>,
-         timestamp: f64,
-         style_ptr: i32, style_len: i32,
-         locale_ptr: i32, locale_len: i32| -> i32 {
-            let style = read_raw_string(&mut caller, style_ptr, style_len)
-                .unwrap_or_else(|| "medium".to_string());
-            let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len)
-                .unwrap_or_default();
+    register_bridge_fn!(linker, "_i18n_format_date", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      timestamp: f64,
+                                                      style_ptr: i32,
+                                                      style_len: i32,
+                                                      locale_ptr: i32,
+                                                      locale_len: i32|
+     -> i32 {
+        let style = read_raw_string(&mut caller, style_ptr, style_len)
+            .unwrap_or_else(|| "medium".to_string());
+        let locale_arg = read_raw_string(&mut caller, locale_ptr, locale_len).unwrap_or_default();
 
-            let effective_locale = if locale_arg.is_empty() {
-                let active = locale::current_locale();
-                if active.is_empty() {
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            caller.data().locale_state.read().await.default_locale.clone()
-                        })
+        let effective_locale = if locale_arg.is_empty() {
+            let active = locale::current_locale();
+            if active.is_empty() {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        caller
+                            .data()
+                            .locale_state
+                            .read()
+                            .await
+                            .default_locale
+                            .clone()
                     })
-                } else {
-                    active
-                }
+                })
             } else {
-                locale_arg
-            };
+                active
+            }
+        } else {
+            locale_arg
+        };
 
-            let result = locale::format_date(timestamp, &style, &effective_locale);
-            write_string_to_caller(&mut caller, &result)
-        }
-    );
+        let result = locale::format_date(timestamp, &style, &effective_locale);
+        write_string_to_caller(&mut caller, &result)
+    });
 
     Ok(())
 }
-
 
 /// Register dot-notation aliases for all Layer 3 `_namespace_fn` bridge functions.
 ///
@@ -6105,63 +6497,63 @@ fn register_locale_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()
 fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     const ALIASES: &[(&str, &str)] = &[
         // HTTP server (register_http_server_functions)
-        ("_http_listen",         "http.listen"),
-        ("_http_route",          "http.route"),
-        ("_http_route_protected","http.route_protected"),
-        ("_http_serve_static",   "http.serve_static"),
+        ("_http_listen", "http.listen"),
+        ("_http_route", "http.route"),
+        ("_http_route_protected", "http.route_protected"),
+        ("_http_serve_static", "http.serve_static"),
         // Islands (register_islands_functions)
-        ("_island_register",     "island.register"),
+        ("_island_register", "island.register"),
         // Request context (register_request_context_functions)
-        ("_req_param",           "req.param"),
-        ("_req_param_int",       "req.param_int"),
-        ("_req_query",           "req.query"),
-        ("_req_body",            "req.body"),
-        ("_req_body_field",      "req.body_field"),
-        ("_req_header",          "req.header"),
-        ("_req_headers",         "req.headers"),
-        ("_req_method",          "req.method"),
-        ("_req_path",            "req.path"),
-        ("_req_cookie",          "req.cookie"),
-        ("_req_form",            "req.form"),
-        ("_req_ip",              "req.ip"),
+        ("_req_param", "req.param"),
+        ("_req_param_int", "req.param_int"),
+        ("_req_query", "req.query"),
+        ("_req_body", "req.body"),
+        ("_req_body_field", "req.body_field"),
+        ("_req_header", "req.header"),
+        ("_req_headers", "req.headers"),
+        ("_req_method", "req.method"),
+        ("_req_path", "req.path"),
+        ("_req_cookie", "req.cookie"),
+        ("_req_form", "req.form"),
+        ("_req_ip", "req.ip"),
         // Session management (register_session_management_functions)
-        ("_session_store",       "session.store"),
-        ("_session_get",         "session.get"),
-        ("_session_delete",      "session.delete"),
-        ("_session_exists",      "session.exists"),
-        ("_session_set_csrf",    "session.set_csrf"),
-        ("_session_get_csrf",    "session.get_csrf"),
-        ("_http_set_cookie",     "http.set_cookie"),
+        ("_session_store", "session.store"),
+        ("_session_get", "session.get"),
+        ("_session_delete", "session.delete"),
+        ("_session_exists", "session.exists"),
+        ("_session_set_csrf", "session.set_csrf"),
+        ("_session_get_csrf", "session.get_csrf"),
+        ("_http_set_cookie", "http.set_cookie"),
         // Auth (register_session_auth_functions)
-        ("_auth_get_session",    "auth.get_session"),
-        ("_auth_require_auth",   "auth.require_auth"),
-        ("_auth_require_role",   "auth.require_role"),
-        ("_auth_can",            "auth.can"),
-        ("_auth_has_any_role",   "auth.has_any_role"),
-        ("_auth_set_session",    "auth.set_session"),
-        ("_auth_clear_session",  "auth.clear_session"),
-        ("_auth_user_id",        "auth.user_id"),
-        ("_auth_user_role",      "auth.user_role"),
+        ("_auth_get_session", "auth.get_session"),
+        ("_auth_require_auth", "auth.require_auth"),
+        ("_auth_require_role", "auth.require_role"),
+        ("_auth_can", "auth.can"),
+        ("_auth_has_any_role", "auth.has_any_role"),
+        ("_auth_set_session", "auth.set_session"),
+        ("_auth_clear_session", "auth.clear_session"),
+        ("_auth_user_id", "auth.user_id"),
+        ("_auth_user_role", "auth.user_role"),
         // Roles (register_roles_functions)
-        ("_roles_register",      "roles.register"),
+        ("_roles_register", "roles.register"),
         ("_role_has_permission", "role.has_permission"),
-        ("_role_get_permissions","role.get_permissions"),
+        ("_role_get_permissions", "role.get_permissions"),
         // Response (register_response_functions)
-        ("_http_respond",        "http.respond"),
-        ("_http_redirect",       "http.redirect"),
-        ("_http_set_header",     "http.set_header"),
-        ("_res_set_header",      "res.set_header"),
-        ("_res_redirect",        "res.redirect"),
-        ("_res_status",          "res.status"),
-        ("_res_body",            "res.body"),
-        ("_res_json",            "res.json"),
-        ("_http_set_cache",      "http.set_cache"),
-        ("_http_no_cache",       "http.no_cache"),
+        ("_http_respond", "http.respond"),
+        ("_http_redirect", "http.redirect"),
+        ("_http_set_header", "http.set_header"),
+        ("_res_set_header", "res.set_header"),
+        ("_res_redirect", "res.redirect"),
+        ("_res_status", "res.status"),
+        ("_res_body", "res.body"),
+        ("_res_json", "res.json"),
+        ("_http_set_cache", "http.set_cache"),
+        ("_http_no_cache", "http.no_cache"),
         // _res_download, _email_configure, _email_send, _email_last_error aliases are
         // derived automatically by the register_bridge_fn! macro.
-        ("_json_encode",         "json.encode"),
-        ("_json_decode",         "json.decode"),
-        ("_json_get",            "json.get"),
+        ("_json_encode", "json.encode"),
+        ("_json_decode", "json.decode"),
+        ("_json_get", "json.get"),
         // Async aliases are registered by register_bridge_fn! macro in register_async_functions
         // Test bridge aliases are registered by register_bridge_fn! macro in register_test_functions
         // WebSocket aliases (_ws_*) are registered by register_bridge_fn! macro in
@@ -6169,30 +6561,30 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         // Manual-registration dot aliases the auto-derive macro could not produce
         // because these functions were declared with bare `func_wrap` (not the macro).
         // Each is required by function-registry.toml.
-        ("_http_ws_route",       "http.ws_route"),
-        ("_job_register",        "job.register"),
-        ("_schedule_cron",       "schedule.cron"),
+        ("_http_ws_route", "http.ws_route"),
+        ("_job_register", "job.register"),
+        ("_schedule_cron", "schedule.cron"),
         // Registry declares camelCase aliases for these (auto-derivation produces
         // snake_case which doesn't match). Both forms remain valid via aliases.
-        ("_job_enqueue_at",      "job.enqueueAt"),
-        ("_job_enqueue_at",      "queue.enqueueAt"),
-        ("_job_current_id",      "job.currentId"),
-        ("_job_current_args",    "job.currentArgs"),
+        ("_job_enqueue_at", "job.enqueueAt"),
+        ("_job_enqueue_at", "queue.enqueueAt"),
+        ("_job_current_id", "job.currentId"),
+        ("_job_current_args", "job.currentArgs"),
         ("_job_current_attempt", "job.currentAttempt"),
-        ("_job_retry_after",     "job.retryAfter"),
+        ("_job_retry_after", "job.retryAfter"),
         // Jobs — spec-defined aliases that differ from the auto-derived job.* forms.
         // register_bridge_fn! already creates: job.enqueue, job.enqueue_at, job.cancel,
         // job.status, job.result, job.current_id, job.current_args, job.current_attempt,
         // job.retry_after, job.fail, job.succeed, schedule.cancel.
         // The entries below add the additional spec aliases with different namespaces.
-        ("_job_enqueue",          "queue.enqueue"),
-        ("_job_enqueue_at",       "queue.enqueue_at"),
-        ("_job_cancel",           "queue.cancel"),
-        ("_job_status",           "queue.status"),
-        ("_job_result",           "queue.result"),
-        ("_job_current_id",       "job.id"),
-        ("_job_current_args",     "job.args"),
-        ("_job_current_attempt",  "job.attempt"),
+        ("_job_enqueue", "queue.enqueue"),
+        ("_job_enqueue_at", "queue.enqueue_at"),
+        ("_job_cancel", "queue.cancel"),
+        ("_job_status", "queue.status"),
+        ("_job_result", "queue.result"),
+        ("_job_current_id", "job.id"),
+        ("_job_current_args", "job.args"),
+        ("_job_current_attempt", "job.attempt"),
         // _job_retry_after, _job_fail, _job_succeed, _schedule_cancel auto-aliases
         // match the spec (job.retry_after, job.fail, job.succeed, schedule.cancel) —
         // no manual entry needed; register_bridge_fn! handles them.
@@ -6201,28 +6593,33 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         // snake-cased dot form (e.g. i18n.t_count, i18n.set_locale). The registry
         // additionally declares camelCase / shortened aliases — registered below.
         // Bare aliases:
-        ("_i18n_t",              "t"),
-        ("_i18n_t_count",        "tc"),
+        ("_i18n_t", "t"),
+        ("_i18n_t_count", "tc"),
         // Registry-declared camelCase forms (not derivable from snake_case):
-        ("_i18n_t_count",        "i18n.tc"),
-        ("_i18n_set_locale",     "i18n.setLocale"),
-        ("_i18n_format_number",  "i18n.formatNumber"),
-        ("_i18n_format_currency","i18n.formatCurrency"),
-        ("_i18n_format_date",    "i18n.formatDate"),
+        ("_i18n_t_count", "i18n.tc"),
+        ("_i18n_set_locale", "i18n.setLocale"),
+        ("_i18n_format_number", "i18n.formatNumber"),
+        ("_i18n_format_currency", "i18n.formatCurrency"),
+        ("_i18n_format_date", "i18n.formatDate"),
         // locale.* aliases per registry:
-        ("_i18n_locale",         "locale.get"),
-        ("_i18n_set_locale",     "locale.set"),
-        ("_i18n_format_number",  "locale.formatNumber"),
-        ("_i18n_format_currency","locale.formatCurrency"),
-        ("_i18n_format_date",    "locale.formatDate"),
+        ("_i18n_locale", "locale.get"),
+        ("_i18n_set_locale", "locale.set"),
+        ("_i18n_format_number", "locale.formatNumber"),
+        ("_i18n_format_currency", "locale.formatCurrency"),
+        ("_i18n_format_date", "locale.formatDate"),
         // _i18n_load is registered with bare func_wrap; add its dot alias manually.
-        ("_i18n_load",           "i18n.load"),
+        ("_i18n_load", "i18n.load"),
     ];
 
     for (canonical, dot_alias) in ALIASES {
         linker
             .alias("env", canonical, "env", dot_alias)
-            .map_err(|e| RuntimeError::wasm(format!("Failed to alias {} -> {}: {}", canonical, dot_alias, e)))?;
+            .map_err(|e| {
+                RuntimeError::wasm(format!(
+                    "Failed to alias {} -> {}: {}",
+                    canonical, dot_alias, e
+                ))
+            })?;
     }
 
     Ok(())
@@ -6255,11 +6652,7 @@ mod tests {
     #[test]
     fn apply_layout_falls_back_to_app_ui_layouts() {
         let tmp = tempfile::tempdir().unwrap();
-        write_layout(
-            tmp.path(),
-            "app/ui/layouts/main.html",
-            "<a><slot/></a>",
-        );
+        write_layout(tmp.path(), "app/ui/layouts/main.html", "<a><slot/></a>");
         let out = apply_layout("X", "main", tmp.path());
         assert_eq!(out, "<a>X</a>");
     }
@@ -6310,8 +6703,14 @@ mod tests {
         });
 
         // Object access
-        assert_eq!(json_get_by_path(&parsed, "ok"), Some(&serde_json::json!(true)));
-        assert_eq!(json_get_by_path(&parsed, "data.count"), Some(&serde_json::json!(4)));
+        assert_eq!(
+            json_get_by_path(&parsed, "ok"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            json_get_by_path(&parsed, "data.count"),
+            Some(&serde_json::json!(4))
+        );
 
         // Array indexing via numeric path segments
         let slug0 = json_get_by_path(&parsed, "data.rows.0.slug").unwrap();
@@ -6336,7 +6735,8 @@ mod tests {
         let html = r#"<html><body><div data-island="my-toolbar" data-client="on"><button>x</button></div></body></html>"#;
         let result = inject_loader_script(html);
         assert!(
-            result.contains(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script>"#),
+            result
+                .contains(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script>"#),
             "loader script must be injected when islands are present, got: {}",
             result
         );
@@ -6357,12 +6757,18 @@ mod tests {
         // No </body> tag: script is appended at the end
         let fragment = r#"<div data-island="x" data-client="on"></div>"#;
         let result = inject_loader_script(fragment);
-        assert!(result.ends_with(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script>"#));
+        assert!(
+            result.ends_with(
+                r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script>"#
+            )
+        );
 
         // Case-insensitive </body> matching
         let upper = r#"<HTML><BODY><div data-island="x" data-client="on"></div></BODY></HTML>"#;
         let result = inject_loader_script(upper);
-        assert!(result.contains(r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script></BODY>"#));
+        assert!(result.contains(
+            r#"<script src="/loader.js" defer data-wasm="/frontend.wasm"></script></BODY>"#
+        ));
     }
 
     #[test]
@@ -6372,8 +6778,10 @@ mod tests {
         // Truthy: full element (with tag, attributes, content) must be preserved; cl-if attr removed
         let html = r#"<a href="/home" class="nav-link" cl-if="show">Home</a>"#;
         let result = process_if_directive(html, &data);
-        assert_eq!(result, r#"<a href="/home" class="nav-link">Home</a>"#,
-            "truthy cl-if must keep full element, not just inner text");
+        assert_eq!(
+            result, r#"<a href="/home" class="nav-link">Home</a>"#,
+            "truthy cl-if must keep full element, not just inner text"
+        );
 
         // Falsy: entire element removed
         let html = r#"<a href="/home" cl-if="hide">Home</a>"#;
@@ -6383,12 +6791,18 @@ mod tests {
         // cl-if + cl-else truthy: keep if-element, remove else-element
         let html = r#"<span cl-if="show">Yes</span> <span cl-else>No</span>"#;
         let result = process_if_directive(html, &data);
-        assert_eq!(result, "<span>Yes</span>", "truthy: keep if-element, strip cl-else sibling");
+        assert_eq!(
+            result, "<span>Yes</span>",
+            "truthy: keep if-element, strip cl-else sibling"
+        );
 
         // cl-if + cl-else falsy: remove if-element, keep else-element (cl-else attr stripped)
         let html = r#"<span cl-if="hide">Yes</span> <span cl-else>No</span>"#;
         let result = process_if_directive(html, &data);
-        assert_eq!(result, "<span>No</span>", "falsy: keep else-element without cl-else attr");
+        assert_eq!(
+            result, "<span>No</span>",
+            "falsy: keep else-element without cl-else attr"
+        );
     }
 
     // --- Registry TOML types ---
@@ -6438,7 +6852,7 @@ mod tests {
         match t {
             "void" => None,
             "ptr" => Some("i32"),
-            "string" => Some("i32"),  // string return = ptr to length-prefixed string
+            "string" => Some("i32"), // string return = ptr to length-prefixed string
             "i32" => Some("i32"),
             "i64" => Some("i64"),
             "boolean" => Some("i32"),
@@ -6452,9 +6866,7 @@ mod tests {
     fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
         let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
 
-        let wasm_params: Vec<&str> = params.iter()
-            .flat_map(|t| expand_param_type(t))
-            .collect();
+        let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
 
         if !wasm_params.is_empty() {
             import.push_str(" (param");
@@ -6483,19 +6895,19 @@ mod tests {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let registry_path = std::path::Path::new(manifest_dir)
             .join("../foundation/platform-architecture/function-registry.toml");
-        let toml_str = std::fs::read_to_string(&registry_path)
-            .unwrap_or_else(|e| panic!(
+        let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
+            panic!(
                 "Failed to read function-registry.toml at {:?}: {}",
                 registry_path, e
-            ));
+            )
+        });
 
-        let registry: Registry = toml::from_str(&toml_str)
-            .expect("Failed to parse function-registry.toml");
+        let registry: Registry =
+            toml::from_str(&toml_str).expect("Failed to parse function-registry.toml");
 
         // Filter for Layer 3 functions only (server-specific scope)
-        let layer3_funcs: Vec<&FunctionEntry> = registry.functions.iter()
-            .filter(|f| f.layer == 3)
-            .collect();
+        let layer3_funcs: Vec<&FunctionEntry> =
+            registry.functions.iter().filter(|f| f.layer == 3).collect();
 
         assert!(
             layer3_funcs.len() >= 30,
@@ -6508,11 +6920,21 @@ mod tests {
         let mut import_count = 0;
 
         for func in &layer3_funcs {
-            wat.push_str(&generate_wat_import(&func.module, &func.name, &func.params, &func.returns));
+            wat.push_str(&generate_wat_import(
+                &func.module,
+                &func.name,
+                &func.params,
+                &func.returns,
+            ));
             import_count += 1;
 
             for alias in &func.aliases {
-                wat.push_str(&generate_wat_import(&func.module, alias, &func.params, &func.returns));
+                wat.push_str(&generate_wat_import(
+                    &func.module,
+                    alias,
+                    &func.params,
+                    &func.returns,
+                ));
                 import_count += 1;
             }
         }
@@ -6522,25 +6944,29 @@ mod tests {
         // Create full server linker (includes L2 + L3) and validate
         let engine = Engine::default();
         let linker = create_linker(&engine).expect("Failed to create linker");
-        let module = wasmtime::Module::new(&engine, &wat)
-            .unwrap_or_else(|e| panic!(
+        let module = wasmtime::Module::new(&engine, &wat).unwrap_or_else(|e| {
+            panic!(
                 "Failed to parse generated WAT ({} imports): {}\n\nGenerated WAT:\n{}",
                 import_count, e, wat
-            ));
+            )
+        });
 
         let router = std::sync::Arc::new(crate::router::Router::new());
         let state = WasmState::new(router);
         let mut store = wasmtime::Store::new(&engine, state);
 
-        linker.instantiate(&mut store, &module).unwrap_or_else(|e| panic!(
-            "LAYER 3 SPEC COMPLIANCE FAILURE ({} imports):\n{}\n\n\
+        linker.instantiate(&mut store, &module).unwrap_or_else(|e| {
+            panic!(
+                "LAYER 3 SPEC COMPLIANCE FAILURE ({} imports):\n{}\n\n\
              Fix the implementation to match function-registry.toml, not the other way around.",
-            import_count, e
-        ));
+                import_count, e
+            )
+        });
 
         eprintln!(
             "Layer 3 spec compliance PASSED: {} canonical + aliases = {} total imports",
-            layer3_funcs.len(), import_count
+            layer3_funcs.len(),
+            import_count
         );
     }
 
@@ -6596,10 +7022,7 @@ mod tests {
 
     #[test]
     fn marshal_attrs_as_json_single_quoted_and_boolean() {
-        let json = marshal_attrs_as_json(
-            "<my-tag name='alice' disabled count='7'>",
-            "my-tag",
-        );
+        let json = marshal_attrs_as_json("<my-tag name='alice' disabled count='7'>", "my-tag");
         assert_eq!(json, r#"{"count":"7","disabled":"","name":"alice"}"#);
     }
 
@@ -6617,10 +7040,7 @@ mod tests {
 
     #[test]
     fn marshal_attrs_as_json_with_extra_whitespace() {
-        let json = marshal_attrs_as_json(
-            "<my-tag   name=\"bob\"   count=\"3\"  >",
-            "my-tag",
-        );
+        let json = marshal_attrs_as_json("<my-tag   name=\"bob\"   count=\"3\"  >", "my-tag");
         assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
     }
 
@@ -6632,7 +7052,10 @@ mod tests {
     #[test]
     fn substitute_template_single_brace() {
         let data = serde_json::json!({"greeting": "hello"});
-        assert_eq!(substitute_template("<p>{greeting}</p>", &data), "<p>hello</p>");
+        assert_eq!(
+            substitute_template("<p>{greeting}</p>", &data),
+            "<p>hello</p>"
+        );
     }
 
     #[test]
@@ -6689,7 +7112,10 @@ mod tests {
         // user writes `{{{x}}}` (escape + placeholder + escape).
         assert_eq!(substitute_template("{{x}}", &data), "{x}");
         assert_eq!(substitute_template("{{{x}}}", &data), "{y}");
-        assert_eq!(substitute_template("price: {{USD}} {x}", &data), "price: {USD} y");
+        assert_eq!(
+            substitute_template("price: {{USD}} {x}", &data),
+            "price: {USD} y"
+        );
     }
 
     #[test]
@@ -6704,10 +7130,7 @@ mod tests {
     #[test]
     fn substitute_template_empty_key_left_literal() {
         let data = serde_json::json!({});
-        assert_eq!(
-            substitute_template("a{}b{   }c", &data),
-            "a{}b{   }c"
-        );
+        assert_eq!(substitute_template("a{}b{   }c", &data), "a{}b{   }c");
     }
 
     #[test]
@@ -6742,8 +7165,7 @@ mod tests {
         let html = r#"<ul><li cl-iterate="fruit in fruits">{fruit}</li></ul>"#;
         let result = process_iterate_directive(html, &data);
         assert_eq!(
-            result,
-            "<ul><li>apple</li><li>banana</li></ul>",
+            result, "<ul><li>apple</li><li>banana</li></ul>",
             "scalar iteration must keep the wrapper per item"
         );
     }
@@ -6764,7 +7186,10 @@ mod tests {
         let data = serde_json::json!({"items": []});
         let html = r#"<ul><li cl-iterate="x in items">{x}</li></ul>"#;
         let result = process_iterate_directive(html, &data);
-        assert_eq!(result, "<ul></ul>", "empty array must produce zero iterations");
+        assert_eq!(
+            result, "<ul></ul>",
+            "empty array must produce zero iterations"
+        );
     }
 
     #[test]
@@ -6784,7 +7209,8 @@ mod tests {
             "title": "hi",
             "fruits": ["apple", "banana"]
         });
-        let template = "<h1>{title}</h1>\n<ul>\n  <li cl-iterate=\"fruit in fruits\">{fruit}</li>\n</ul>";
+        let template =
+            "<h1>{title}</h1>\n<ul>\n  <li cl-iterate=\"fruit in fruits\">{fruit}</li>\n</ul>";
         let with_directives = process_directives(template, &data);
         let result = substitute_template(&with_directives, &data);
         assert_eq!(

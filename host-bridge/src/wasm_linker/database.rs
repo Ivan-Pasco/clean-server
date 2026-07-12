@@ -263,7 +263,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             };
 
             let params_json = if params_len > 0 {
-                read_raw_string(&mut caller, params_ptr, params_len).unwrap_or_else(|| "[]".to_string())
+                read_raw_string(&mut caller, params_ptr, params_len)
+                    .unwrap_or_else(|| "[]".to_string())
             } else {
                 "[]".to_string()
             };
@@ -335,132 +336,120 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // TRANSACTIONS
     // =========================================
 
-    linker.func_wrap(
-        "env",
-        "_db_begin",
-        |mut caller: Caller<'_, S>| -> i32 {
-            let db_bridge = match caller.data().db_bridge() {
-                Some(db) => db,
-                None => {
-                    error!("_db_begin: No database configured");
-                    return 0;
-                }
-            };
+    linker.func_wrap("env", "_db_begin", |mut caller: Caller<'_, S>| -> i32 {
+        let db_bridge = match caller.data().db_bridge() {
+            Some(db) => db,
+            None => {
+                error!("_db_begin: No database configured");
+                return 0;
+            }
+        };
 
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut bridge = db_bridge.write().await;
-                    bridge.call("transaction_begin", json!({})).await
-                })
-            });
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut bridge = db_bridge.write().await;
+                bridge.call("transaction_begin", json!({})).await
+            })
+        });
 
-            match result {
-                Ok(v) => {
-                    if let Some(tx_id) = v
-                        .get("data")
-                        .and_then(|d| d.get("tx_id"))
-                        .and_then(|t| t.as_str())
-                    {
-                        debug!("_db_begin: Transaction started: {}", tx_id);
-                        caller.data_mut().set_current_tx_id(Some(tx_id.to_string()));
-                        1
-                    } else {
-                        0
-                    }
-                }
-                Err(e) => {
-                    error!("_db_begin: Transaction begin error: {}", e);
+        match result {
+            Ok(v) => {
+                if let Some(tx_id) = v
+                    .get("data")
+                    .and_then(|d| d.get("tx_id"))
+                    .and_then(|t| t.as_str())
+                {
+                    debug!("_db_begin: Transaction started: {}", tx_id);
+                    caller.data_mut().set_current_tx_id(Some(tx_id.to_string()));
+                    1
+                } else {
                     0
                 }
             }
-        },
-    )?;
+            Err(e) => {
+                error!("_db_begin: Transaction begin error: {}", e);
+                0
+            }
+        }
+    })?;
 
-    linker.func_wrap(
-        "env",
-        "_db_commit",
-        |mut caller: Caller<'_, S>| -> i32 {
-            let tx_id = match caller.data().current_tx_id() {
-                Some(id) => id.to_string(),
-                None => {
-                    error!("_db_commit: No active transaction");
-                    return 0;
-                }
-            };
+    linker.func_wrap("env", "_db_commit", |mut caller: Caller<'_, S>| -> i32 {
+        let tx_id = match caller.data().current_tx_id() {
+            Some(id) => id.to_string(),
+            None => {
+                error!("_db_commit: No active transaction");
+                return 0;
+            }
+        };
 
-            let db_bridge = match caller.data().db_bridge() {
-                Some(db) => db,
-                None => return 0,
-            };
+        let db_bridge = match caller.data().db_bridge() {
+            Some(db) => db,
+            None => return 0,
+        };
 
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut bridge = db_bridge.write().await;
-                    bridge
-                        .call("transaction_commit", json!({ "tx_id": tx_id }))
-                        .await
-                })
-            });
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut bridge = db_bridge.write().await;
+                bridge
+                    .call("transaction_commit", json!({ "tx_id": tx_id }))
+                    .await
+            })
+        });
 
-            match result {
-                Ok(v) => {
-                    caller.data_mut().set_current_tx_id(None);
-                    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                Err(_) => {
-                    caller.data_mut().set_current_tx_id(None);
+        match result {
+            Ok(v) => {
+                caller.data_mut().set_current_tx_id(None);
+                if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+                    1
+                } else {
                     0
                 }
             }
-        },
-    )?;
+            Err(_) => {
+                caller.data_mut().set_current_tx_id(None);
+                0
+            }
+        }
+    })?;
 
-    linker.func_wrap(
-        "env",
-        "_db_rollback",
-        |mut caller: Caller<'_, S>| -> i32 {
-            let tx_id = match caller.data().current_tx_id() {
-                Some(id) => id.to_string(),
-                None => {
-                    error!("_db_rollback: No active transaction");
-                    return 0;
-                }
-            };
+    linker.func_wrap("env", "_db_rollback", |mut caller: Caller<'_, S>| -> i32 {
+        let tx_id = match caller.data().current_tx_id() {
+            Some(id) => id.to_string(),
+            None => {
+                error!("_db_rollback: No active transaction");
+                return 0;
+            }
+        };
 
-            let db_bridge = match caller.data().db_bridge() {
-                Some(db) => db,
-                None => return 0,
-            };
+        let db_bridge = match caller.data().db_bridge() {
+            Some(db) => db,
+            None => return 0,
+        };
 
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut bridge = db_bridge.write().await;
-                    bridge
-                        .call("transaction_rollback", json!({ "tx_id": tx_id }))
-                        .await
-                })
-            });
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut bridge = db_bridge.write().await;
+                bridge
+                    .call("transaction_rollback", json!({ "tx_id": tx_id }))
+                    .await
+            })
+        });
 
-            match result {
-                Ok(v) => {
-                    caller.data_mut().set_current_tx_id(None);
-                    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                Err(_) => {
-                    caller.data_mut().set_current_tx_id(None);
+        match result {
+            Ok(v) => {
+                caller.data_mut().set_current_tx_id(None);
+                if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+                    1
+                } else {
                     0
                 }
             }
-        },
-    )?;
+            Err(_) => {
+                caller.data_mut().set_current_tx_id(None);
+                0
+            }
+        }
+    })?;
 
     // =========================================
     // MIGRATION REGISTRATION
@@ -487,8 +476,12 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let up_sql = read_raw_string(&mut caller, up_ptr, up_len).unwrap_or_default();
             let down_sql = read_raw_string(&mut caller, down_ptr, down_len).unwrap_or_default();
 
-            debug!("_db_register_migration: name='{}', up_sql={} bytes, down_sql={} bytes",
-                name, up_sql.len(), down_sql.len());
+            debug!(
+                "_db_register_migration: name='{}', up_sql={} bytes, down_sql={} bytes",
+                name,
+                up_sql.len(),
+                down_sql.len()
+            );
 
             let db_bridge = match caller.data().db_bridge() {
                 Some(db) => db,
@@ -796,13 +789,15 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
             let live_json = if live_len > 0 {
-                read_raw_string(&mut caller, live_ptr, live_len)
-                    .unwrap_or_else(|| "{}".to_string())
+                read_raw_string(&mut caller, live_ptr, live_len).unwrap_or_else(|| "{}".to_string())
             } else {
                 "{}".to_string()
             };
 
-            debug!("_db_migration_diff: declared_len={}, live_len={}", declared_len, live_len);
+            debug!(
+                "_db_migration_diff: declared_len={}, live_len={}",
+                declared_len, live_len
+            );
 
             let db_bridge = match caller.data().db_bridge() {
                 Some(db) => db,
@@ -816,18 +811,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 serde_json::from_str(&declared_json).unwrap_or(serde_json::json!({}));
 
             // The second argument is either a JSON object (live schema) or a plain table name.
-            let (table_opt, live_val) =
-                match serde_json::from_str::<serde_json::Value>(&live_json) {
-                    Ok(v) if v.is_object() => (None::<String>, v),
-                    Ok(v) if v.is_string() => (
-                        v.as_str().map(|s| s.to_string()),
-                        serde_json::json!({}),
-                    ),
-                    _ => (
-                        Some(live_json.trim().trim_matches('"').to_string()),
-                        serde_json::json!({}),
-                    ),
-                };
+            let (table_opt, live_val) = match serde_json::from_str::<serde_json::Value>(&live_json)
+            {
+                Ok(v) if v.is_object() => (None::<String>, v),
+                Ok(v) if v.is_string() => {
+                    (v.as_str().map(|s| s.to_string()), serde_json::json!({}))
+                }
+                _ => (
+                    Some(live_json.trim().trim_matches('"').to_string()),
+                    serde_json::json!({}),
+                ),
+            };
 
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
@@ -1091,10 +1085,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // _db_connected() -> boolean
-    linker.func_wrap("env", "_db_connected",
-        |caller: Caller<'_, S>| -> i32 {
-            if caller.data().db_bridge().is_some() { 1 } else { 0 }
-        })?;
+    linker.func_wrap("env", "_db_connected", |caller: Caller<'_, S>| -> i32 {
+        if caller.data().db_bridge().is_some() {
+            1
+        } else {
+            0
+        }
+    })?;
 
     // _db_query_async(sql, params) -> void  — runs sync, caches into thread_local
     linker.func_wrap("env", "_db_query_async",
@@ -1133,14 +1130,19 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         })?;
 
     // _db_query_result() -> ptr (last cached query JSON)
-    linker.func_wrap("env", "_db_query_result",
+    linker.func_wrap(
+        "env",
+        "_db_query_result",
         |mut caller: Caller<'_, S>| -> i32 {
             let s = LAST_QUERY_RESULT_JSON.with(|c| c.borrow().clone());
             write_string_to_caller(&mut caller, &s)
-        })?;
+        },
+    )?;
 
     // _db_execute_async(sql, params) -> void — runs sync, caches affected_rows
-    linker.func_wrap("env", "_db_execute_async",
+    linker.func_wrap(
+        "env",
+        "_db_execute_async",
         |mut caller: Caller<'_, S>, sp: i32, sl: i32, pp: i32, pl: i32| {
             let sql = read_raw_string(&mut caller, sp, sl).unwrap_or_default();
             let params_json = if pl > 0 {
@@ -1155,27 +1157,33 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                     return;
                 }
             };
-            let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).unwrap_or_default();
+            let params: Vec<serde_json::Value> =
+                serde_json::from_str(&params_json).unwrap_or_default();
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     let mut bridge = db_bridge.write().await;
-                    bridge.call("execute", json!({"sql": sql, "params": params})).await
+                    bridge
+                        .call("execute", json!({"sql": sql, "params": params}))
+                        .await
                 })
             });
             let affected: i32 = match result {
-                Ok(v) => v.get("data")
+                Ok(v) => v
+                    .get("data")
                     .and_then(|d| d.get("affected_rows"))
-                    .and_then(|n| n.as_i64()).map(|n| n as i32).unwrap_or(0),
+                    .and_then(|n| n.as_i64())
+                    .map(|n| n as i32)
+                    .unwrap_or(0),
                 Err(_) => -1,
             };
             LAST_EXECUTE_AFFECTED.with(|c| *c.borrow_mut() = affected);
-        })?;
+        },
+    )?;
 
     // _db_execute_result() -> i32 (last cached affected_rows)
-    linker.func_wrap("env", "_db_execute_result",
-        |_: Caller<'_, S>| -> i32 {
-            LAST_EXECUTE_AFFECTED.with(|c| *c.borrow())
-        })?;
+    linker.func_wrap("env", "_db_execute_result", |_: Caller<'_, S>| -> i32 {
+        LAST_EXECUTE_AFFECTED.with(|c| *c.borrow())
+    })?;
 
     Ok(())
 }
@@ -1197,12 +1205,18 @@ mod tests {
 
     #[test]
     fn last_insert_id_alias_matches_bare_mysql() {
-        assert_eq!(last_insert_id_alias("SELECT LAST_INSERT_ID()"), Some("id".to_string()));
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ID()"),
+            Some("id".to_string())
+        );
     }
 
     #[test]
     fn last_insert_id_alias_matches_bare_sqlite() {
-        assert_eq!(last_insert_id_alias("SELECT LAST_INSERT_ROWID()"), Some("id".to_string()));
+        assert_eq!(
+            last_insert_id_alias("SELECT LAST_INSERT_ROWID()"),
+            Some("id".to_string())
+        );
     }
 
     #[test]
@@ -1236,7 +1250,10 @@ mod tests {
     #[test]
     fn last_insert_id_alias_rejects_unrelated_queries() {
         assert_eq!(last_insert_id_alias("SELECT * FROM t"), None);
-        assert_eq!(last_insert_id_alias("SELECT id FROM t WHERE id = LAST_INSERT_ID()"), None);
+        assert_eq!(
+            last_insert_id_alias("SELECT id FROM t WHERE id = LAST_INSERT_ID()"),
+            None
+        );
         assert_eq!(
             last_insert_id_alias("SELECT LAST_INSERT_ID(), other_col FROM t"),
             None

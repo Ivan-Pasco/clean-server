@@ -37,499 +37,1805 @@ macro_rules! register_bridge_fn {
         let _stripped: &str = $name.trim_start_matches('_');
         if $name.starts_with('_') && !$name.starts_with("__") {
             if let Some(_dot_idx) = _stripped.find('_') {
-                let _dot_name = format!(
-                    "{}.{}",
-                    &_stripped[.._dot_idx],
-                    &_stripped[_dot_idx + 1..]
-                );
+                let _dot_name =
+                    format!("{}.{}", &_stripped[.._dot_idx], &_stripped[_dot_idx + 1..]);
                 $linker
                     .alias("env", $name, "env", &_dot_name)
-                    .map_err(|e| RuntimeError::wasm(format!(
-                        "Failed to alias {} -> {}: {}", $name, _dot_name, e
-                    )))?;
+                    .map_err(|e| {
+                        RuntimeError::wasm(format!(
+                            "Failed to alias {} -> {}: {}",
+                            $name, _dot_name, e
+                        ))
+                    })?;
             }
         }
     }};
 }
 
 pub fn register_canvas_stubs(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
-    register_bridge_fn!(linker, "_canvas_init",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32, _p2: i32, _l2: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clear",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clear_color",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_present",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_fps",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_resize",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32, _a2: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_get_width",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_get_height",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_request_frame",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_cancel_frame",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_get_delta_time",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_get_time",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_get_fps",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_var_set",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_var_get",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_circle_filled",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _p4: i32, _l4: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_circle_outline",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _p4: i32, _l4: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_rect_filled",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_rect_outline",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_rect_rounded",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _p6: i32, _l6: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_line",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _p6: i32, _l6: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_triangle_filled",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64, _p7: i32, _l7: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_triangle_outline",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64, _p7: i32, _l7: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_ellipse_filled",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_ellipse_outline",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_text",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_text_aligned",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32, _p6: i32, _l6: i32, _p7: i32, _l7: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_text_width",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_image",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64, _a4: f64, _a5: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_image_opacity",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_image_cropped",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64, _a7: f64, _a8: f64, _a9: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_image_rotated",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_save",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_restore",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_translate",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_rotate",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_scale",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_transform",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_reset_transform",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_alpha_begin",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_alpha_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_shadow_begin",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _p4: i32, _l4: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_shadow_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_blur_begin",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_blur_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_glow_begin",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_glow_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_blend_begin",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_blend_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_alpha",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_blend_mode",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_shadow",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _p4: i32, _l4: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clear_shadow",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_line_cap",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_line_join",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_set_line_dash",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clear_line_dash",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_begin_path",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_move_to",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_line_to",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_curve_to",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_cubic_to",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_arc",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_arc_to",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_close_path",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_fill_path",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_stroke_path",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_draw_named_path",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _p3: i32, _l3: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_gradient_linear",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_gradient_radial",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_gradient_add_stop",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _p2: i32, _l2: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_gradient_ref",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_layer_declare",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_layer_begin",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_layer_end",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_load_sheet",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: i32, _a2: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_draw",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: i32, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_draw_flipped",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: i32, _a3: f64, _a4: f64, _a5: f64, _a6: f64, _a7: i32, _a8: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_get_frame_count",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_get_frame_width",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_get_frame_height",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_anim_sprite_draw",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_anim_sprite_draw_ex",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: i32, _a7: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_anim_sprite_reset",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_play",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_stop",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_pause",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_resume",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_animate",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_timeline_play",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_timeline_stop",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_timeline_pause",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_timeline_seek",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_anim_state_start",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_anim_state_force",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_anim_state_current",
-        |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
-    register_bridge_fn!(linker, "_particles_emit",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_particles_start",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_particles_stop",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_pointer_down",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_pointer_move",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_pointer_up",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_key_down",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_key_up",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_event_x",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_event_y",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_event_key",
-        |mut caller: Caller<'_, WasmState>| -> i32 { write_string_to_caller(&mut caller, "") });
-    register_bridge_fn!(linker, "_input_mouse_x",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_mouse_y",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_mouse_pressed",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_mouse_just_pressed",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_mouse_just_released",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_mouse_wheel_y",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_key_down",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_key_just_pressed",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_key_just_released",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_get_last_key",
-        |mut caller: Caller<'_, WasmState>| -> i32 { write_string_to_caller(&mut caller, "") });
-    register_bridge_fn!(linker, "_input_touch_count",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_touch_x",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_touch_y",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_gamepad_connected",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_gamepad_button",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_input_gamepad_axis",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_gamepad_left_stick_x",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_gamepad_left_stick_y",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_gamepad_right_stick_x",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_input_gamepad_right_stick_y",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_audio_play_sound",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_preload",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_stop",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_pause",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_resume",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_is_playing",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_play",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: i32, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_stop",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_pause",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_resume",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_fade_out",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_crossfade",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_music_set_volume",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_set_master_volume",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_mute",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_unmute",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_audio_is_muted",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_collision_circles",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_collision_rects",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64, _a7: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_collision_point_rect",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_collision_circle_rect",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_collision_point_circle",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_collision_ray_circle",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_asset_load_image",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_load_sound",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_load_music",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_queue",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_load_all",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_get_progress",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_asset_all_loaded",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_get",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_asset_unload",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_set_position",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_get_x",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_camera_get_y",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_camera_set_zoom",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_get_zoom",
-        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_camera_set_rotation",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_set_follow",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_set_offset",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_set_deadzone",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_set_bounds",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: f64, _a3: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_apply",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_reset",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_camera_screen_to_world_x",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_camera_screen_to_world_y",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_camera_shake",
-        |_caller: Caller<'_, WasmState>, _a0: f64, _a1: f64, _a2: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_ease_linear",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_cubic_in",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_cubic_out",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_cubic_in_out",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_quad",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_out_quad",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_out_quad",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_sine",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_out_sine",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_out_sine",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_expo",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_out_expo",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_out_expo",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_elastic_out",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_elastic_in",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_bounce_out",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_bounce_in",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_back_out",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_back_in",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_back_in_out",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_out_elastic",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_ease_in_out_bounce",
-        |_caller: Caller<'_, WasmState>, _a0: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_group_begin",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_group_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clip_rect",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clip_circle",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clip_path",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_clip_end",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_font_load",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_text_font",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _p2: i32, _l2: i32, _a3: f64, _a4: f64, _p5: i32, _l5: i32, _p6: i32, _l6: i32, _p7: i32, _l7: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_custom_ease_register",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_ease_custom",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64| -> f64 { 0.0 });
-    register_bridge_fn!(linker, "_canvas_rect_gradient",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_circle_gradient",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _a1: f64, _a2: f64, _a3: f64, _p4: i32, _l4: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_fill_path_gradient",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_draw_tint",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _a2: i32, _a3: f64, _a4: f64, _a5: f64, _a6: f64, _p7: i32, _l7: i32, _a8: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_draw_state",
-        |_caller: Caller<'_, WasmState>, _a0: i32, _p1: i32, _l1: i32, _p2: i32, _l2: i32, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_animate_path",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: i32, _a4: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_exit",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_pause",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_canvas_on_resume",
-        |_caller: Caller<'_, WasmState>, _a0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_scene_get_current",
-        |mut caller: Caller<'_, WasmState>| -> i32 { write_string_to_caller(&mut caller, "") });
-    register_bridge_fn!(linker, "_scene_change",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_scene_change_animated",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_scene_push",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_scene_pop",
-        |_caller: Caller<'_, WasmState>| -> i32 { 0 });
-    register_bridge_fn!(linker, "_scene_set",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_scene_get",
-        |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
-    register_bridge_fn!(linker, "_page_set",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_page_get",
-        |mut caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { write_string_to_caller(&mut caller, "") });
-    register_bridge_fn!(linker, "_asset_preload_image",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_sprite_register_sheet",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32, _a2: i32, _a3: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_animsprite_define",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32, _a2: i32, _a3: i32, _a4: f64, _a5: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_tween_define_var",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32, _a2: f64, _a3: f64, _a4: f64, _p5: i32, _l5: i32, _a6: i32, _a7: i32, _a8: f64, _p9: i32, _l9: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_begin",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_move_to",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_line_to",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_curve_to",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_cubic_to",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64, _a6: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_arc_to",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _a1: f64, _a2: f64, _a3: f64, _a4: f64, _a5: f64| -> i32 { 0 });
-    register_bridge_fn!(linker, "_path_close",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_timeline_define_json",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_animstate_define_json",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
-    register_bridge_fn!(linker, "_particles_define_json",
-        |_caller: Caller<'_, WasmState>, _p0: i32, _l0: i32, _p1: i32, _l1: i32| -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_init", |_caller: Caller<'_, WasmState>,
+                                                 _a0: i32,
+                                                 _a1: i32,
+                                                 _p2: i32,
+                                                 _l2: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clear", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clear_color", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _p1: i32,
+                                                        _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_present", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_fps", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: i32,
+                                                    _a1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_resize", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: i32,
+                                                   _a1: i32,
+                                                   _a2: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_get_width", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_get_height", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_request_frame", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_cancel_frame", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_get_delta_time", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_get_time", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_get_fps", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_var_set", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _p0: i32,
+                                                    _l0: i32,
+                                                    _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_var_get", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _p0: i32,
+                                                    _l0: i32,
+                                                    _a1: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_circle_filled", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _a1: f64,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _p4: i32,
+                                                          _l4: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_circle_outline", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _a0: i32,
+                                                           _a1: f64,
+                                                           _a2: f64,
+                                                           _a3: f64,
+                                                           _p4: i32,
+                                                           _l4: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_rect_filled", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _a1: f64,
+                                                        _a2: f64,
+                                                        _a3: f64,
+                                                        _a4: f64,
+                                                        _p5: i32,
+                                                        _l5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_rect_outline", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _a1: f64,
+                                                         _a2: f64,
+                                                         _a3: f64,
+                                                         _a4: f64,
+                                                         _p5: i32,
+                                                         _l5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_rect_rounded", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _a1: f64,
+                                                         _a2: f64,
+                                                         _a3: f64,
+                                                         _a4: f64,
+                                                         _a5: f64,
+                                                         _p6: i32,
+                                                         _l6: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_line", |_caller: Caller<'_, WasmState>,
+                                                 _a0: i32,
+                                                 _a1: f64,
+                                                 _a2: f64,
+                                                 _a3: f64,
+                                                 _a4: f64,
+                                                 _a5: f64,
+                                                 _p6: i32,
+                                                 _l6: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_triangle_filled", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32,
+                                                            _a1: f64,
+                                                            _a2: f64,
+                                                            _a3: f64,
+                                                            _a4: f64,
+                                                            _a5: f64,
+                                                            _a6: f64,
+                                                            _p7: i32,
+                                                            _l7: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_triangle_outline", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             _a0: i32,
+                                                             _a1: f64,
+                                                             _a2: f64,
+                                                             _a3: f64,
+                                                             _a4: f64,
+                                                             _a5: f64,
+                                                             _a6: f64,
+                                                             _p7: i32,
+                                                             _l7: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_ellipse_filled", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _a0: i32,
+                                                           _a1: f64,
+                                                           _a2: f64,
+                                                           _a3: f64,
+                                                           _a4: f64,
+                                                           _p5: i32,
+                                                           _l5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_ellipse_outline", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32,
+                                                            _a1: f64,
+                                                            _a2: f64,
+                                                            _a3: f64,
+                                                            _a4: f64,
+                                                            _p5: i32,
+                                                            _l5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_text", |_caller: Caller<'_, WasmState>,
+                                                 _a0: i32,
+                                                 _p1: i32,
+                                                 _l1: i32,
+                                                 _a2: f64,
+                                                 _a3: f64,
+                                                 _a4: f64,
+                                                 _p5: i32,
+                                                 _l5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_text_aligned", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _p1: i32,
+                                                         _l1: i32,
+                                                         _a2: f64,
+                                                         _a3: f64,
+                                                         _a4: f64,
+                                                         _p5: i32,
+                                                         _l5: i32,
+                                                         _p6: i32,
+                                                         _l6: i32,
+                                                         _p7: i32,
+                                                         _l7: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_text_width", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32,
+                                                       _p1: i32,
+                                                       _l1: i32,
+                                                       _a2: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_image", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32,
+                                                  _p1: i32,
+                                                  _l1: i32,
+                                                  _a2: f64,
+                                                  _a3: f64,
+                                                  _a4: f64,
+                                                  _a5: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_image_opacity", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _p1: i32,
+                                                          _l1: i32,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64,
+                                                          _a5: f64,
+                                                          _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_image_cropped", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _a1: i32,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64,
+                                                          _a5: f64,
+                                                          _a6: f64,
+                                                          _a7: f64,
+                                                          _a8: f64,
+                                                          _a9: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_image_rotated", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _a1: i32,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64,
+                                                          _a5: f64,
+                                                          _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_save", |_caller: Caller<'_, WasmState>,
+                                                 _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_restore", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_translate", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _a1: f64,
+                                                      _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_rotate", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: i32,
+                                                   _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_scale", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32,
+                                                  _a1: f64,
+                                                  _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_transform", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _a1: f64,
+                                                      _a2: f64,
+                                                      _a3: f64,
+                                                      _a4: f64,
+                                                      _a5: f64,
+                                                      _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_reset_transform", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_alpha_begin", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_alpha_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_shadow_begin", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _a1: f64,
+                                                         _a2: f64,
+                                                         _a3: f64,
+                                                         _p4: i32,
+                                                         _l4: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_shadow_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_blur_begin", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32,
+                                                       _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_blur_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_glow_begin", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32,
+                                                       _p1: i32,
+                                                       _l1: i32,
+                                                       _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_glow_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_blend_begin", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _p1: i32,
+                                                        _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_blend_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_alpha", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_blend_mode", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _a0: i32,
+                                                           _p1: i32,
+                                                           _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_shadow", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32,
+                                                       _a1: f64,
+                                                       _a2: f64,
+                                                       _a3: f64,
+                                                       _p4: i32,
+                                                       _l4: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clear_shadow", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_line_cap", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _p1: i32,
+                                                         _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_line_join", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _p1: i32,
+                                                          _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_set_line_dash", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _a1: f64,
+                                                          _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clear_line_dash", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_begin_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_move_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: i32,
+                                                    _a1: f64,
+                                                    _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_line_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: i32,
+                                                    _a1: f64,
+                                                    _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_curve_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: i32,
+                                                     _a1: f64,
+                                                     _a2: f64,
+                                                     _a3: f64,
+                                                     _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_cubic_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: i32,
+                                                     _a1: f64,
+                                                     _a2: f64,
+                                                     _a3: f64,
+                                                     _a4: f64,
+                                                     _a5: f64,
+                                                     _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_arc", |_caller: Caller<'_, WasmState>,
+                                                _a0: i32,
+                                                _a1: f64,
+                                                _a2: f64,
+                                                _a3: f64,
+                                                _a4: f64,
+                                                _a5: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_arc_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: i32,
+                                                   _a1: f64,
+                                                   _a2: f64,
+                                                   _a3: f64,
+                                                   _a4: f64,
+                                                   _a5: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_close_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_fill_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_stroke_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _p1: i32,
+                                                        _l1: i32,
+                                                        _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_draw_named_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32,
+                                                            _p1: i32,
+                                                            _l1: i32,
+                                                            _a2: f64,
+                                                            _p3: i32,
+                                                            _l3: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_gradient_linear", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _p0: i32,
+                                                     _l0: i32,
+                                                     _a1: f64,
+                                                     _a2: f64,
+                                                     _a3: f64,
+                                                     _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_gradient_radial", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _p0: i32,
+                                                     _l0: i32,
+                                                     _a1: f64,
+                                                     _a2: f64,
+                                                     _a3: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_gradient_add_stop", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _p0: i32,
+                                                       _l0: i32,
+                                                       _a1: f64,
+                                                       _p2: i32,
+                                                       _l2: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_gradient_ref", |_caller: Caller<'_, WasmState>,
+                                                  _p0: i32,
+                                                  _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_layer_declare", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32,
+                                                   _a1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_layer_begin", |_caller: Caller<'_, WasmState>,
+                                                 _p0: i32,
+                                                 _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(
+        linker,
+        "_layer_end",
+        |_caller: Caller<'_, WasmState>| -> i32 { 0 }
+    );
+    register_bridge_fn!(linker, "_sprite_load_sheet", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _p0: i32,
+                                                       _l0: i32,
+                                                       _a1: i32,
+                                                       _a2: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_draw", |_caller: Caller<'_, WasmState>,
+                                                 _a0: i32,
+                                                 _p1: i32,
+                                                 _l1: i32,
+                                                 _a2: i32,
+                                                 _a3: f64,
+                                                 _a4: f64,
+                                                 _a5: f64,
+                                                 _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_draw_flipped", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _p1: i32,
+                                                         _l1: i32,
+                                                         _a2: i32,
+                                                         _a3: f64,
+                                                         _a4: f64,
+                                                         _a5: f64,
+                                                         _a6: f64,
+                                                         _a7: i32,
+                                                         _a8: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_get_frame_count", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_get_frame_width", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_get_frame_height", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_anim_sprite_draw", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32,
+                                                      _a2: f64,
+                                                      _a3: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_anim_sprite_draw_ex", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32,
+                                                         _p1: i32,
+                                                         _l1: i32,
+                                                         _a2: f64,
+                                                         _a3: f64,
+                                                         _a4: f64,
+                                                         _a5: f64,
+                                                         _a6: i32,
+                                                         _a7: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_anim_sprite_reset", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _p0: i32,
+                                                       _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_play", |_caller: Caller<'_, WasmState>,
+                                                _p0: i32,
+                                                _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_stop", |_caller: Caller<'_, WasmState>,
+                                                _p0: i32,
+                                                _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_pause", |_caller: Caller<'_, WasmState>,
+                                                 _p0: i32,
+                                                 _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_resume", |_caller: Caller<'_, WasmState>,
+                                                  _p0: i32,
+                                                  _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_animate", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32,
+                                                   _a1: f64,
+                                                   _a2: f64,
+                                                   _a3: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_timeline_play", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_timeline_stop", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_timeline_pause", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _p0: i32,
+                                                    _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_timeline_seek", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32,
+                                                   _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_anim_state_start", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_anim_state_force", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_anim_state_current", |mut caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _p0: i32,
+                                                        _l0: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
+    register_bridge_fn!(linker, "_particles_emit", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _p0: i32,
+                                                    _l0: i32,
+                                                    _a1: f64,
+                                                    _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_particles_start", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _p0: i32,
+                                                     _l0: i32,
+                                                     _a1: f64,
+                                                     _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_particles_stop", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _p0: i32,
+                                                    _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_pointer_down", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_pointer_move", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_pointer_up", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_key_down", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_key_up", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_event_x", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_event_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_event_key", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
+    register_bridge_fn!(linker, "_input_mouse_x", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_mouse_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_mouse_pressed", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_mouse_just_pressed", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                              _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_mouse_just_released", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                               _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_mouse_wheel_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_key_down", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _p0: i32,
+                                                    _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_key_just_pressed", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _p0: i32,
+                                                            _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_key_just_released", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             _p0: i32,
+                                                             _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_get_last_key", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
+    register_bridge_fn!(linker, "_input_touch_count", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_touch_x", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_touch_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_gamepad_connected", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_gamepad_button", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _a1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_input_gamepad_axis", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _a1: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_gamepad_left_stick_x", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                                _a0: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_gamepad_left_stick_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                                _a0: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_gamepad_right_stick_x", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                                 _a0: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_input_gamepad_right_stick_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                                 _a0: i32|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_audio_play_sound", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32,
+                                                      _a1: f64,
+                                                      _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_preload", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32,
+                                                   _p1: i32,
+                                                   _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_stop", |_caller: Caller<'_, WasmState>,
+                                                _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_pause", |_caller: Caller<'_, WasmState>,
+                                                 _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_resume", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_is_playing", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_play", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32,
+                                                      _a1: i32,
+                                                      _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_stop", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_pause", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _p0: i32,
+                                                       _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_resume", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _p0: i32,
+                                                        _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_fade_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _p0: i32,
+                                                          _l0: i32,
+                                                          _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_crossfade", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _p0: i32,
+                                                           _l0: i32,
+                                                           _p1: i32,
+                                                           _l1: i32,
+                                                           _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_music_set_volume", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _p0: i32,
+                                                            _l0: i32,
+                                                            _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_audio_set_master_volume", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                             _a0: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(
+        linker,
+        "_audio_mute",
+        |_caller: Caller<'_, WasmState>| -> i32 { 0 }
+    );
+    register_bridge_fn!(
+        linker,
+        "_audio_unmute",
+        |_caller: Caller<'_, WasmState>| -> i32 { 0 }
+    );
+    register_bridge_fn!(linker, "_audio_is_muted", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_collision_circles", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: f64,
+                                                       _a1: f64,
+                                                       _a2: f64,
+                                                       _a3: f64,
+                                                       _a4: f64,
+                                                       _a5: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_collision_rects", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: f64,
+                                                     _a1: f64,
+                                                     _a2: f64,
+                                                     _a3: f64,
+                                                     _a4: f64,
+                                                     _a5: f64,
+                                                     _a6: f64,
+                                                     _a7: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_collision_point_rect", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: f64,
+                                                          _a1: f64,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64,
+                                                          _a5: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_collision_circle_rect", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _a0: f64,
+                                                           _a1: f64,
+                                                           _a2: f64,
+                                                           _a3: f64,
+                                                           _a4: f64,
+                                                           _a5: f64,
+                                                           _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_collision_point_circle", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: f64,
+                                                            _a1: f64,
+                                                            _a2: f64,
+                                                            _a3: f64,
+                                                            _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_collision_ray_circle", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: f64,
+                                                          _a1: f64,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64,
+                                                          _a5: f64,
+                                                          _a6: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_asset_load_image", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_load_sound", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_load_music", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_queue", |_caller: Caller<'_, WasmState>,
+                                                 _p0: i32,
+                                                 _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_load_all", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_get_progress", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_asset_all_loaded", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_get", |_caller: Caller<'_, WasmState>,
+                                               _p0: i32,
+                                               _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_asset_unload", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_set_position", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: f64,
+                                                         _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(
+        linker,
+        "_camera_get_x",
+        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 }
+    );
+    register_bridge_fn!(
+        linker,
+        "_camera_get_y",
+        |_caller: Caller<'_, WasmState>| -> f64 { 0.0 }
+    );
+    register_bridge_fn!(linker, "_camera_set_zoom", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_get_zoom", |_caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_camera_set_rotation", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_set_follow", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: f64,
+                                                       _a1: f64,
+                                                       _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_set_offset", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: f64,
+                                                       _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_set_deadzone", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: f64,
+                                                         _a1: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_set_bounds", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: f64,
+                                                       _a1: f64,
+                                                       _a2: f64,
+                                                       _a3: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_apply", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_reset", |_caller: Caller<'_, WasmState>,
+                                                  _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_camera_screen_to_world_x", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                              _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_camera_screen_to_world_y", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                              _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_camera_shake", |_caller: Caller<'_, WasmState>,
+                                                  _a0: f64,
+                                                  _a1: f64,
+                                                  _a2: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_ease_linear", |_caller: Caller<'_, WasmState>,
+                                                 _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_cubic_in", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_cubic_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_cubic_in_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_quad", |_caller: Caller<'_, WasmState>,
+                                                  _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_out_quad", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_out_quad", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_sine", |_caller: Caller<'_, WasmState>,
+                                                  _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_out_sine", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_out_sine", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_expo", |_caller: Caller<'_, WasmState>,
+                                                  _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_out_expo", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_out_expo", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_elastic_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_elastic_in", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_bounce_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_bounce_in", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_back_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_back_in", |_caller: Caller<'_, WasmState>,
+                                                  _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_back_in_out", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_out_elastic", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_ease_in_out_bounce", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_group_begin", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _a1: f64,
+                                                        _a2: f64,
+                                                        _a3: f64,
+                                                        _a4: f64,
+                                                        _a5: f64,
+                                                        _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_group_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clip_rect", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _a1: f64,
+                                                      _a2: f64,
+                                                      _a3: f64,
+                                                      _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clip_circle", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _a0: i32,
+                                                        _a1: f64,
+                                                        _a2: f64,
+                                                        _a3: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clip_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_clip_end", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_font_load", |_caller: Caller<'_, WasmState>,
+                                               _p0: i32,
+                                               _l0: i32,
+                                               _p1: i32,
+                                               _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_text_font", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32,
+                                                      _p2: i32,
+                                                      _l2: i32,
+                                                      _a3: f64,
+                                                      _a4: f64,
+                                                      _p5: i32,
+                                                      _l5: i32,
+                                                      _p6: i32,
+                                                      _l6: i32,
+                                                      _p7: i32,
+                                                      _l7: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_custom_ease_register", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _p0: i32,
+                                                          _l0: i32,
+                                                          _a1: f64,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_ease_custom", |_caller: Caller<'_, WasmState>,
+                                                 _p0: i32,
+                                                 _l0: i32,
+                                                 _a1: f64|
+     -> f64 { 0.0 });
+    register_bridge_fn!(linker, "_canvas_rect_gradient", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _a0: i32,
+                                                          _a1: f64,
+                                                          _a2: f64,
+                                                          _a3: f64,
+                                                          _a4: f64,
+                                                          _p5: i32,
+                                                          _l5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_circle_gradient", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                            _a0: i32,
+                                                            _a1: f64,
+                                                            _a2: f64,
+                                                            _a3: f64,
+                                                            _p4: i32,
+                                                            _l4: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_fill_path_gradient", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                               _a0: i32,
+                                                               _p1: i32,
+                                                               _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_draw_tint", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32,
+                                                      _a2: i32,
+                                                      _a3: f64,
+                                                      _a4: f64,
+                                                      _a5: f64,
+                                                      _a6: f64,
+                                                      _p7: i32,
+                                                      _l7: i32,
+                                                      _a8: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_draw_state", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _a0: i32,
+                                                       _p1: i32,
+                                                       _l1: i32,
+                                                       _p2: i32,
+                                                       _l2: i32,
+                                                       _a3: f64,
+                                                       _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_animate_path", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                        _p0: i32,
+                                                        _l0: i32,
+                                                        _p1: i32,
+                                                        _l1: i32,
+                                                        _a2: f64,
+                                                        _a3: i32,
+                                                        _a4: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_exit", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                    _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_pause", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                     _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_canvas_on_resume", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _a0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_scene_get_current", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
+    register_bridge_fn!(linker, "_scene_change", |_caller: Caller<'_, WasmState>,
+                                                  _p0: i32,
+                                                  _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_scene_change_animated", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _p0: i32,
+                                                           _l0: i32,
+                                                           _p1: i32,
+                                                           _l1: i32,
+                                                           _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_scene_push", |_caller: Caller<'_, WasmState>,
+                                                _p0: i32,
+                                                _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(
+        linker,
+        "_scene_pop",
+        |_caller: Caller<'_, WasmState>| -> i32 { 0 }
+    );
+    register_bridge_fn!(linker, "_scene_set", |_caller: Caller<'_, WasmState>,
+                                               _p0: i32,
+                                               _l0: i32,
+                                               _p1: i32,
+                                               _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_scene_get", |mut caller: Caller<'_, WasmState>,
+                                               _p0: i32,
+                                               _l0: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
+    register_bridge_fn!(linker, "_page_set", |_caller: Caller<'_, WasmState>,
+                                              _p0: i32,
+                                              _l0: i32,
+                                              _p1: i32,
+                                              _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_page_get", |mut caller: Caller<'_, WasmState>,
+                                              _p0: i32,
+                                              _l0: i32|
+     -> i32 {
+        write_string_to_caller(&mut caller, "")
+    });
+    register_bridge_fn!(linker, "_asset_preload_image", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                         _p0: i32,
+                                                         _l0: i32,
+                                                         _p1: i32,
+                                                         _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_sprite_register_sheet", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _p0: i32,
+                                                           _l0: i32,
+                                                           _p1: i32,
+                                                           _l1: i32,
+                                                           _a2: i32,
+                                                           _a3: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_animsprite_define", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                       _p0: i32,
+                                                       _l0: i32,
+                                                       _p1: i32,
+                                                       _l1: i32,
+                                                       _a2: i32,
+                                                       _a3: i32,
+                                                       _a4: f64,
+                                                       _a5: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_tween_define_var", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                      _p0: i32,
+                                                      _l0: i32,
+                                                      _p1: i32,
+                                                      _l1: i32,
+                                                      _a2: f64,
+                                                      _a3: f64,
+                                                      _a4: f64,
+                                                      _p5: i32,
+                                                      _l5: i32,
+                                                      _a6: i32,
+                                                      _a7: i32,
+                                                      _a8: f64,
+                                                      _p9: i32,
+                                                      _l9: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_begin", |_caller: Caller<'_, WasmState>,
+                                                _p0: i32,
+                                                _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_move_to", |_caller: Caller<'_, WasmState>,
+                                                  _p0: i32,
+                                                  _l0: i32,
+                                                  _a1: f64,
+                                                  _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_line_to", |_caller: Caller<'_, WasmState>,
+                                                  _p0: i32,
+                                                  _l0: i32,
+                                                  _a1: f64,
+                                                  _a2: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_curve_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32,
+                                                   _a1: f64,
+                                                   _a2: f64,
+                                                   _a3: f64,
+                                                   _a4: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_cubic_to", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                   _p0: i32,
+                                                   _l0: i32,
+                                                   _a1: f64,
+                                                   _a2: f64,
+                                                   _a3: f64,
+                                                   _a4: f64,
+                                                   _a5: f64,
+                                                   _a6: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_arc_to", |_caller: Caller<'_, WasmState>,
+                                                 _p0: i32,
+                                                 _l0: i32,
+                                                 _a1: f64,
+                                                 _a2: f64,
+                                                 _a3: f64,
+                                                 _a4: f64,
+                                                 _a5: f64|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_path_close", |_caller: Caller<'_, WasmState>,
+                                                _p0: i32,
+                                                _l0: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_timeline_define_json", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                          _p0: i32,
+                                                          _l0: i32,
+                                                          _p1: i32,
+                                                          _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_animstate_define_json", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _p0: i32,
+                                                           _l0: i32,
+                                                           _p1: i32,
+                                                           _l1: i32|
+     -> i32 { 0 });
+    register_bridge_fn!(linker, "_particles_define_json", |_caller: Caller<
+        '_,
+        WasmState,
+    >,
+                                                           _p0: i32,
+                                                           _l0: i32,
+                                                           _p1: i32,
+                                                           _l1: i32|
+     -> i32 { 0 });
 
     Ok(())
 }
-

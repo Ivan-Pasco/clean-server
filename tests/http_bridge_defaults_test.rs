@@ -147,8 +147,7 @@ fn build_query_passes_through_preformed_query_string() {
     let input_ptr = 16i32;
     {
         let buf = memory.data_mut(&mut store);
-        buf[input_ptr as usize..input_ptr as usize + input.len()]
-            .copy_from_slice(input.as_bytes());
+        buf[input_ptr as usize..input_ptr as usize + input.len()].copy_from_slice(input.as_bytes());
     }
 
     let do_build = instance
@@ -182,8 +181,7 @@ fn build_query_encodes_json_object_input() {
     let input_ptr = 16i32;
     {
         let buf = memory.data_mut(&mut store);
-        buf[input_ptr as usize..input_ptr as usize + input.len()]
-            .copy_from_slice(input.as_bytes());
+        buf[input_ptr as usize..input_ptr as usize + input.len()].copy_from_slice(input.as_bytes());
     }
 
     let do_build = instance

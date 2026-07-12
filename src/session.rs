@@ -342,8 +342,7 @@ impl SessionStore {
             .retain(|_, session| !session.is_expired(timeout));
         self.raw_data
             .retain(|_, (_, last_accessed)| last_accessed.elapsed() <= timeout);
-        self.consumed_jti
-            .retain(|_, expires_at| *expires_at > now);
+        self.consumed_jti.retain(|_, expires_at| *expires_at > now);
         self.password_resets
             .retain(|_, (_, expires_at)| *expires_at > now);
 

@@ -98,10 +98,9 @@ fn write_lp_string(memory: &mut [u8], ptr: usize, s: &str) -> usize {
 #[test]
 fn string_split_returns_clean_list_layout() {
     let engine = Engine::default();
-    let module = Module::new(&engine, SPLIT_DRIVER_WAT)
-        .expect("failed to compile split driver WAT module");
-    let linker =
-        create_linker(&engine).expect("failed to create server linker");
+    let module =
+        Module::new(&engine, SPLIT_DRIVER_WAT).expect("failed to compile split driver WAT module");
+    let linker = create_linker(&engine).expect("failed to create server linker");
     let mut store = {
         let router = Arc::new(Router::new());
         Store::new(&engine, WasmState::new(router))

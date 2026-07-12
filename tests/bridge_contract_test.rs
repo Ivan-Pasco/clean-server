@@ -63,28 +63,28 @@ struct FunctionEntry {
 
 fn expand_param_type(t: &str) -> Vec<&str> {
     match t {
-        "string"  => vec!["i32", "i32"],
+        "string" => vec!["i32", "i32"],
         "integer" => vec!["i64"],
-        "number"  => vec!["f64"],
+        "number" => vec!["f64"],
         "boolean" => vec!["i32"],
-        "i32"     => vec!["i32"],
-        "i64"     => vec!["i64"],
-        "any"     => vec!["i32"],
+        "i32" => vec!["i32"],
+        "i64" => vec!["i64"],
+        "any" => vec!["i32"],
         other => panic!("Unknown param type in registry: '{}'", other),
     }
 }
 
 fn expand_return_type(t: &str) -> Option<&str> {
     match t {
-        "void"    => None,
-        "ptr"     => Some("i32"),
-        "string"  => Some("i32"),  // string return = ptr to length-prefixed string
-        "i32"     => Some("i32"),
-        "i64"     => Some("i64"),
+        "void" => None,
+        "ptr" => Some("i32"),
+        "string" => Some("i32"), // string return = ptr to length-prefixed string
+        "i32" => Some("i32"),
+        "i64" => Some("i64"),
         "boolean" => Some("i32"),
         "integer" => Some("i64"),
-        "number"  => Some("f64"),
-        "any"     => Some("i32"),
+        "number" => Some("f64"),
+        "any" => Some("i32"),
         other => panic!("Unknown return type in registry: '{}'", other),
     }
 }
@@ -140,12 +140,12 @@ fn bridge_covers_registry() {
         )
     });
 
-    let registry: Registry =
-        toml::from_str(&toml_str).expect("bridge_covers_registry: Failed to parse function-registry.toml");
+    let registry: Registry = toml::from_str(&toml_str)
+        .expect("bridge_covers_registry: Failed to parse function-registry.toml");
 
     let engine = Engine::default();
-    let linker = create_linker(&engine)
-        .expect("bridge_covers_registry: Failed to create server linker");
+    let linker =
+        create_linker(&engine).expect("bridge_covers_registry: Failed to create server linker");
 
     let mut missing: Vec<String> = Vec::new();
 

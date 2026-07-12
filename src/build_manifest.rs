@@ -417,7 +417,10 @@ mod tests {
         assert_eq!(infer_content_type("theme.css"), "text/css");
         assert_eq!(infer_content_type("loader.js"), "application/javascript");
         assert_eq!(infer_content_type("components.json"), "application/json");
-        assert_eq!(infer_content_type("UNKNOWN.bin"), "application/octet-stream");
+        assert_eq!(
+            infer_content_type("UNKNOWN.bin"),
+            "application/octet-stream"
+        );
     }
 
     #[test]

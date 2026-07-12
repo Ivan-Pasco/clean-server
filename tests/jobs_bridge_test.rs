@@ -61,7 +61,11 @@ fn job_bridge_functions_are_all_registered() {
 
     // _job_enqueue_at(name_ptr, name_len, args_ptr, args_len, run_at_ms: f64) -> i32
     // plugin.toml declares the timestamp param as "number" (= WASM f64).
-    probe!("_job_enqueue_at", "(param i32 i32 i32 i32 f64)", "(result i32)");
+    probe!(
+        "_job_enqueue_at",
+        "(param i32 i32 i32 i32 f64)",
+        "(result i32)"
+    );
 
     // _job_cancel(id_ptr, id_len) -> i32
     probe!("_job_cancel", "(param i32 i32)", "(result i32)");
@@ -91,7 +95,11 @@ fn job_bridge_functions_are_all_registered() {
     probe!("_job_succeed", "(param i32 i32)", "");
 
     // _schedule_cron(name_ptr, name_len, cron_ptr, cron_len, handler_ptr, handler_len) -> i32
-    probe!("_schedule_cron", "(param i32 i32 i32 i32 i32 i32)", "(result i32)");
+    probe!(
+        "_schedule_cron",
+        "(param i32 i32 i32 i32 i32 i32)",
+        "(result i32)"
+    );
 
     // _schedule_cancel(name_ptr, name_len) -> i32
     probe!("_schedule_cancel", "(param i32 i32)", "(result i32)");
@@ -100,30 +108,38 @@ fn job_bridge_functions_are_all_registered() {
     // Spec-defined dot-notation aliases
     // -----------------------------------------------------------------------
 
-    probe!("queue.enqueue",    "(param i32 i32 i32 i32)", "(result i32)");
-    probe!("queue.enqueue_at", "(param i32 i32 i32 i32 f64)", "(result i32)");
-    probe!("queue.cancel",     "(param i32 i32)", "(result i32)");
-    probe!("queue.status",     "(param i32 i32)", "(result i32)");
-    probe!("queue.result",     "(param i32 i32)", "(result i32)");
-    probe!("job.id",           "", "(result i32)");
-    probe!("job.args",         "", "(result i32)");
-    probe!("job.attempt",      "", "(result i32)");
-    probe!("job.retry_after",  "(param i32)", "");
-    probe!("job.fail",         "(param i32 i32)", "");
-    probe!("job.succeed",      "(param i32 i32)", "");
-    probe!("schedule.cancel",  "(param i32 i32)", "(result i32)");
+    probe!("queue.enqueue", "(param i32 i32 i32 i32)", "(result i32)");
+    probe!(
+        "queue.enqueue_at",
+        "(param i32 i32 i32 i32 f64)",
+        "(result i32)"
+    );
+    probe!("queue.cancel", "(param i32 i32)", "(result i32)");
+    probe!("queue.status", "(param i32 i32)", "(result i32)");
+    probe!("queue.result", "(param i32 i32)", "(result i32)");
+    probe!("job.id", "", "(result i32)");
+    probe!("job.args", "", "(result i32)");
+    probe!("job.attempt", "", "(result i32)");
+    probe!("job.retry_after", "(param i32)", "");
+    probe!("job.fail", "(param i32 i32)", "");
+    probe!("job.succeed", "(param i32 i32)", "");
+    probe!("schedule.cancel", "(param i32 i32)", "(result i32)");
 
     // -----------------------------------------------------------------------
     // Auto-derived aliases (register_bridge_fn! macro produces these)
     // -----------------------------------------------------------------------
 
-    probe!("job.enqueue",         "(param i32 i32 i32 i32)", "(result i32)");
-    probe!("job.enqueue_at",      "(param i32 i32 i32 i32 f64)", "(result i32)");
-    probe!("job.cancel",          "(param i32 i32)", "(result i32)");
-    probe!("job.status",          "(param i32 i32)", "(result i32)");
-    probe!("job.result",          "(param i32 i32)", "(result i32)");
-    probe!("job.current_id",      "", "(result i32)");
-    probe!("job.current_args",    "", "(result i32)");
+    probe!("job.enqueue", "(param i32 i32 i32 i32)", "(result i32)");
+    probe!(
+        "job.enqueue_at",
+        "(param i32 i32 i32 i32 f64)",
+        "(result i32)"
+    );
+    probe!("job.cancel", "(param i32 i32)", "(result i32)");
+    probe!("job.status", "(param i32 i32)", "(result i32)");
+    probe!("job.result", "(param i32 i32)", "(result i32)");
+    probe!("job.current_id", "", "(result i32)");
+    probe!("job.current_args", "", "(result i32)");
     probe!("job.current_attempt", "", "(result i32)");
 
     assert!(

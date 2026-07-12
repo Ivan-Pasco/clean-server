@@ -88,12 +88,12 @@ struct FunctionEntry {
 /// All other types map to a single primitive.
 fn expand_param_type(t: &str) -> Vec<&str> {
     match t {
-        "string"  => vec!["i32", "i32"],
+        "string" => vec!["i32", "i32"],
         "integer" => vec!["i64"],
-        "number"  => vec!["f64"],
+        "number" => vec!["f64"],
         "boolean" => vec!["i32"],
-        "i32"     => vec!["i32"],
-        "i64"     => vec!["i64"],
+        "i32" => vec!["i32"],
+        "i64" => vec!["i64"],
         other => panic!(
             "Unknown parameter type in function-registry.toml: '{}'. \
              Update expand_param_type() in bridge_compliance_test.rs if a new type was added.",
@@ -108,14 +108,14 @@ fn expand_param_type(t: &str) -> Vec<&str> {
 /// `"ptr"` means the function returns a length-prefixed string pointer (i32).
 fn expand_return_type(t: &str) -> Option<&str> {
     match t {
-        "void"    => None,
-        "ptr"     => Some("i32"),
-        "string"  => Some("i32"),  // string return = ptr to length-prefixed string
-        "i32"     => Some("i32"),
-        "i64"     => Some("i64"),
+        "void" => None,
+        "ptr" => Some("i32"),
+        "string" => Some("i32"), // string return = ptr to length-prefixed string
+        "i32" => Some("i32"),
+        "i64" => Some("i64"),
         "boolean" => Some("i32"),
         "integer" => Some("i64"),
-        "number"  => Some("f64"),
+        "number" => Some("f64"),
         other => panic!(
             "Unknown return type in function-registry.toml: '{}'. \
              Update expand_return_type() in bridge_compliance_test.rs if a new type was added.",
@@ -130,18 +130,10 @@ fn expand_return_type(t: &str) -> Option<&str> {
 /// ```text
 ///   (import "env" "math_sin" (func (param f64) (result f64)))
 /// ```
-fn generate_wat_import(
-    module: &str,
-    name: &str,
-    params: &[String],
-    returns: &str,
-) -> String {
+fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
     let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
 
-    let wasm_params: Vec<&str> = params
-        .iter()
-        .flat_map(|t| expand_param_type(t))
-        .collect();
+    let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
 
     if !wasm_params.is_empty() {
         import.push_str(" (param");
@@ -193,14 +185,17 @@ fn test_full_bridge_compliance() {
     // clean-server is at:  <project-root>/clean-server/
     // registry is at:      <project-root>/foundation/platform-architecture/function-registry.toml
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let registry_path = manifest_dir.join("../foundation/platform-architecture/function-registry.toml");
+    let registry_path =
+        manifest_dir.join("../foundation/platform-architecture/function-registry.toml");
 
     let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
         panic!(
             "test_full_bridge_compliance: Cannot read function-registry.toml at {:?}.\n\
              Ensure the foundation/platform-architecture directory exists at the project root.\n\
              Error: {}",
-            registry_path.canonicalize().unwrap_or(registry_path.clone()),
+            registry_path
+                .canonicalize()
+                .unwrap_or(registry_path.clone()),
             e
         )
     });
@@ -249,24 +244,50 @@ fn test_full_bridge_compliance() {
     // Emit Layer 2 imports first (memory_runtime module comes before env to
     // keep the order predictable and match the existing WAT contract).
     wat.push_str("  ;; --- Layer 2: memory_runtime module ---\n");
-    for func in all_funcs.iter().filter(|f| f.layer == 2 && f.module == "memory_runtime") {
-        wat.push_str(&generate_wat_import(&func.module, &func.name, &func.params, &func.returns));
+    for func in all_funcs
+        .iter()
+        .filter(|f| f.layer == 2 && f.module == "memory_runtime")
+    {
+        wat.push_str(&generate_wat_import(
+            &func.module,
+            &func.name,
+            &func.params,
+            &func.returns,
+        ));
         import_count += 1;
         layer2_import_total += 1;
         for alias in &func.aliases {
-            wat.push_str(&generate_wat_import(&func.module, alias, &func.params, &func.returns));
+            wat.push_str(&generate_wat_import(
+                &func.module,
+                alias,
+                &func.params,
+                &func.returns,
+            ));
             import_count += 1;
             layer2_import_total += 1;
         }
     }
 
     wat.push_str("\n  ;; --- Layer 2: env module ---\n");
-    for func in all_funcs.iter().filter(|f| f.layer == 2 && f.module == "env") {
-        wat.push_str(&generate_wat_import(&func.module, &func.name, &func.params, &func.returns));
+    for func in all_funcs
+        .iter()
+        .filter(|f| f.layer == 2 && f.module == "env")
+    {
+        wat.push_str(&generate_wat_import(
+            &func.module,
+            &func.name,
+            &func.params,
+            &func.returns,
+        ));
         import_count += 1;
         layer2_import_total += 1;
         for alias in &func.aliases {
-            wat.push_str(&generate_wat_import(&func.module, alias, &func.params, &func.returns));
+            wat.push_str(&generate_wat_import(
+                &func.module,
+                alias,
+                &func.params,
+                &func.returns,
+            ));
             import_count += 1;
             layer2_import_total += 1;
         }
@@ -274,11 +295,21 @@ fn test_full_bridge_compliance() {
 
     wat.push_str("\n  ;; --- Layer 3: env module (server-specific) ---\n");
     for func in all_funcs.iter().filter(|f| f.layer == 3) {
-        wat.push_str(&generate_wat_import(&func.module, &func.name, &func.params, &func.returns));
+        wat.push_str(&generate_wat_import(
+            &func.module,
+            &func.name,
+            &func.params,
+            &func.returns,
+        ));
         import_count += 1;
         layer3_import_total += 1;
         for alias in &func.aliases {
-            wat.push_str(&generate_wat_import(&func.module, alias, &func.params, &func.returns));
+            wat.push_str(&generate_wat_import(
+                &func.module,
+                alias,
+                &func.params,
+                &func.returns,
+            ));
             import_count += 1;
             layer3_import_total += 1;
         }
@@ -291,9 +322,7 @@ fn test_full_bridge_compliance() {
     eprintln!(
         "test_full_bridge_compliance: Generated WAT with {} total imports \
          ({} Layer 2 including aliases, {} Layer 3 including aliases)",
-        import_count,
-        layer2_import_total,
-        layer3_import_total,
+        import_count, layer2_import_total, layer3_import_total,
     );
 
     // Create the engine and parse the generated WAT into a WASM module.
@@ -335,8 +364,7 @@ fn test_full_bridge_compliance() {
                 registry type definitions in function-registry.toml.\n\
              4. Never modify the registry to make this test pass — fix the \
                 implementation instead.",
-            import_count,
-            e
+            import_count, e
         )
     });
 

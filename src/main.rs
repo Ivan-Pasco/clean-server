@@ -24,9 +24,7 @@
 //! ```
 
 use clap::{Parser, Subcommand};
-use clean_server::error_reporting::{
-    self, ReportStatus, ReportSummary, WasmParseReport,
-};
+use clean_server::error_reporting::{self, ReportStatus, ReportSummary, WasmParseReport};
 use clean_server::server::MemoryTier;
 use clean_server::{ServerConfig, start_server};
 use std::path::PathBuf;
@@ -425,18 +423,13 @@ fn print_report_human(report: &WasmParseReport) {
     println!();
 }
 
-fn cmd_publish(
-    diag_root: &std::path::Path,
-    sha: Option<&str>,
-    all: bool,
-) -> Result<(), String> {
+fn cmd_publish(diag_root: &std::path::Path, sha: Option<&str>, all: bool) -> Result<(), String> {
     match (sha, all) {
         (Some(s), false) => publish_one(diag_root, s),
         (None, true) => publish_all(diag_root),
         (Some(_), true) => Err("Pass either <SHA> or --all, not both.".to_string()),
         (None, false) => Err(
-            "Specify a SHA prefix or pass --all. Try `clean-server errors list` first."
-                .to_string(),
+            "Specify a SHA prefix or pass --all. Try `clean-server errors list` first.".to_string(),
         ),
     }
 }
@@ -450,7 +443,10 @@ fn publish_one(diag_root: &std::path::Path, sha: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize report: {}", e))?;
 
     println!();
-    println!("=== RUNTIME_WASM_PARSE publish payload ({}) ===", report.short_fingerprint());
+    println!(
+        "=== RUNTIME_WASM_PARSE publish payload ({}) ===",
+        report.short_fingerprint()
+    );
     println!();
     println!("Copy the JSON below into the dashboard's error form, or pipe to");
     println!("the Clean MCP server's `report_error` tool:");
@@ -460,12 +456,9 @@ fn publish_one(diag_root: &std::path::Path, sha: &str) -> Result<(), String> {
     println!("--- END PAYLOAD ---");
     println!();
 
-    let new_dir = error_reporting::transition(
-        diag_root,
-        &report.wasm_sha256,
-        ReportStatus::Published,
-    )
-    .map_err(|e| format!("Failed to mark as published: {}", e))?;
+    let new_dir =
+        error_reporting::transition(diag_root, &report.wasm_sha256, ReportStatus::Published)
+            .map_err(|e| format!("Failed to mark as published: {}", e))?;
 
     println!("Moved to {}", new_dir.display());
     println!(
@@ -501,9 +494,8 @@ fn publish_all(diag_root: &std::path::Path) -> Result<(), String> {
 }
 
 fn cmd_resolve(diag_root: &std::path::Path, sha: &str) -> Result<(), String> {
-    let new_dir =
-        error_reporting::transition(diag_root, sha, ReportStatus::Resolved)
-            .map_err(|e| format!("Failed to resolve: {}", e))?;
+    let new_dir = error_reporting::transition(diag_root, sha, ReportStatus::Resolved)
+        .map_err(|e| format!("Failed to resolve: {}", e))?;
     println!("Marked resolved: {}", new_dir.display());
     println!("(Heavy fields stripped; fingerprint retained for regression detection.)");
     Ok(())

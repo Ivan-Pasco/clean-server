@@ -74,20 +74,22 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             }
 
             // Read current length
-            let length = u32::from_le_bytes(
-                data[ptr..ptr + 4].try_into().unwrap()
-            ) as usize;
+            let length = u32::from_le_bytes(data[ptr..ptr + 4].try_into().unwrap()) as usize;
 
             // Read capacity
-            let capacity = u32::from_le_bytes(
-                data[ptr + 4..ptr + 8].try_into().unwrap()
-            ) as usize;
+            let capacity = u32::from_le_bytes(data[ptr + 4..ptr + 8].try_into().unwrap()) as usize;
 
-            debug!("list.push_f64: ptr={}, length={}, capacity={}, value={}", ptr, length, capacity, value);
+            debug!(
+                "list.push_f64: ptr={}, length={}, capacity={}, value={}",
+                ptr, length, capacity, value
+            );
 
             // Check there's room (capacity must be > length)
             if length >= capacity {
-                error!("list.push_f64: list is full (length={}, capacity={})", length, capacity);
+                error!(
+                    "list.push_f64: list is full (length={}, capacity={})",
+                    length, capacity
+                );
                 return list_ptr;
             }
 
@@ -96,7 +98,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             // Bounds check for the new element
             if element_offset + F64_SIZE > data.len() {
-                error!("list.push_f64: element write out of bounds at offset={}", element_offset);
+                error!(
+                    "list.push_f64: element write out of bounds at offset={}",
+                    element_offset
+                );
                 return list_ptr;
             }
 
@@ -109,7 +114,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let new_length = (length + 1) as u32;
             data_mut[ptr..ptr + 4].copy_from_slice(&new_length.to_le_bytes());
 
-            debug!("list.push_f64: pushed value={} at index={}, new_length={}", value, length, new_length);
+            debug!(
+                "list.push_f64: pushed value={} at index={}, new_length={}",
+                value, length, new_length
+            );
             list_ptr
         },
     )?;
@@ -120,68 +128,87 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
 
     // list.allocate(capacity_hint) -> handle
-    linker.func_wrap("env", "list.allocate",
+    linker.func_wrap(
+        "env",
+        "list.allocate",
         |_: Caller<'_, S>, capacity: i32| -> i32 {
             let cap = capacity.max(0) as usize;
             new_list_handle(Vec::with_capacity(cap))
-        })?;
+        },
+    )?;
 
     // list.add(handle, value) -> void  (alias of push)
-    linker.func_wrap("env", "list.add",
+    linker.func_wrap(
+        "env",
+        "list.add",
         |_: Caller<'_, S>, handle: i32, value: i32| {
             LIST_STORE.with(|s| {
                 if let Some(v) = s.borrow_mut().get_mut(&handle) {
                     v.push(value);
                 }
             });
-        })?;
+        },
+    )?;
 
     // list.push(handle, value) -> void
-    linker.func_wrap("env", "list.push",
+    linker.func_wrap(
+        "env",
+        "list.push",
         |_: Caller<'_, S>, handle: i32, value: i32| {
             LIST_STORE.with(|s| {
                 if let Some(v) = s.borrow_mut().get_mut(&handle) {
                     v.push(value);
                 }
             });
-        })?;
+        },
+    )?;
 
     // list.clear(handle) -> void
-    linker.func_wrap("env", "list.clear",
-        |_: Caller<'_, S>, handle: i32| {
-            LIST_STORE.with(|s| {
-                if let Some(v) = s.borrow_mut().get_mut(&handle) {
-                    v.clear();
-                }
-            });
-        })?;
+    linker.func_wrap("env", "list.clear", |_: Caller<'_, S>, handle: i32| {
+        LIST_STORE.with(|s| {
+            if let Some(v) = s.borrow_mut().get_mut(&handle) {
+                v.clear();
+            }
+        });
+    })?;
 
     // list.contains(handle, value) -> boolean
-    linker.func_wrap("env", "list.contains",
+    linker.func_wrap(
+        "env",
+        "list.contains",
         |_: Caller<'_, S>, handle: i32, value: i32| -> i32 {
-            LIST_STORE.with(|s| {
-                match s.borrow().get(&handle) {
-                    Some(v) if v.contains(&value) => 1,
-                    _ => 0,
-                }
+            LIST_STORE.with(|s| match s.borrow().get(&handle) {
+                Some(v) if v.contains(&value) => 1,
+                _ => 0,
             })
-        })?;
+        },
+    )?;
 
     // list.get(handle, index) -> i32 (0 on OOB/invalid)
-    linker.func_wrap("env", "list.get",
+    linker.func_wrap(
+        "env",
+        "list.get",
         |_: Caller<'_, S>, handle: i32, idx: i32| -> i32 {
-            if idx < 0 { return 0; }
+            if idx < 0 {
+                return 0;
+            }
             LIST_STORE.with(|s| {
-                s.borrow().get(&handle)
+                s.borrow()
+                    .get(&handle)
                     .and_then(|v| v.get(idx as usize).copied())
                     .unwrap_or(0)
             })
-        })?;
+        },
+    )?;
 
     // list.set(handle, index, value) -> void
-    linker.func_wrap("env", "list.set",
+    linker.func_wrap(
+        "env",
+        "list.set",
         |_: Caller<'_, S>, handle: i32, idx: i32, value: i32| {
-            if idx < 0 { return; }
+            if idx < 0 {
+                return;
+            }
             LIST_STORE.with(|s| {
                 if let Some(v) = s.borrow_mut().get_mut(&handle) {
                     if (idx as usize) < v.len() {
@@ -189,12 +216,17 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                     }
                 }
             });
-        })?;
+        },
+    )?;
 
     // list.remove(handle, index) -> void
-    linker.func_wrap("env", "list.remove",
+    linker.func_wrap(
+        "env",
+        "list.remove",
         |_: Caller<'_, S>, handle: i32, idx: i32| {
-            if idx < 0 { return; }
+            if idx < 0 {
+                return;
+            }
             LIST_STORE.with(|s| {
                 if let Some(v) = s.borrow_mut().get_mut(&handle) {
                     if (idx as usize) < v.len() {
@@ -202,19 +234,23 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                     }
                 }
             });
-        })?;
+        },
+    )?;
 
     // list.isEmpty(handle) -> boolean
-    linker.func_wrap("env", "list.isEmpty",
+    linker.func_wrap(
+        "env",
+        "list.isEmpty",
         |_: Caller<'_, S>, handle: i32| -> i32 {
             LIST_STORE.with(|s| {
                 match s.borrow().get(&handle) {
                     Some(v) if v.is_empty() => 1,
                     Some(_) => 0,
-                    None => 1,  // invalid handle treated as empty
+                    None => 1, // invalid handle treated as empty
                 }
             })
-        })?;
+        },
+    )?;
 
     Ok(())
 }

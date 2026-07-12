@@ -47,7 +47,9 @@ impl RolesStore {
     pub fn has_permission(&self, role: &str, permission: &str) -> bool {
         self.roles
             .get(role)
-            .map(|perms| perms.contains(&"*".to_string()) || perms.contains(&permission.to_string()))
+            .map(|perms| {
+                perms.contains(&"*".to_string()) || perms.contains(&permission.to_string())
+            })
             .unwrap_or(false)
     }
 
@@ -128,16 +130,23 @@ pub struct McpPendingRequest {
 /// HTTP transport mode. In stdio mode the queue and SSE map are unused.
 pub struct McpBridgeState {
     pub transport: Mutex<McpTransport>,
-    pub request_queue: (Mutex<std::collections::VecDeque<McpPendingRequest>>, Condvar),
+    pub request_queue: (
+        Mutex<std::collections::VecDeque<McpPendingRequest>>,
+        Condvar,
+    ),
     pub current_http_response: Mutex<Option<std::sync::mpsc::SyncSender<String>>>,
-    pub sse_clients: Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+    pub sse_clients:
+        Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
 }
 
 impl McpBridgeState {
     pub fn new() -> Self {
         Self {
             transport: Mutex::new(McpTransport::Stdio),
-            request_queue: (Mutex::new(std::collections::VecDeque::new()), Condvar::new()),
+            request_queue: (
+                Mutex::new(std::collections::VecDeque::new()),
+                Condvar::new(),
+            ),
             current_http_response: Mutex::new(None),
             sse_clients: Mutex::new(std::collections::HashMap::new()),
         }
@@ -175,12 +184,17 @@ pub struct SmtpState {
 
 impl SmtpState {
     pub fn new() -> Self {
-        Self { config: None, last_error: String::new() }
+        Self {
+            config: None,
+            last_error: String::new(),
+        }
     }
 }
 
 impl Default for SmtpState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Shared SMTP state — shared across all request handlers for this module
@@ -341,9 +355,7 @@ fn build_store_limits(memory_limit: usize) -> StoreLimits {
 fn is_memory_limit_trap<E: std::fmt::Display>(err: &E) -> bool {
     let msg = format!("{}", err).to_lowercase();
     msg.contains("memory")
-        && (msg.contains("grow")
-            || msg.contains("out of bounds")
-            || msg.contains("limit"))
+        && (msg.contains("grow") || msg.contains("out of bounds") || msg.contains("limit"))
 }
 
 /// Wrap a wasmtime handler error with friendlier context when the trap is
@@ -523,7 +535,10 @@ impl WasmState {
 
     /// Set request context for the current request
     pub fn set_request(&mut self, ctx: RequestContext) {
-        tracing::debug!("WasmState::set_request: Setting context with params: {:?}", ctx.params);
+        tracing::debug!(
+            "WasmState::set_request: Setting context with params: {:?}",
+            ctx.params
+        );
         tracing::debug!("WasmState::set_request: Path: {}", ctx.path);
         self.request_context = Some(ctx);
         // Reset memory allocator for new request
@@ -695,7 +710,14 @@ impl WasmInstance {
 
         let db_bridge = Arc::new(TokioRwLock::new(DbBridge::new()));
         let session_store = create_session_store(SessionConfig::default());
-        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path), memory_limit_from_env())
+        Self::from_bytes_inner(
+            &wasm_bytes,
+            router,
+            db_bridge,
+            session_store,
+            Some(wasm_path),
+            memory_limit_from_env(),
+        )
     }
 
     /// Load a WASM module from a file with a custom database bridge
@@ -721,7 +743,14 @@ impl WasmInstance {
         })?;
 
         let session_store = create_session_store(SessionConfig::default());
-        Self::from_bytes_inner(&wasm_bytes, router, db_bridge, session_store, Some(wasm_path), memory_limit)
+        Self::from_bytes_inner(
+            &wasm_bytes,
+            router,
+            db_bridge,
+            session_store,
+            Some(wasm_path),
+            memory_limit,
+        )
     }
 
     /// Load a WASM module from bytes
@@ -747,7 +776,14 @@ impl WasmInstance {
         db_bridge: SharedDbBridge,
         session_store: SharedSessionStore,
     ) -> RuntimeResult<Self> {
-        Self::from_bytes_inner(wasm_bytes, router, db_bridge, session_store, None, memory_limit_from_env())
+        Self::from_bytes_inner(
+            wasm_bytes,
+            router,
+            db_bridge,
+            session_store,
+            None,
+            memory_limit_from_env(),
+        )
     }
 
     /// Internal loader that carries the optional source path for error reporting.
@@ -836,10 +872,7 @@ impl WasmInstance {
     /// once at startup by `start_server` once the build manifest is loaded.
     /// Subsequent `create_instance` calls hand the same `Arc` to every
     /// fresh `WasmState`.
-    pub fn set_callbacks(
-        &self,
-        callbacks: Arc<Vec<crate::build_manifest::CallbackContract>>,
-    ) {
+    pub fn set_callbacks(&self, callbacks: Arc<Vec<crate::build_manifest::CallbackContract>>) {
         *self.callbacks.lock() = callbacks;
     }
 
@@ -915,7 +948,10 @@ impl WasmInstance {
             .and_then(|g| g.get(&mut store).i32())
             .unwrap_or(65536) as usize; // fallback for old modules
 
-        info!("Initial heap pointer from __heap_ptr: {} (0x{:x})", heap_ptr, heap_ptr);
+        info!(
+            "Initial heap pointer from __heap_ptr: {} (0x{:x})",
+            heap_ptr, heap_ptr
+        );
         store.data_mut().memory.set_offset(heap_ptr);
 
         // Try different entry point names
@@ -999,20 +1035,27 @@ impl WasmInstance {
         request: RequestContext,
         auth_context: Option<AuthContext>,
     ) -> RuntimeResult<HandlerResponse> {
-        debug!("call_handler_with_auth: handler={}, path={}, params={:?}",
-               handler_name, request.path, request.params);
+        debug!(
+            "call_handler_with_auth: handler={}, path={}, params={:?}",
+            handler_name, request.path, request.params
+        );
 
         // Create a fresh instance for this request
         let (mut store, instance) = self.create_instance()?;
 
         // Set request context
-        debug!("call_handler_with_auth: Setting request context with {} params",
-               request.params.len());
+        debug!(
+            "call_handler_with_auth: Setting request context with {} params",
+            request.params.len()
+        );
         store.data_mut().set_request(request);
 
         // Verify the params were set correctly
         if let Some(ref ctx) = store.data().request_context {
-            debug!("call_handler_with_auth: Verified params in store: {:?}", ctx.params);
+            debug!(
+                "call_handler_with_auth: Verified params in store: {:?}",
+                ctx.params
+            );
         }
 
         // Set auth context if provided
@@ -1027,29 +1070,30 @@ impl WasmInstance {
 
         debug!("Calling handler with auth: {}", handler_name);
 
-        let result = if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
-            let result_ptr = handler
-                .call(&mut store, ())
-                .map_err(|e| classify_handler_error(handler_name, e))?;
+        let result =
+            if let Ok(handler) = instance.get_typed_func::<(), i32>(&mut store, handler_name) {
+                let result_ptr = handler
+                    .call(&mut store, ())
+                    .map_err(|e| classify_handler_error(handler_name, e))?;
 
-            // When the handler signalled a redirect via `_http_redirect` /
-            // `_res_redirect`, its i32 return value is not guaranteed to be a
-            // length-prefixed UTF-8 string. The frame.ui page-render export, for
-            // instance, forwards the boxed-any value returned from `guard()`
-            // unchanged. The redirect path in `handle_request` discards the body
-            // anyway, so reading it would only risk a spurious UTF-8 trap that
-            // turns the intended 302 into a 500.
-            if store.data().pending_redirect.is_some() {
-                String::new()
+                // When the handler signalled a redirect via `_http_redirect` /
+                // `_res_redirect`, its i32 return value is not guaranteed to be a
+                // length-prefixed UTF-8 string. The frame.ui page-render export, for
+                // instance, forwards the boxed-any value returned from `guard()`
+                // unchanged. The redirect path in `handle_request` discards the body
+                // anyway, so reading it would only risk a spurious UTF-8 trap that
+                // turns the intended 302 into a 500.
+                if store.data().pending_redirect.is_some() {
+                    String::new()
+                } else {
+                    crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
+                }
             } else {
-                crate::memory::read_string_from_memory(&store, &memory, result_ptr as u32)?
-            }
-        } else {
-            return Err(RuntimeError::wasm(format!(
-                "Could not find or call handler '{}'",
-                handler_name
-            )));
-        };
+                return Err(RuntimeError::wasm(format!(
+                    "Could not find or call handler '{}'",
+                    handler_name
+                )));
+            };
 
         // Get any pending response data
         let set_cookie = store.data_mut().take_pending_cookie();
@@ -1261,7 +1305,8 @@ pub fn create_shared_instance_with_config(
     db_bridge: SharedDbBridge,
     memory_limit: usize,
 ) -> RuntimeResult<SharedWasmInstance> {
-    let instance = WasmInstance::load_with_db_and_limit(wasm_path, router, db_bridge, memory_limit)?;
+    let instance =
+        WasmInstance::load_with_db_and_limit(wasm_path, router, db_bridge, memory_limit)?;
     Ok(Arc::new(instance))
 }
 

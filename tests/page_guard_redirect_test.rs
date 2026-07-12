@@ -84,8 +84,7 @@ fn build_request() -> RequestContext {
 
 #[test]
 fn handler_redirect_with_non_string_return_does_not_trap() {
-    let wasm_bytes =
-        wat::parse_str(DRIVER_WAT).expect("failed to assemble page-guard driver WAT");
+    let wasm_bytes = wat::parse_str(DRIVER_WAT).expect("failed to assemble page-guard driver WAT");
     let router = Arc::new(Router::new());
     let instance = WasmInstance::from_bytes(&wasm_bytes, router)
         .expect("failed to load page-guard driver WASM");

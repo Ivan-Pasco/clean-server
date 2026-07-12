@@ -223,11 +223,7 @@ impl Router {
     /// The path is stored in the route registry with `is_ws = true`.  The
     /// server's fallback handler recognises this flag and performs the WebSocket
     /// upgrade instead of calling a regular WASM handler.
-    pub fn register_ws(
-        &self,
-        path: String,
-        handler_name: String,
-    ) -> RuntimeResult<()> {
+    pub fn register_ws(&self, path: String, handler_name: String) -> RuntimeResult<()> {
         let key = RouteKey {
             method: HttpMethod::GET,
             path: path.clone(),
@@ -273,8 +269,10 @@ impl Router {
 
         // Try to match the path
         if let Ok(matched) = matcher.at(path) {
-            debug!("Router::find: matchit matched path '{}' to route '{}'",
-                   path, matched.value.path);
+            debug!(
+                "Router::find: matchit matched path '{}' to route '{}'",
+                path, matched.value.path
+            );
 
             // Check if this path has a handler for the requested method
             let key = RouteKey {
@@ -293,7 +291,10 @@ impl Router {
                 debug!("Router::find: Extracted params: {:?}", params);
                 return Some((handler.clone(), params));
             } else {
-                debug!("Router::find: No handler found for method {} on matched route", method.as_str());
+                debug!(
+                    "Router::find: No handler found for method {} on matched route",
+                    method.as_str()
+                );
             }
         } else {
             debug!("Router::find: matchit did not match path '{}'", path);
@@ -383,13 +384,34 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None, false)
+            .register(
+                HttpMethod::GET,
+                "/".to_string(),
+                "__route_handler_0".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
         router
-            .register(HttpMethod::GET, "/api/users".to_string(), "__route_handler_1".to_string(), false, None, false)
+            .register(
+                HttpMethod::GET,
+                "/api/users".to_string(),
+                "__route_handler_1".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
         router
-            .register(HttpMethod::POST, "/api/users".to_string(), "__route_handler_2".to_string(), false, None, false)
+            .register(
+                HttpMethod::POST,
+                "/api/users".to_string(),
+                "__route_handler_2".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
 
         assert!(router.find(HttpMethod::GET, "/").is_some());
@@ -404,7 +426,14 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/users/:id".to_string(), "__route_handler_0".to_string(), false, None, false)
+            .register(
+                HttpMethod::GET,
+                "/users/:id".to_string(),
+                "__route_handler_0".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
         router
             .register(
@@ -434,10 +463,24 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/public".to_string(), "__route_handler_0".to_string(), false, None, false)
+            .register(
+                HttpMethod::GET,
+                "/public".to_string(),
+                "__route_handler_0".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
         router
-            .register(HttpMethod::GET, "/protected".to_string(), "__route_handler_1".to_string(), true, None, false)
+            .register(
+                HttpMethod::GET,
+                "/protected".to_string(),
+                "__route_handler_1".to_string(),
+                true,
+                None,
+                false,
+            )
             .unwrap();
         router
             .register(
@@ -468,7 +511,14 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/".to_string(), "__route_handler_0".to_string(), false, None, false)
+            .register(
+                HttpMethod::GET,
+                "/".to_string(),
+                "__route_handler_0".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
         assert_eq!(router.len(), 1);
 
@@ -497,7 +547,14 @@ mod tests {
         let router = Router::new();
 
         router
-            .register(HttpMethod::GET, "/api/users/:id".to_string(), "__route_handler_2".to_string(), false, None, false)
+            .register(
+                HttpMethod::GET,
+                "/api/users/:id".to_string(),
+                "__route_handler_2".to_string(),
+                false,
+                None,
+                false,
+            )
             .unwrap();
 
         // Test that the route matches and params are extracted
@@ -506,6 +563,10 @@ mod tests {
 
         let (handler, params) = result.unwrap();
         assert_eq!(handler.handler_name, "__route_handler_2");
-        assert_eq!(params.get("id"), Some(&"1".to_string()), "Param 'id' should be '1'");
+        assert_eq!(
+            params.get("id"),
+            Some(&"1".to_string()),
+            "Param 'id' should be '1'"
+        );
     }
 }

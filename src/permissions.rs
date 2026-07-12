@@ -193,10 +193,22 @@ mod tests {
     #[test]
     fn test_allow_all_when_no_section() {
         let gate = parse_permissions(EMPTY_WASM, "test_module");
-        assert!(!gate.is_enforcing(), "Should not be enforcing when no section exists");
-        assert!(gate.is_allowed("_session_store"), "Should allow any function");
-        assert!(gate.is_allowed("_roles_register"), "Should allow any function");
-        assert!(gate.check("anything"), "check() should return true when unrestricted");
+        assert!(
+            !gate.is_enforcing(),
+            "Should not be enforcing when no section exists"
+        );
+        assert!(
+            gate.is_allowed("_session_store"),
+            "Should allow any function"
+        );
+        assert!(
+            gate.is_allowed("_roles_register"),
+            "Should allow any function"
+        );
+        assert!(
+            gate.check("anything"),
+            "check() should return true when unrestricted"
+        );
     }
 
     #[test]
@@ -243,7 +255,10 @@ mod tests {
         let wasm = wasm_with_custom_section("clean:permissions", manifest);
 
         let gate = parse_permissions(&wasm, "locked_plugin");
-        assert!(gate.is_enforcing(), "Empty array = enforcing with no permissions");
+        assert!(
+            gate.is_enforcing(),
+            "Empty array = enforcing with no permissions"
+        );
         assert_eq!(gate.allowed_count(), Some(0));
         assert!(!gate.is_allowed("_session_get"));
         assert!(!gate.is_allowed("_roles_register"));
@@ -255,7 +270,10 @@ mod tests {
         let wasm = wasm_with_custom_section("clean:permissions", bad_manifest);
 
         let gate = parse_permissions(&wasm, "broken_plugin");
-        assert!(gate.is_enforcing(), "Invalid JSON should trigger deny-all enforcement");
+        assert!(
+            gate.is_enforcing(),
+            "Invalid JSON should trigger deny-all enforcement"
+        );
         assert_eq!(gate.allowed_count(), Some(0));
         assert!(!gate.is_allowed("_session_get"));
     }
@@ -264,7 +282,10 @@ mod tests {
     fn test_unrelated_custom_section_is_ignored() {
         let wasm = wasm_with_custom_section("name", b"\x00some_debug_info");
         let gate = parse_permissions(&wasm, "debug_module");
-        assert!(!gate.is_enforcing(), "Unrelated custom section should not affect permissions");
+        assert!(
+            !gate.is_enforcing(),
+            "Unrelated custom section should not affect permissions"
+        );
         assert!(gate.is_allowed("_session_store"));
     }
 
@@ -274,7 +295,13 @@ mod tests {
         set.insert("_session_get".to_string());
         let gate = PermissionGate::from_allowlist(set, "restricted_plugin".to_string());
 
-        assert!(!gate.check("_roles_register"), "Denied function should return false");
-        assert!(gate.check("_session_get"), "Allowed function should return true");
+        assert!(
+            !gate.check("_roles_register"),
+            "Denied function should return false"
+        );
+        assert!(
+            gate.check("_session_get"),
+            "Allowed function should return true"
+        );
     }
 }

@@ -2,13 +2,17 @@
 //!
 //! Uses Axum to serve HTTP requests and route them to WASM handlers.
 
-use crate::build_manifest::{BuildManifest, CallbackContract, ResolvedArtifact, purpose as artifact_purpose};
+use crate::build_manifest::{
+    BuildManifest, CallbackContract, ResolvedArtifact, purpose as artifact_purpose,
+};
 use crate::error::{HttpError, RuntimeError, RuntimeResult};
 use crate::rate_limit::{RateLimiter, SharedRateLimiter, rate_limit_middleware};
 use crate::router::{HttpMethod, SharedRouter};
 use crate::runtime_config::{CorsConfig, RuntimeConfig};
 use crate::session::{SharedSessionStore, parse_cookies};
-use crate::wasm::{AuthContext, RequestContext, SharedDbBridge, SharedIslandsStore, SharedWasmInstance};
+use crate::wasm::{
+    AuthContext, RequestContext, SharedDbBridge, SharedIslandsStore, SharedWasmInstance,
+};
 use crate::websocket::{SharedWsState, WsRouteHandlers, ws_handle_connection};
 use axum::{
     Router,
@@ -157,7 +161,8 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Effective memory limit in bytes: explicit limit if set, otherwise tier default
     pub fn effective_memory_limit(&self) -> usize {
-        self.memory_limit.unwrap_or_else(|| self.memory_tier.max_bytes())
+        self.memory_limit
+            .unwrap_or_else(|| self.memory_tier.max_bytes())
     }
 
     pub fn with_port(mut self, port: u16) -> Self {
@@ -247,7 +252,10 @@ fn load_runtime_loader_js() -> String {
             content
         }
         Err(_) => {
-            info!("frame.ui plugin loader not found at {}; using embedded stub", plugin_path);
+            info!(
+                "frame.ui plugin loader not found at {}; using embedded stub",
+                plugin_path
+            );
             LOADER_JS.to_string()
         }
     }
@@ -461,7 +469,11 @@ pub async fn start_server(wasm_path: PathBuf, mut config: ServerConfig) -> Runti
     }
 
     // Collect static dirs registered during initialization
-    let mut static_dirs = wasm.static_dirs().read().expect("store lock poisoned").clone();
+    let mut static_dirs = wasm
+        .static_dirs()
+        .read()
+        .expect("store lock poisoned")
+        .clone();
 
     // Auto-mount ./public/ at /public if the directory exists and not already registered
     if std::path::Path::new("public").is_dir()
@@ -553,13 +565,24 @@ pub async fn start_server(wasm_path: PathBuf, mut config: ServerConfig) -> Runti
     crate::websocket::start_heartbeat_task(ws_state.clone(), wasm.clone());
 
     // Start the background job worker loop (polls every second for due jobs).
-    crate::jobs::start_worker_loop(wasm.jobs_state.clone(), wasm.clone(), Some(wasm.db_bridge().clone()));
+    crate::jobs::start_worker_loop(
+        wasm.jobs_state.clone(),
+        wasm.clone(),
+        Some(wasm.db_bridge().clone()),
+    );
 
     // Start the cron scheduler monitor (spawns per-schedule tasks as registered).
     crate::jobs::start_cron_scheduler(wasm.jobs_state.clone(), wasm.clone());
 
     // Create app state
-    let state = AppState::new(wasm, router, islands_store, loader_js, frontend_wasm_path, ws_state);
+    let state = AppState::new(
+        wasm,
+        router,
+        islands_store,
+        loader_js,
+        frontend_wasm_path,
+        ws_state,
+    );
 
     // Build Axum router
     let app = build_router(
@@ -605,7 +628,10 @@ fn build_router(
 
     let mut app = Router::new()
         // Built-in islands routes — registered before the fallback so they always take priority
-        .route("/islands-manifest.json", axum::routing::get(serve_islands_manifest))
+        .route(
+            "/islands-manifest.json",
+            axum::routing::get(serve_islands_manifest),
+        )
         .route("/loader.js", axum::routing::get(serve_loader_js))
         .route("/frontend.wasm", axum::routing::get(serve_frontend_wasm));
 
@@ -687,12 +713,12 @@ fn build_router(
 fn build_cors_layer(cfg: &CorsConfig) -> CorsLayer {
     use axum::http::{HeaderName, HeaderValue, Method as AxumMethod};
 
-    let allow_any_origin = cfg.allowed_origins.is_empty()
-        || cfg.allowed_origins.iter().any(|o| o.trim() == "*");
-    let allow_any_methods = cfg.allowed_methods.is_empty()
-        || cfg.allowed_methods.iter().any(|m| m.trim() == "*");
-    let allow_any_headers = cfg.allowed_headers.is_empty()
-        || cfg.allowed_headers.iter().any(|h| h.trim() == "*");
+    let allow_any_origin =
+        cfg.allowed_origins.is_empty() || cfg.allowed_origins.iter().any(|o| o.trim() == "*");
+    let allow_any_methods =
+        cfg.allowed_methods.is_empty() || cfg.allowed_methods.iter().any(|m| m.trim() == "*");
+    let allow_any_headers =
+        cfg.allowed_headers.is_empty() || cfg.allowed_headers.iter().any(|h| h.trim() == "*");
 
     let mut layer = CorsLayer::new();
 
@@ -769,7 +795,9 @@ async fn serve_islands_manifest(State(state): State<AppState>) -> Response {
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"error":"Failed to generate islands manifest"}"#))
+                .body(Body::from(
+                    r#"{"error":"Failed to generate islands manifest"}"#,
+                ))
                 .expect("response builder")
         }
     }
@@ -918,7 +946,10 @@ async fn handle_request(
 
     debug!(
         "Matched route: {} {} -> handler {} (extracted {} params)",
-        route_handler.method, route_handler.path, route_handler.handler_name, params.len()
+        route_handler.method,
+        route_handler.path,
+        route_handler.handler_name,
+        params.len()
     );
     debug!("Extracted route params: {:?}", params);
 
@@ -948,7 +979,10 @@ async fn handle_request(
                 debug!(
                     "Route requires role '{}' but user has '{}'",
                     required_role,
-                    auth_context.as_ref().map(|c| c.role.as_str()).unwrap_or("none")
+                    auth_context
+                        .as_ref()
+                        .map(|c| c.role.as_str())
+                        .unwrap_or("none")
                 );
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
@@ -976,7 +1010,10 @@ async fn handle_request(
         .collect();
 
     // Create request context
-    debug!("handle_request: Creating RequestContext with params: {:?}", params);
+    debug!(
+        "handle_request: Creating RequestContext with params: {:?}",
+        params
+    );
     let request_ctx = RequestContext {
         method: method.to_string(),
         path: path.to_string(),
@@ -985,11 +1022,17 @@ async fn handle_request(
         params,
         query: query_params,
     };
-    debug!("handle_request: RequestContext params: {:?}", request_ctx.params);
+    debug!(
+        "handle_request: RequestContext params: {:?}",
+        request_ctx.params
+    );
 
     // Static redirect routes: registered via _http_redirect_route, no WASM handler needed.
     if let Some((to_path, status_code)) = &route_handler.redirect_destination {
-        debug!("Static redirect: {} -> {} ({})", request_ctx.path, to_path, status_code);
+        debug!(
+            "Static redirect: {} -> {} ({})",
+            request_ctx.path, to_path, status_code
+        );
         return Response::builder()
             .status(StatusCode::from_u16(*status_code).unwrap_or(StatusCode::FOUND))
             .header(header::LOCATION, to_path.as_str())
@@ -1015,7 +1058,10 @@ async fn handle_request(
                     "WebSocket route {} is registered but has no handlers in ws_state",
                     route_handler.path
                 );
-                return (StatusCode::INTERNAL_SERVER_ERROR, "WebSocket route misconfigured")
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "WebSocket route misconfigured",
+                )
                     .into_response();
             }
         };
@@ -1081,9 +1127,7 @@ async fn handle_request(
         .read()
         .global_error_handler
         .clone();
-    let err_ctx_clone = global_error_handler
-        .as_ref()
-        .map(|_| request_ctx.clone());
+    let err_ctx_clone = global_error_handler.as_ref().map(|_| request_ctx.clone());
     let err_auth_clone = global_error_handler.as_ref().map(|_| auth_context.clone());
 
     // Call WASM handler with auth context
@@ -1142,9 +1186,7 @@ async fn handle_request(
 
 /// Translate a WASM `HandlerResponse` into an axum `Response`. Used for both
 /// the normal-path response and the global-error-handler response.
-fn handler_response_to_axum_response(
-    handler_response: crate::wasm::HandlerResponse,
-) -> Response {
+fn handler_response_to_axum_response(handler_response: crate::wasm::HandlerResponse) -> Response {
     debug!("Handler returned: {} bytes", handler_response.body.len());
 
     if let Some((status_code, redirect_url)) = handler_response.redirect {
@@ -1173,7 +1215,9 @@ fn handler_response_to_axum_response(
     let content_type = explicit_content_type.as_deref().unwrap_or_else(|| {
         if handler_response.body.starts_with('{') || handler_response.body.starts_with('[') {
             "application/json"
-        } else if handler_response.body.starts_with("<!") || handler_response.body.starts_with("<html") {
+        } else if handler_response.body.starts_with("<!")
+            || handler_response.body.starts_with("<html")
+        {
             "text/html; charset=utf-8"
         } else {
             "text/plain; charset=utf-8"
@@ -1201,10 +1245,7 @@ fn handler_response_to_axum_response(
         }
     }
 
-    let body = inject_head_tags(
-        handler_response.body,
-        handler_response.head_links,
-    );
+    let body = inject_head_tags(handler_response.body, handler_response.head_links);
 
     builder.body(Body::from(body)).expect("response builder")
 }
@@ -1221,7 +1262,8 @@ fn extract_auth_from_headers(
         let cookies = parse_cookies(cookie_str);
 
         // Try common session cookie names
-        let session_id = cookies.get("session")
+        let session_id = cookies
+            .get("session")
             .or_else(|| cookies.get("todo.sid"))
             .or_else(|| cookies.get("sid"));
 
@@ -1229,7 +1271,10 @@ fn extract_auth_from_headers(
             // Look up session
             let mut store = session_store.write().expect("store lock poisoned");
             if let Some(session) = store.get(session_id) {
-                debug!("Found valid session {} for user {}", session.session_id, session.user_id);
+                debug!(
+                    "Found valid session {} for user {}",
+                    session.session_id, session.user_id
+                );
                 return Some(AuthContext {
                     user_id: session.user_id,
                     role: session.role,
@@ -1246,7 +1291,10 @@ fn extract_auth_from_headers(
     {
         // For now, just log that we received a token
         // Full JWT validation would go here
-        debug!("Received Bearer token: {}...", &token[..token.len().min(10)]);
+        debug!(
+            "Received Bearer token: {}...",
+            &token[..token.len().min(10)]
+        );
         // JWT validation would return AuthContext here
     }
 
@@ -1357,8 +1405,7 @@ mod tests {
         let css_path = dir.path().join("theme.css");
         std::fs::write(&css_path, b":root{--c:0}").unwrap();
 
-        let response =
-            serve_manifest_artifact(css_path.clone(), "text/css".to_string()).await;
+        let response = serve_manifest_artifact(css_path.clone(), "text/css".to_string()).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1377,8 +1424,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.css");
 
-        let response =
-            serve_manifest_artifact(missing.clone(), "text/css".to_string()).await;
+        let response = serve_manifest_artifact(missing.clone(), "text/css".to_string()).await;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }

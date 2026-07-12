@@ -91,7 +91,9 @@ pub fn current_job_attempt() -> i32 {
 /// Request a retry after the specified delay in milliseconds (called from inside a handler).
 /// Overrides the computed backoff for this attempt.
 pub fn request_retry_after_ms(delay_ms: i64) {
-    JOB_RETRY_OVERRIDE_MS.try_with(|cell| cell.set(delay_ms)).ok();
+    JOB_RETRY_OVERRIDE_MS
+        .try_with(|cell| cell.set(delay_ms))
+        .ok();
 }
 
 /// Mark the current job as explicitly failed (called from inside a handler via `_job_fail`).
@@ -185,22 +187,22 @@ pub enum JobStatus {
 impl JobStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            JobStatus::Pending   => "pending",
-            JobStatus::Running   => "running",
+            JobStatus::Pending => "pending",
+            JobStatus::Running => "running",
             JobStatus::Succeeded => "succeeded",
-            JobStatus::Failed    => "failed",
+            JobStatus::Failed => "failed",
             JobStatus::Cancelled => "cancelled",
         }
     }
 
     pub fn parse_status(s: &str) -> Option<Self> {
         match s {
-            "pending"   => Some(JobStatus::Pending),
-            "running"   => Some(JobStatus::Running),
+            "pending" => Some(JobStatus::Pending),
+            "running" => Some(JobStatus::Running),
             "succeeded" => Some(JobStatus::Succeeded),
-            "failed"    => Some(JobStatus::Failed),
+            "failed" => Some(JobStatus::Failed),
             "cancelled" => Some(JobStatus::Cancelled),
-            _           => None,
+            _ => None,
         }
     }
 }
@@ -270,7 +272,6 @@ pub struct CronSchedule {
 /// Records with `finished_at_ms < now - JOBS_RETENTION_DAYS * 86_400_000`
 /// are deleted at startup.
 const JOBS_RETENTION_DAYS: u64 = 7;
-
 
 /// Ensure the `__clean_jobs` table and index exist.
 pub async fn ensure_jobs_table(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
@@ -478,7 +479,10 @@ pub async fn init_persistence(state: &SharedJobsState, retention_days: u64) {
     // 2. Delete stale finished rows.
     match db_cleanup_old_jobs(&pool, retention_days).await {
         Ok(0) => debug!("jobs: no stale records to clean up"),
-        Ok(n) => info!("jobs: cleaned up {} finished job record(s) older than {}d", n, retention_days),
+        Ok(n) => info!(
+            "jobs: cleaned up {} finished job record(s) older than {}d",
+            n, retention_days
+        ),
         Err(e) => warn!("jobs: cleanup of old records failed: {}", e),
     }
 
@@ -491,7 +495,21 @@ pub async fn init_persistence(state: &SharedJobsState, retention_days: u64) {
 /// `running` rows are reset to `pending` (the handler that was executing
 /// was cut short by the process kill and must be retried).
 async fn recover_from_disk(state: &SharedJobsState, pool: &sqlx::SqlitePool) {
-    let rows = sqlx::query_as::<_, (String, String, String, String, i64, i64, Option<String>, Option<String>, String, i64)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+        ),
+    >(
         "SELECT id, name, args_json, status, attempt, scheduled_at_ms,
                 result_json, error_message, queue, created_at_ms
          FROM __clean_jobs
@@ -512,7 +530,19 @@ async fn recover_from_disk(state: &SharedJobsState, pool: &sqlx::SqlitePool) {
     let mut reset_count = 0usize;
 
     let mut store = state.lock().await;
-    for (id, name, args, status_str, attempt, scheduled_at_ms, result_json, error_msg, queue, created_at_ms) in rows {
+    for (
+        id,
+        name,
+        args,
+        status_str,
+        attempt,
+        scheduled_at_ms,
+        result_json,
+        error_msg,
+        queue,
+        created_at_ms,
+    ) in rows
+    {
         let was_running = status_str == "running";
         let status = if was_running {
             reset_count += 1;
@@ -527,7 +557,7 @@ async fn recover_from_disk(state: &SharedJobsState, pool: &sqlx::SqlitePool) {
             args,
             status,
             attempt: attempt as u32,
-            max_attempts: 3,      // default; will be overwritten when the job config is re-registered
+            max_attempts: 3, // default; will be overwritten when the job config is re-registered
             backoff: BackoffStrategy::Fixed,
             delay_ms: 1000,
             timeout_ms: 0,
@@ -549,13 +579,15 @@ async fn recover_from_disk(state: &SharedJobsState, pool: &sqlx::SqlitePool) {
         let pool_clone = pool.clone();
         drop(store); // release lock before async work
 
-        if let Err(e) = sqlx::query(
-            "UPDATE __clean_jobs SET status = 'pending' WHERE status = 'running'",
-        )
-        .execute(&pool_clone)
-        .await
+        if let Err(e) =
+            sqlx::query("UPDATE __clean_jobs SET status = 'pending' WHERE status = 'running'")
+                .execute(&pool_clone)
+                .await
         {
-            warn!("jobs: failed to reset orphaned running rows to pending: {}", e);
+            warn!(
+                "jobs: failed to reset orphaned running rows to pending: {}",
+                e
+            );
         }
     } else {
         drop(store);
@@ -700,9 +732,10 @@ pub async fn enqueue_job_at(
 
     // Write-through to SQLite outside the lock.
     if let Some(ref p) = pool
-        && let Err(e) = db_insert_job(p, &record).await {
-            warn!("jobs: failed to persist enqueued job {}: {}", record.id, e);
-        }
+        && let Err(e) = db_insert_job(p, &record).await
+    {
+        warn!("jobs: failed to persist enqueued job {}: {}", record.id, e);
+    }
 
     debug!(
         "job.enqueue: enqueued '{}' as {} (scheduled_at={})",
@@ -737,9 +770,10 @@ pub async fn cancel_job(state: &SharedJobsState, job_id: &str) -> bool {
     if was_pending {
         debug!("job.cancel: {} cancelled", job_id);
         if let Some((record, Some(ref p))) = updated_opt
-            && let Err(e) = db_update_job(p, &record).await {
-                warn!("jobs: failed to persist cancellation of {}: {}", job_id, e);
-            }
+            && let Err(e) = db_update_job(p, &record).await
+        {
+            warn!("jobs: failed to persist cancellation of {}: {}", job_id, e);
+        }
         // Evict the terminal record from memory to keep the cache lean.
         state.lock().await.records.remove(job_id);
         return true;
@@ -792,8 +826,8 @@ pub async fn job_result(state: &SharedJobsState, job_id: &str) -> String {
         let store = state.lock().await;
         let cached = store.records.get(job_id).map(|r| match r.status {
             JobStatus::Succeeded => r.result.clone().unwrap_or_default(),
-            JobStatus::Failed    => r.error.clone().unwrap_or_default(),
-            _                    => String::new(),
+            JobStatus::Failed => r.error.clone().unwrap_or_default(),
+            _ => String::new(),
         });
         (cached, store.sqlite_pool.clone())
     };
@@ -808,8 +842,8 @@ pub async fn job_result(state: &SharedJobsState, job_id: &str) -> String {
             Ok(Some((status, result_json, error_msg))) => {
                 return match status.as_str() {
                     "succeeded" => result_json.unwrap_or_default(),
-                    "failed"    => error_msg.unwrap_or_default(),
-                    _           => String::new(),
+                    "failed" => error_msg.unwrap_or_default(),
+                    _ => String::new(),
                 };
             }
             Ok(None) => {}
@@ -885,9 +919,9 @@ enum CronField {
 impl CronField {
     fn matches(&self, value: u32) -> bool {
         match self {
-            CronField::Star         => true,
-            CronField::Step(n)      => *n > 0 && value.is_multiple_of(*n),
-            CronField::List(vals)   => vals.contains(&value),
+            CronField::Star => true,
+            CronField::Step(n) => *n > 0 && value.is_multiple_of(*n),
+            CronField::List(vals) => vals.contains(&value),
         }
     }
 
@@ -897,7 +931,9 @@ impl CronField {
         }
         if let Some(step_str) = s.strip_prefix("*/") {
             let n: u32 = step_str.parse().ok()?;
-            if n == 0 { return None; }
+            if n == 0 {
+                return None;
+            }
             return Some(CronField::Step(n));
         }
         // Comma-separated list of values and/or ranges.
@@ -906,7 +942,9 @@ impl CronField {
             if let Some((start_s, end_s)) = part.split_once('-') {
                 let a: u32 = start_s.trim().parse().ok()?;
                 let b: u32 = end_s.trim().parse().ok()?;
-                if a > b { return None; }
+                if a > b {
+                    return None;
+                }
                 for v in a..=b {
                     values.push(v);
                 }
@@ -915,18 +953,20 @@ impl CronField {
                 values.push(v);
             }
         }
-        if values.is_empty() { return None; }
+        if values.is_empty() {
+            return None;
+        }
         Some(CronField::List(values))
     }
 }
 
 /// Parsed 5-field cron expression.
 struct CronFields {
-    minute: CronField,   // 0–59
-    hour:   CronField,   // 0–23
-    dom:    CronField,   // 1–31
-    month:  CronField,   // 1–12
-    dow:    CronField,   // 0–6 (Sunday=0)
+    minute: CronField, // 0–59
+    hour: CronField,   // 0–23
+    dom: CronField,    // 1–31
+    month: CronField,  // 1–12
+    dow: CronField,    // 0–6 (Sunday=0)
 }
 
 fn parse_cron_fields(expr: &str) -> Option<CronFields> {
@@ -936,10 +976,10 @@ fn parse_cron_fields(expr: &str) -> Option<CronFields> {
     }
     Some(CronFields {
         minute: CronField::parse(parts[0])?,
-        hour:   CronField::parse(parts[1])?,
-        dom:    CronField::parse(parts[2])?,
-        month:  CronField::parse(parts[3])?,
-        dow:    CronField::parse(parts[4])?,
+        hour: CronField::parse(parts[1])?,
+        dom: CronField::parse(parts[2])?,
+        month: CronField::parse(parts[3])?,
+        dow: CronField::parse(parts[4])?,
     })
 }
 
@@ -955,15 +995,13 @@ pub fn next_cron_tick(expr: &str) -> Option<Duration> {
     let now = Utc::now();
 
     // Start from the next whole minute.
-    let base = now
-        .with_second(0)
-        .and_then(|t| t.with_nanosecond(0))?;
+    let base = now.with_second(0).and_then(|t| t.with_nanosecond(0))?;
     let mut candidate = base + chrono::Duration::minutes(1);
 
     for _ in 0..(366 * 24 * 60) {
-        let m  = candidate.minute();
-        let h  = candidate.hour();
-        let d  = candidate.day();
+        let m = candidate.minute();
+        let h = candidate.hour();
+        let d = candidate.day();
         let mo = candidate.month();
         let wd = candidate.weekday().num_days_from_sunday();
 
@@ -1079,9 +1117,13 @@ pub fn start_worker_loop(
                 if let Some(ref p) = pool {
                     let updated = state.lock().await.records.get(&job.id).cloned();
                     if let Some(ref r) = updated
-                        && let Err(e) = db_update_job(p, r).await {
-                            warn!("jobs: failed to persist running status for {}: {}", job.id, e);
-                        }
+                        && let Err(e) = db_update_job(p, r).await
+                    {
+                        warn!(
+                            "jobs: failed to persist running status for {}: {}",
+                            job.id, e
+                        );
+                    }
                 }
 
                 let attempt = state
@@ -1122,11 +1164,16 @@ pub fn start_worker_loop(
                                                             path: String::new(),
                                                             headers: Vec::new(),
                                                             body: String::new(),
-                                                            params: std::collections::HashMap::new(),
+                                                            params: std::collections::HashMap::new(
+                                                            ),
                                                             query: std::collections::HashMap::new(),
                                                         };
                                                         let handler_result = wasm_clone
-                                                            .call_handler_job(&handler_name, req, None);
+                                                            .call_handler_job(
+                                                                &handler_name,
+                                                                req,
+                                                                None,
+                                                            );
 
                                                         let retry_override = JOB_RETRY_OVERRIDE_MS
                                                             .try_with(|c| c.get())
@@ -1274,11 +1321,7 @@ async fn apply_outcome(
 ///
 /// Eviction is safe because `job_status` and `job_result` fall back to the DB
 /// when the id is absent from the cache.
-async fn persist_and_evict(
-    state: &SharedJobsState,
-    pool: &sqlx::SqlitePool,
-    record: JobRecord,
-) {
+async fn persist_and_evict(state: &SharedJobsState, pool: &sqlx::SqlitePool, record: JobRecord) {
     if let Err(e) = db_update_job(pool, &record).await {
         warn!(
             "jobs: failed to persist terminal status for {}: {}",
@@ -1290,12 +1333,7 @@ async fn persist_and_evict(
 }
 
 /// Apply failure logic: retry if attempts remain, otherwise mark permanently failed.
-async fn apply_failure(
-    state: &SharedJobsState,
-    job: &JobRecord,
-    attempt: u32,
-    err_msg: String,
-) {
+async fn apply_failure(state: &SharedJobsState, job: &JobRecord, attempt: u32, err_msg: String) {
     apply_failure_with_retry_override(state, job, attempt, err_msg, -1).await;
 }
 
@@ -1335,9 +1373,13 @@ async fn apply_failure_with_retry_override(
         );
 
         if let (Some(r), Some(p)) = (updated, pool)
-            && let Err(e) = db_update_job(&p, &r).await {
-                warn!("jobs: failed to persist retry schedule for {}: {}", job.id, e);
-            }
+            && let Err(e) = db_update_job(&p, &r).await
+        {
+            warn!(
+                "jobs: failed to persist retry schedule for {}: {}",
+                job.id, e
+            );
+        }
     } else {
         let (updated, pool) = {
             let mut store = state.lock().await;
@@ -1451,14 +1493,14 @@ pub fn start_cron_scheduler(state: SharedJobsState, wasm: Arc<WasmInstance>) {
                             .unwrap_or(false);
 
                         if !still_active {
-                            info!("cron '{}': cancelled during sleep, task exiting", sched.name);
+                            info!(
+                                "cron '{}': cancelled during sleep, task exiting",
+                                sched.name
+                            );
                             break;
                         }
 
-                        info!(
-                            "cron '{}': firing handler '{}'",
-                            sched.name, sched.handler
-                        );
+                        info!("cron '{}': firing handler '{}'", sched.name, sched.handler);
 
                         let wasm_fire = wasm_clone.clone();
                         let h_name = sched.handler.clone();
@@ -1526,7 +1568,10 @@ mod tests {
         )
         .await;
 
-        assert!(!id.is_empty(), "enqueue should return a non-empty UUID job ID");
+        assert!(
+            !id.is_empty(),
+            "enqueue should return a non-empty UUID job ID"
+        );
 
         let status = job_status(&state, &id).await;
         assert_eq!(status, "pending");
@@ -1567,7 +1612,8 @@ mod tests {
         let status = job_status(&state, &id).await;
         assert!(
             status == "cancelled" || status == "not_found",
-            "expected cancelled or not_found, got {}", status
+            "expected cancelled or not_found, got {}",
+            status
         );
 
         // Second cancel should return false regardless.
@@ -1647,16 +1693,22 @@ mod tests {
     #[test]
     fn test_backoff_exponential() {
         let b = BackoffStrategy::Exponential;
-        assert_eq!(b.compute_delay(1000, 1), 1000);  // 1000 * 2^0
-        assert_eq!(b.compute_delay(1000, 2), 2000);  // 1000 * 2^1
-        assert_eq!(b.compute_delay(1000, 3), 4000);  // 1000 * 2^2
-        assert_eq!(b.compute_delay(1000, 4), 8000);  // 1000 * 2^3
+        assert_eq!(b.compute_delay(1000, 1), 1000); // 1000 * 2^0
+        assert_eq!(b.compute_delay(1000, 2), 2000); // 1000 * 2^1
+        assert_eq!(b.compute_delay(1000, 3), 4000); // 1000 * 2^2
+        assert_eq!(b.compute_delay(1000, 4), 8000); // 1000 * 2^3
     }
 
     #[test]
     fn test_backoff_strategy_parse() {
-        assert_eq!(BackoffStrategy::parse("exponential"), BackoffStrategy::Exponential);
-        assert_eq!(BackoffStrategy::parse("EXPONENTIAL"), BackoffStrategy::Exponential);
+        assert_eq!(
+            BackoffStrategy::parse("exponential"),
+            BackoffStrategy::Exponential
+        );
+        assert_eq!(
+            BackoffStrategy::parse("EXPONENTIAL"),
+            BackoffStrategy::Exponential
+        );
         assert_eq!(BackoffStrategy::parse("fixed"), BackoffStrategy::Fixed);
         assert_eq!(BackoffStrategy::parse("linear"), BackoffStrategy::Fixed);
         assert_eq!(BackoffStrategy::parse("unknown"), BackoffStrategy::Fixed);
@@ -1675,9 +1727,9 @@ mod tests {
     #[test]
     fn test_cron_validation_invalid() {
         assert!(!is_valid_cron("invalid"));
-        assert!(!is_valid_cron("* * * *"));       // too few fields
-        assert!(!is_valid_cron("* * * * * *"));   // too many fields
-        assert!(!is_valid_cron("*/0 * * * *"));   // zero step
+        assert!(!is_valid_cron("* * * *")); // too few fields
+        assert!(!is_valid_cron("* * * * * *")); // too many fields
+        assert!(!is_valid_cron("*/0 * * * *")); // zero step
         assert!(!is_valid_cron(""));
     }
 
@@ -1723,20 +1775,26 @@ mod tests {
 
     #[test]
     fn test_status_strings() {
-        assert_eq!(JobStatus::Pending.as_str(),   "pending");
-        assert_eq!(JobStatus::Running.as_str(),   "running");
+        assert_eq!(JobStatus::Pending.as_str(), "pending");
+        assert_eq!(JobStatus::Running.as_str(), "running");
         assert_eq!(JobStatus::Succeeded.as_str(), "succeeded");
-        assert_eq!(JobStatus::Failed.as_str(),    "failed");
+        assert_eq!(JobStatus::Failed.as_str(), "failed");
         assert_eq!(JobStatus::Cancelled.as_str(), "cancelled");
     }
 
     #[test]
     fn test_status_from_str() {
-        assert_eq!(JobStatus::parse_status("pending"),   Some(JobStatus::Pending));
-        assert_eq!(JobStatus::parse_status("running"),   Some(JobStatus::Running));
-        assert_eq!(JobStatus::parse_status("succeeded"), Some(JobStatus::Succeeded));
-        assert_eq!(JobStatus::parse_status("failed"),    Some(JobStatus::Failed));
-        assert_eq!(JobStatus::parse_status("cancelled"), Some(JobStatus::Cancelled));
-        assert_eq!(JobStatus::parse_status("unknown"),   None);
+        assert_eq!(JobStatus::parse_status("pending"), Some(JobStatus::Pending));
+        assert_eq!(JobStatus::parse_status("running"), Some(JobStatus::Running));
+        assert_eq!(
+            JobStatus::parse_status("succeeded"),
+            Some(JobStatus::Succeeded)
+        );
+        assert_eq!(JobStatus::parse_status("failed"), Some(JobStatus::Failed));
+        assert_eq!(
+            JobStatus::parse_status("cancelled"),
+            Some(JobStatus::Cancelled)
+        );
+        assert_eq!(JobStatus::parse_status("unknown"), None);
     }
 }

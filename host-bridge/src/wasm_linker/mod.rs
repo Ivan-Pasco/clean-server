@@ -27,19 +27,19 @@
 //! ### Memory Runtime
 //! - mem_alloc, mem_retain, mem_release, mem_scope_push, mem_scope_pop
 
-mod state;
-mod console;
-mod math;
-mod string_ops;
-mod memory;
-mod helpers;
-mod database;
-mod file_io;
-mod http_client;
-mod crypto_funcs;
-mod env_time;
-mod list_funcs;
 mod array_funcs;
+mod console;
+mod crypto_funcs;
+mod database;
+mod env_time;
+mod file_io;
+mod helpers;
+mod http_client;
+mod list_funcs;
+mod math;
+mod memory;
+mod state;
+mod string_ops;
 
 pub use array_funcs::reset_array_store;
 pub use list_funcs::reset_list_store;
@@ -48,11 +48,13 @@ pub use list_funcs::reset_list_store;
 // See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
 
 // Re-export core types
-pub use state::{WasmState, WasmStateCore, WasmMemory, RequestContext, AuthContext, SharedDbBridge, HttpResponseBuilder};
 pub use helpers::{
-    read_string_from_caller, write_string_to_caller,
-    read_raw_string, write_bytes_to_caller,
-    read_length_prefixed_bytes, read_raw_bytes, STRING_LENGTH_PREFIX_SIZE
+    read_length_prefixed_bytes, read_raw_bytes, read_raw_string, read_string_from_caller,
+    write_bytes_to_caller, write_string_to_caller, STRING_LENGTH_PREFIX_SIZE,
+};
+pub use state::{
+    AuthContext, HttpResponseBuilder, RequestContext, SharedDbBridge, WasmMemory, WasmState,
+    WasmStateCore,
 };
 
 use crate::error::BridgeResult;
@@ -88,11 +90,8 @@ macro_rules! register_bridge_fn {
         let _stripped: &str = $name.trim_start_matches('_');
         if $name.starts_with('_') && !$name.starts_with("__") {
             if let Some(_dot_idx) = _stripped.find('_') {
-                let _dot_name = format!(
-                    "{}.{}",
-                    &_stripped[.._dot_idx],
-                    &_stripped[_dot_idx + 1..]
-                );
+                let _dot_name =
+                    format!("{}.{}", &_stripped[.._dot_idx], &_stripped[_dot_idx + 1..]);
                 $linker.alias($env, $name, $env, &_dot_name)?;
             }
         }
@@ -166,76 +165,76 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
     const ALIASES: &[(&str, &str)] = &[
         // HTML interpolation helpers (string_ops module)
         ("_html_escape", "html.escape"),
-        ("_html_raw",    "html.raw"),
+        ("_html_raw", "html.raw"),
         // Database (database module)
-        ("_db_query",               "db.query"),
-        ("_db_execute",             "db.execute"),
-        ("_db_begin",               "db.begin"),
-        ("_db_commit",              "db.commit"),
-        ("_db_rollback",            "db.rollback"),
-        ("_db_register_migration",  "db.register_migration"),
-        ("_db_configure",           "db.configure"),
-        ("_db_paginate",            "db.paginate"),
-        ("_db_cursor_page",         "db.cursorPage"),
-        ("_db_migration_diff",      "db.migration_diff"),
-        ("_db_migration_status",    "db.migration_status"),
-        ("_db_rollback_migration",  "db.rollback_migration"),
-        ("_db_run_migrations",      "db.run_migrations"),
-        ("_db_valid_field",         "db.valid_field"),
+        ("_db_query", "db.query"),
+        ("_db_execute", "db.execute"),
+        ("_db_begin", "db.begin"),
+        ("_db_commit", "db.commit"),
+        ("_db_rollback", "db.rollback"),
+        ("_db_register_migration", "db.register_migration"),
+        ("_db_configure", "db.configure"),
+        ("_db_paginate", "db.paginate"),
+        ("_db_cursor_page", "db.cursorPage"),
+        ("_db_migration_diff", "db.migration_diff"),
+        ("_db_migration_status", "db.migration_status"),
+        ("_db_rollback_migration", "db.rollback_migration"),
+        ("_db_run_migrations", "db.run_migrations"),
+        ("_db_valid_field", "db.valid_field"),
         // Crypto (crypto_funcs module)
-        ("_crypto_hash_password",   "crypto.hash_password"),
+        ("_crypto_hash_password", "crypto.hash_password"),
         ("_crypto_verify_password", "crypto.verify_password"),
-        ("_crypto_random_bytes",    "crypto.random_bytes"),
-        ("_crypto_random_hex",      "crypto.random_hex"),
-        ("_crypto_hash_sha256",     "crypto.hash_sha256"),
-        ("_crypto_hash_sha512",     "crypto.hash_sha512"),
-        ("_crypto_hmac",            "crypto.hmac"),
+        ("_crypto_random_bytes", "crypto.random_bytes"),
+        ("_crypto_random_hex", "crypto.random_hex"),
+        ("_crypto_hash_sha256", "crypto.hash_sha256"),
+        ("_crypto_hash_sha512", "crypto.hash_sha512"),
+        ("_crypto_hmac", "crypto.hmac"),
         // Crypto extras (Phase 2)
-        ("_crypto_uuid",            "crypto.uuid"),
-        ("_crypto_hash_md5",        "crypto.hash_md5"),
-        ("_crypto_hmac_sha256",     "crypto.hmac_sha256"),
-        ("_crypto_random_base64",   "crypto.random_base64"),
-        ("_crypto_base64_encode",   "crypto.base64_encode"),
-        ("_crypto_base64_decode",   "crypto.base64_decode"),
-        ("_crypto_encrypt_aes",     "crypto.encrypt_aes"),
-        ("_crypto_decrypt_aes",     "crypto.decrypt_aes"),
+        ("_crypto_uuid", "crypto.uuid"),
+        ("_crypto_hash_md5", "crypto.hash_md5"),
+        ("_crypto_hmac_sha256", "crypto.hmac_sha256"),
+        ("_crypto_random_base64", "crypto.random_base64"),
+        ("_crypto_base64_encode", "crypto.base64_encode"),
+        ("_crypto_base64_decode", "crypto.base64_decode"),
+        ("_crypto_encrypt_aes", "crypto.encrypt_aes"),
+        ("_crypto_decrypt_aes", "crypto.decrypt_aes"),
         // JWT (crypto_funcs module)
-        ("_jwt_sign",   "jwt.sign"),
+        ("_jwt_sign", "jwt.sign"),
         ("_jwt_verify", "jwt.verify"),
         ("_jwt_decode", "jwt.decode"),
         // Environment and time (env_time module)
-        ("_env_get",  "env.get"),
+        ("_env_get", "env.get"),
         ("_time_now", "time.now"),
         // Env extras (Phase 2)
-        ("_env_has",            "env.has"),
-        ("_env_all",            "env.all"),
-        ("_env_node_env",       "env.node_env"),
-        ("_env_is_production",  "env.is_production"),
+        ("_env_has", "env.has"),
+        ("_env_all", "env.all"),
+        ("_env_node_env", "env.node_env"),
+        ("_env_is_production", "env.is_production"),
         ("_env_is_development", "env.is_development"),
         // Time extras (Phase 2)
-        ("_time_epoch_ms",         "time.epoch_ms"),
-        ("_time_epoch_sec",        "time.epoch_sec"),
-        ("_time_iso",              "time.iso"),
-        ("_time_format_iso",       "time.format_iso"),
-        ("_time_parse_iso",        "time.parse_iso"),
-        ("_time_components",       "time.components"),
-        ("_time_from_components",  "time.from_components"),
-        ("_time_add",              "time.add"),
-        ("_time_diff",             "time.diff"),
-        ("_time_format_locale",    "time.format_locale"),
-        ("_time_timezone_offset",  "time.timezone_offset"),
-        ("_time_is_past",          "time.is_past"),
-        ("_time_is_future",        "time.is_future"),
-        ("_time_sleep",            "time.sleep"),
+        ("_time_epoch_ms", "time.epoch_ms"),
+        ("_time_epoch_sec", "time.epoch_sec"),
+        ("_time_iso", "time.iso"),
+        ("_time_format_iso", "time.format_iso"),
+        ("_time_parse_iso", "time.parse_iso"),
+        ("_time_components", "time.components"),
+        ("_time_from_components", "time.from_components"),
+        ("_time_add", "time.add"),
+        ("_time_diff", "time.diff"),
+        ("_time_format_locale", "time.format_locale"),
+        ("_time_timezone_offset", "time.timezone_offset"),
+        ("_time_is_past", "time.is_past"),
+        ("_time_is_future", "time.is_future"),
+        ("_time_sleep", "time.sleep"),
         // DB async extras (Phase 2)
-        ("_db_connected",       "db.connected"),
-        ("_db_query_async",     "db.query_async"),
-        ("_db_query_result",    "db.query_result"),
-        ("_db_execute_async",   "db.execute_async"),
-        ("_db_execute_result",  "db.execute_result"),
+        ("_db_connected", "db.connected"),
+        ("_db_query_async", "db.query_async"),
+        ("_db_query_result", "db.query_result"),
+        ("_db_execute_async", "db.execute_async"),
+        ("_db_execute_result", "db.execute_result"),
         // HTTP _-prefixed aliases (registry declares both forms)
-        ("http_put_with_headers",    "_http_put_with_headers"),
-        ("http_patch_with_headers",  "_http_patch_with_headers"),
+        ("http_put_with_headers", "_http_put_with_headers"),
+        ("http_patch_with_headers", "_http_patch_with_headers"),
         ("http_delete_with_headers", "_http_delete_with_headers"),
     ];
 
@@ -329,7 +328,7 @@ mod tests {
         match t {
             "void" => None,
             "ptr" => Some("i32"),
-            "string" => Some("i32"),  // string return = ptr to length-prefixed string
+            "string" => Some("i32"), // string return = ptr to length-prefixed string
             "i32" => Some("i32"),
             "i64" => Some("i64"),
             "boolean" => Some("i32"),
@@ -343,9 +342,7 @@ mod tests {
     fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
         let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
 
-        let wasm_params: Vec<&str> = params.iter()
-            .flat_map(|t| expand_param_type(t))
-            .collect();
+        let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
 
         if !wasm_params.is_empty() {
             import.push_str(" (param");
@@ -378,14 +375,15 @@ mod tests {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let registry_path = std::path::Path::new(manifest_dir)
             .join("../../foundation/platform-architecture/function-registry.toml");
-        let toml_str = std::fs::read_to_string(&registry_path)
-            .unwrap_or_else(|e| panic!(
+        let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
+            panic!(
                 "Failed to read function-registry.toml at {:?}: {}",
                 registry_path, e
-            ));
+            )
+        });
 
-        let registry: Registry = toml::from_str(&toml_str)
-            .expect("Failed to parse function-registry.toml");
+        let registry: Registry =
+            toml::from_str(&toml_str).expect("Failed to parse function-registry.toml");
 
         // Filter for Layer 2 functions implemented by host-bridge.
         //
@@ -398,12 +396,24 @@ mod tests {
         // them against the full linker. The host filter additionally drops browser-only
         // entries that might otherwise leak in.
         const HOST_BRIDGE_CATEGORIES: &[&str] = &[
-            "console", "math", "string", "memory",
-            "database", "file_io", "http_client",
-            "crypto", "env", "time", "list", "array",
-            "jwt", "html",
+            "console",
+            "math",
+            "string",
+            "memory",
+            "database",
+            "file_io",
+            "http_client",
+            "crypto",
+            "env",
+            "time",
+            "list",
+            "array",
+            "jwt",
+            "html",
         ];
-        let layer2_funcs: Vec<&FunctionEntry> = registry.functions.iter()
+        let layer2_funcs: Vec<&FunctionEntry> = registry
+            .functions
+            .iter()
             .filter(|f| f.layer == 2)
             .filter(|f| HOST_BRIDGE_CATEGORIES.contains(&f.category.as_str()))
             .filter(|f| applies_to_host(f, "server"))
@@ -420,11 +430,21 @@ mod tests {
         let mut import_count = 0;
 
         for func in &layer2_funcs {
-            wat.push_str(&generate_wat_import(&func.module, &func.name, &func.params, &func.returns));
+            wat.push_str(&generate_wat_import(
+                &func.module,
+                &func.name,
+                &func.params,
+                &func.returns,
+            ));
             import_count += 1;
 
             for alias in &func.aliases {
-                wat.push_str(&generate_wat_import(&func.module, alias, &func.params, &func.returns));
+                wat.push_str(&generate_wat_import(
+                    &func.module,
+                    alias,
+                    &func.params,
+                    &func.returns,
+                ));
                 import_count += 1;
             }
         }
@@ -434,23 +454,27 @@ mod tests {
         // Create linker and validate all signatures
         let engine = Engine::default();
         let linker = create_linker(&engine).expect("Failed to create linker");
-        let module = Module::new(&engine, &wat)
-            .unwrap_or_else(|e| panic!(
+        let module = Module::new(&engine, &wat).unwrap_or_else(|e| {
+            panic!(
                 "Failed to parse generated WAT ({} imports): {}\n\nGenerated WAT:\n{}",
                 import_count, e, wat
-            ));
+            )
+        });
 
         let mut store = Store::new(&engine, WasmState::default());
 
-        linker.instantiate(&mut store, &module).unwrap_or_else(|e| panic!(
-            "SPEC COMPLIANCE FAILURE ({} Layer 2 imports):\n{}\n\n\
+        linker.instantiate(&mut store, &module).unwrap_or_else(|e| {
+            panic!(
+                "SPEC COMPLIANCE FAILURE ({} Layer 2 imports):\n{}\n\n\
              Fix the implementation to match function-registry.toml, not the other way around.",
-            import_count, e
-        ));
+                import_count, e
+            )
+        });
 
         eprintln!(
             "Layer 2 spec compliance PASSED: {} canonical + aliases = {} total imports",
-            layer2_funcs.len(), import_count
+            layer2_funcs.len(),
+            import_count
         );
     }
 }

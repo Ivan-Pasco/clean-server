@@ -321,13 +321,14 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 .unwrap_or_else(|| "HS256".to_string());
 
             // Parse payload as JSON object
-            let payload: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&payload_str) {
-                Ok(v) if v.is_object() => v,
-                _ => {
-                    error!("_jwt_sign: payload must be a JSON object");
-                    return write_string_to_caller(&mut caller, "");
-                }
-            };
+            let payload: serde_json::Value =
+                match serde_json::from_str::<serde_json::Value>(&payload_str) {
+                    Ok(v) if v.is_object() => v,
+                    _ => {
+                        error!("_jwt_sign: payload must be a JSON object");
+                        return write_string_to_caller(&mut caller, "");
+                    }
+                };
 
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
@@ -420,9 +421,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     let mut crypto = CryptoBridge::new();
-                    crypto
-                        .call("decode_jwt", json!({ "token": token }))
-                        .await
+                    crypto.call("decode_jwt", json!({ "token": token })).await
                 })
             });
 
@@ -446,18 +445,26 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     })?;
 
     // _crypto_hash_md5(string) -> ptr (hex digest)
-    linker.func_wrap("env", "_crypto_hash_md5",
+    linker.func_wrap(
+        "env",
+        "_crypto_hash_md5",
         |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
             let s = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let mut h = Md5::new();
             h.update(s.as_bytes());
             let digest = h.finalize();
-            let hex = digest.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            let hex = digest
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
             write_string_to_caller(&mut caller, &hex)
-        })?;
+        },
+    )?;
 
     // _crypto_hmac_sha256(key, data) -> ptr (hex)
-    linker.func_wrap("env", "_crypto_hmac_sha256",
+    linker.func_wrap(
+        "env",
+        "_crypto_hmac_sha256",
         |mut caller: Caller<'_, S>, kp: i32, kl: i32, dp: i32, dl: i32| -> i32 {
             let key = read_raw_string(&mut caller, kp, kl).unwrap_or_default();
             let data = read_raw_string(&mut caller, dp, dl).unwrap_or_default();
@@ -471,28 +478,40 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             };
             mac.update(data.as_bytes());
             let result = mac.finalize().into_bytes();
-            let hex = result.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            let hex = result
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
             write_string_to_caller(&mut caller, &hex)
-        })?;
+        },
+    )?;
 
     // _crypto_random_base64(n) -> ptr — N random bytes as base64
-    linker.func_wrap("env", "_crypto_random_base64",
+    linker.func_wrap(
+        "env",
+        "_crypto_random_base64",
         |mut caller: Caller<'_, S>, n: i32| -> i32 {
             let n = n.max(0).min(1 << 16) as usize;
             let mut bytes = vec![0u8; n];
             rand::thread_rng().fill_bytes(&mut bytes);
             write_string_to_caller(&mut caller, &BASE64.encode(&bytes))
-        })?;
+        },
+    )?;
 
     // _crypto_base64_encode(string) -> ptr (utf-8 bytes -> base64)
-    linker.func_wrap("env", "_crypto_base64_encode",
+    linker.func_wrap(
+        "env",
+        "_crypto_base64_encode",
         |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
             let s = read_raw_string(&mut caller, p, l).unwrap_or_default();
             write_string_to_caller(&mut caller, &BASE64.encode(s.as_bytes()))
-        })?;
+        },
+    )?;
 
     // _crypto_base64_decode(string) -> ptr (base64 -> utf-8; empty on invalid)
-    linker.func_wrap("env", "_crypto_base64_decode",
+    linker.func_wrap(
+        "env",
+        "_crypto_base64_decode",
         |mut caller: Caller<'_, S>, p: i32, l: i32| -> i32 {
             let s = read_raw_string(&mut caller, p, l).unwrap_or_default();
             let bytes = match BASE64.decode(s.as_bytes()) {
@@ -501,12 +520,15 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             };
             let out = String::from_utf8(bytes).unwrap_or_default();
             write_string_to_caller(&mut caller, &out)
-        })?;
+        },
+    )?;
 
     // _crypto_encrypt_aes(key, plaintext) -> ptr (JSON {iv, tag, data} each base64)
     // Key is taken as raw key material; if shorter than 32 bytes, padded with zeros;
     // if longer, truncated. AES-256-GCM gives a 16-byte tag bundled with the ciphertext.
-    linker.func_wrap("env", "_crypto_encrypt_aes",
+    linker.func_wrap(
+        "env",
+        "_crypto_encrypt_aes",
         |mut caller: Caller<'_, S>, kp: i32, kl: i32, pp: i32, pl: i32| -> i32 {
             let key = read_raw_string(&mut caller, kp, kl).unwrap_or_default();
             let plaintext = read_raw_string(&mut caller, pp, pl).unwrap_or_default();
@@ -516,7 +538,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let copy_len = kb.len().min(32);
             key_buf[..copy_len].copy_from_slice(&kb[..copy_len]);
 
-            let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key_buf).expect("32-byte key");
+            let cipher =
+                <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key_buf).expect("32-byte key");
             let mut iv_buf = [0u8; 12];
             rand::thread_rng().fill_bytes(&mut iv_buf);
             let nonce = Nonce::from_slice(&iv_buf);
@@ -537,10 +560,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 "data": BASE64.encode(data),
             });
             write_string_to_caller(&mut caller, &payload.to_string())
-        })?;
+        },
+    )?;
 
     // _crypto_decrypt_aes(key, json) -> ptr (decrypted UTF-8; empty on tag mismatch)
-    linker.func_wrap("env", "_crypto_decrypt_aes",
+    linker.func_wrap(
+        "env",
+        "_crypto_decrypt_aes",
         |mut caller: Caller<'_, S>, kp: i32, kl: i32, jp: i32, jl: i32| -> i32 {
             let key = read_raw_string(&mut caller, kp, kl).unwrap_or_default();
             let json_str = read_raw_string(&mut caller, jp, jl).unwrap_or_default();
@@ -552,12 +578,21 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let tag_b64 = parsed.get("tag").and_then(|v| v.as_str()).unwrap_or("");
             let data_b64 = parsed.get("data").and_then(|v| v.as_str()).unwrap_or("");
 
-            let iv = match BASE64.decode(iv_b64) { Ok(b) => b, Err(_) => return write_string_to_caller(&mut caller, "") };
+            let iv = match BASE64.decode(iv_b64) {
+                Ok(b) => b,
+                Err(_) => return write_string_to_caller(&mut caller, ""),
+            };
             if iv.len() != 12 {
                 return write_string_to_caller(&mut caller, "");
             }
-            let tag = match BASE64.decode(tag_b64) { Ok(b) => b, Err(_) => return write_string_to_caller(&mut caller, "") };
-            let data = match BASE64.decode(data_b64) { Ok(b) => b, Err(_) => return write_string_to_caller(&mut caller, "") };
+            let tag = match BASE64.decode(tag_b64) {
+                Ok(b) => b,
+                Err(_) => return write_string_to_caller(&mut caller, ""),
+            };
+            let data = match BASE64.decode(data_b64) {
+                Ok(b) => b,
+                Err(_) => return write_string_to_caller(&mut caller, ""),
+            };
 
             let mut ciphertext = data;
             ciphertext.extend_from_slice(&tag);
@@ -566,7 +601,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let kb = key.as_bytes();
             let copy_len = kb.len().min(32);
             key_buf[..copy_len].copy_from_slice(&kb[..copy_len]);
-            let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key_buf).expect("32-byte key");
+            let cipher =
+                <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key_buf).expect("32-byte key");
             let nonce = Nonce::from_slice(&iv);
 
             match cipher.decrypt(nonce, ciphertext.as_ref()) {
@@ -576,7 +612,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
                 Err(_) => write_string_to_caller(&mut caller, ""),
             }
-        })?;
+        },
+    )?;
 
     Ok(())
 }

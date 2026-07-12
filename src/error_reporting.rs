@@ -352,11 +352,7 @@ pub fn load_report(diag_root: &Path, sha_prefix: &str) -> io::Result<Option<Wasm
 /// Transition a report to a new lifecycle stage by moving its directory.
 ///
 /// Returns the new directory path.
-pub fn transition(
-    diag_root: &Path,
-    sha_prefix: &str,
-    to: ReportStatus,
-) -> io::Result<PathBuf> {
+pub fn transition(diag_root: &Path, sha_prefix: &str, to: ReportStatus) -> io::Result<PathBuf> {
     let Some((from_dir, from_status)) = find_report_dir(diag_root, sha_prefix)? else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -381,8 +377,7 @@ pub fn transition(
     let report_path = from_dir.join("report.json");
     if report_path.exists() {
         let json = fs::read_to_string(&report_path)?;
-        let mut report: WasmParseReport =
-            serde_json::from_str(&json).map_err(io::Error::other)?;
+        let mut report: WasmParseReport = serde_json::from_str(&json).map_err(io::Error::other)?;
         report.status = to;
         // Stage 5 (resolved) strips the heavy fields per the retention policy.
         if matches!(to, ReportStatus::Resolved) {
@@ -478,13 +473,9 @@ fn extract_compiler_version_wasmparser(
     None
 }
 
-fn extract_compiler_version_raw_scan(
-    wasm_bytes: &[u8],
-) -> Option<(Option<String>, &'static str)> {
+fn extract_compiler_version_raw_scan(wasm_bytes: &[u8]) -> Option<(Option<String>, &'static str)> {
     const MARKER: &[u8] = b"clean:build";
-    let pos = wasm_bytes
-        .windows(MARKER.len())
-        .position(|w| w == MARKER)?;
+    let pos = wasm_bytes.windows(MARKER.len()).position(|w| w == MARKER)?;
     let after = &wasm_bytes[pos + MARKER.len()..];
     // The JSON payload starts with `{` immediately after the marker.
     let json_start = after.iter().position(|&b| b == b'{')?;

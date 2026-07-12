@@ -18,12 +18,7 @@ const PAGE_SIZE: usize = 65536;
 /// Ensure WASM memory is large enough for a write at the given offset + size.
 /// Uses 1.5x amortized growth to reduce the number of memory.grow() calls.
 /// Returns true on success, false if growth fails.
-fn ensure_memory_capacity<T>(
-    store: &mut T,
-    memory: &Memory,
-    offset: usize,
-    size: usize,
-) -> bool
+fn ensure_memory_capacity<T>(store: &mut T, memory: &Memory, offset: usize, size: usize) -> bool
 where
     T: wasmtime::AsContextMut,
 {
@@ -76,14 +71,21 @@ where
 /// Read a Clean Language string from WASM memory
 ///
 /// The string format is: [4-byte little-endian length][UTF-8 bytes]
-pub fn read_string_from_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32) -> Option<String> {
+pub fn read_string_from_caller<S: WasmStateCore>(
+    caller: &mut Caller<'_, S>,
+    ptr: i32,
+) -> Option<String> {
     let memory = caller.get_export("memory").and_then(|e| e.into_memory())?;
     let data = memory.data(&*caller);
     let ptr = ptr as usize;
 
     // Check bounds for length prefix
     if ptr + STRING_LENGTH_PREFIX_SIZE > data.len() {
-        error!("read_string_from_caller: ptr {} out of bounds (memory size: {})", ptr, data.len());
+        error!(
+            "read_string_from_caller: ptr {} out of bounds (memory size: {})",
+            ptr,
+            data.len()
+        );
         return None;
     }
 
@@ -96,8 +98,12 @@ pub fn read_string_from_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr
     let data_end = data_start + len;
 
     if data_end > data.len() {
-        error!("read_string_from_caller: string data out of bounds: {}..{} (memory size: {})",
-               data_start, data_end, data.len());
+        error!(
+            "read_string_from_caller: string data out of bounds: {}..{} (memory size: {})",
+            data_start,
+            data_end,
+            data.len()
+        );
         return None;
     }
 
@@ -108,25 +114,47 @@ pub fn read_string_from_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr
 }
 
 /// Read a raw string from WASM memory (no length prefix, uses explicit length)
-pub fn read_raw_string<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32, len: i32) -> Option<String> {
+pub fn read_raw_string<S: WasmStateCore>(
+    caller: &mut Caller<'_, S>,
+    ptr: i32,
+    len: i32,
+) -> Option<String> {
     let memory = caller.get_export("memory").and_then(|e| e.into_memory())?;
     let data = memory.data(&*caller);
 
     let start = ptr as usize;
     let end = start + len as usize;
 
-    debug!("read_raw_string: ptr={}, len={}, start={}, end={}, memory_size={}", ptr, len, start, end, data.len());
+    debug!(
+        "read_raw_string: ptr={}, len={}, start={}, end={}, memory_size={}",
+        ptr,
+        len,
+        start,
+        end,
+        data.len()
+    );
 
     if end > data.len() {
-        error!("read_raw_string: out of bounds: {}..{} (memory size: {})", start, end, data.len());
+        error!(
+            "read_raw_string: out of bounds: {}..{} (memory size: {})",
+            start,
+            end,
+            data.len()
+        );
         return None;
     }
 
     match std::str::from_utf8(&data[start..end]) {
         Ok(s) => {
-            debug!("read_raw_string: successfully read '{}' ({} bytes)",
-                   if s.len() > 100 { format!("{}...", &s[..100]) } else { s.to_string() },
-                   s.len());
+            debug!(
+                "read_raw_string: successfully read '{}' ({} bytes)",
+                if s.len() > 100 {
+                    format!("{}...", &s[..100])
+                } else {
+                    s.to_string()
+                },
+                s.len()
+            );
             Some(s.to_string())
         }
         Err(e) => {
@@ -137,7 +165,11 @@ pub fn read_raw_string<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32, l
 }
 
 /// Read raw bytes from WASM memory (no length prefix, uses explicit length)
-pub fn read_raw_bytes<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32, len: i32) -> Option<Vec<u8>> {
+pub fn read_raw_bytes<S: WasmStateCore>(
+    caller: &mut Caller<'_, S>,
+    ptr: i32,
+    len: i32,
+) -> Option<Vec<u8>> {
     let memory = caller.get_export("memory").and_then(|e| e.into_memory())?;
     let data = memory.data(&*caller);
 
@@ -145,7 +177,12 @@ pub fn read_raw_bytes<S: WasmStateCore>(caller: &mut Caller<'_, S>, ptr: i32, le
     let end = start + len as usize;
 
     if end > data.len() {
-        error!("read_raw_bytes: out of bounds: {}..{} (memory size: {})", start, end, data.len());
+        error!(
+            "read_raw_bytes: out of bounds: {}..{} (memory size: {})",
+            start,
+            end,
+            data.len()
+        );
         return None;
     }
 
@@ -168,37 +205,53 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_string_to_caller: Writing string ({} bytes, total_size={})", len, total_size);
+    debug!(
+        "write_string_to_caller: Writing string ({} bytes, total_size={})",
+        len, total_size
+    );
 
     // Read __heap_ptr BEFORE malloc to track heap state
-    let heap_ptr_before = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+    let heap_ptr_before = if let Some(heap_global) = caller
+        .get_export("__heap_ptr")
+        .and_then(|e| e.into_global())
+    {
         heap_global.get(&mut *caller).i32().unwrap_or(-1)
     } else {
         -1
     };
-    debug!("write_string_to_caller: __heap_ptr BEFORE malloc = {}", heap_ptr_before);
+    debug!(
+        "write_string_to_caller: __heap_ptr BEFORE malloc = {}",
+        heap_ptr_before
+    );
 
     // MUST use WASM's malloc to allocate - updating memory[0] doesn't work
     // because WASM's allocator uses a global variable, not linear memory.
     let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
-        debug!("write_string_to_caller: Found malloc export, calling WASM malloc({})", total_size);
+        debug!(
+            "write_string_to_caller: Found malloc export, calling WASM malloc({})",
+            total_size
+        );
         match malloc.typed::<i32, i32>(&*caller) {
-            Ok(typed_malloc) => {
-                match typed_malloc.call(&mut *caller, total_size as i32) {
-                    Ok(p) if p > 0 => {
-                        debug!("write_string_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
-                        p as usize
-                    }
-                    Ok(p) => {
-                        error!("write_string_to_caller: WASM malloc returned invalid ptr={}", p);
-                        return 0;
-                    }
-                    Err(e) => {
-                        error!("write_string_to_caller: WASM malloc call failed: {}", e);
-                        return 0;
-                    }
+            Ok(typed_malloc) => match typed_malloc.call(&mut *caller, total_size as i32) {
+                Ok(p) if p > 0 => {
+                    debug!(
+                        "write_string_to_caller: WASM malloc({}) returned ptr={}",
+                        total_size, p
+                    );
+                    p as usize
                 }
-            }
+                Ok(p) => {
+                    error!(
+                        "write_string_to_caller: WASM malloc returned invalid ptr={}",
+                        p
+                    );
+                    return 0;
+                }
+                Err(e) => {
+                    error!("write_string_to_caller: WASM malloc call failed: {}", e);
+                    return 0;
+                }
+            },
             Err(e) => {
                 error!("write_string_to_caller: malloc type mismatch: {}", e);
                 return 0;
@@ -210,27 +263,45 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
     };
 
     // Read __heap_ptr AFTER malloc to verify it was updated
-    let heap_ptr_after = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+    let heap_ptr_after = if let Some(heap_global) = caller
+        .get_export("__heap_ptr")
+        .and_then(|e| e.into_global())
+    {
         heap_global.get(&mut *caller).i32().unwrap_or(-1)
     } else {
         -1
     };
-    debug!("write_string_to_caller: __heap_ptr AFTER malloc = {}", heap_ptr_after);
+    debug!(
+        "write_string_to_caller: __heap_ptr AFTER malloc = {}",
+        heap_ptr_after
+    );
 
     // Calculate expected heap pointer after allocation (with 8-byte alignment)
     let expected_heap_ptr = ((ptr + total_size + 7) & !7) as i32;
     if heap_ptr_after >= 0 && heap_ptr_after < expected_heap_ptr {
         error!("write_string_to_caller: HEAP POINTER NOT PROPERLY UPDATED!");
-        error!("  malloc returned ptr={}, allocated {} bytes", ptr, total_size);
-        error!("  __heap_ptr is {} but should be at least {}", heap_ptr_after, expected_heap_ptr);
+        error!(
+            "  malloc returned ptr={}, allocated {} bytes",
+            ptr, total_size
+        );
+        error!(
+            "  __heap_ptr is {} but should be at least {}",
+            heap_ptr_after, expected_heap_ptr
+        );
         error!("  This will cause memory overlap with subsequent allocations!");
 
         // FIX: Manually update __heap_ptr to prevent overlap
-        if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        if let Some(heap_global) = caller
+            .get_export("__heap_ptr")
+            .and_then(|e| e.into_global())
+        {
             if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(expected_heap_ptr)) {
                 error!("write_string_to_caller: Failed to update __heap_ptr: {}", e);
             } else {
-                debug!("write_string_to_caller: Manually updated __heap_ptr to {}", expected_heap_ptr);
+                debug!(
+                    "write_string_to_caller: Manually updated __heap_ptr to {}",
+                    expected_heap_ptr
+                );
             }
         }
     }
@@ -247,24 +318,37 @@ pub fn write_string_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, s: &
 
     // Ensure memory is large enough for the write (WASM malloc doesn't grow memory)
     if !ensure_memory_capacity(caller, &memory, ptr, total_size) {
-        error!("write_string_to_caller: Failed to ensure memory capacity for {} bytes at ptr={}", total_size, ptr);
+        error!(
+            "write_string_to_caller: Failed to ensure memory capacity for {} bytes at ptr={}",
+            total_size, ptr
+        );
         return 0;
     }
 
     // Write length prefix (4 bytes, little-endian)
     let len_bytes = (len as u32).to_le_bytes();
     if let Err(e) = memory.write(&mut *caller, ptr, &len_bytes) {
-        error!("write_string_to_caller: Failed to write length at ptr={}: {}", ptr, e);
+        error!(
+            "write_string_to_caller: Failed to write length at ptr={}: {}",
+            ptr, e
+        );
         return 0;
     }
 
     // Write string data
     if let Err(e) = memory.write(&mut *caller, ptr + STRING_LENGTH_PREFIX_SIZE, bytes) {
-        error!("write_string_to_caller: Failed to write string data at ptr={}: {}", ptr + STRING_LENGTH_PREFIX_SIZE, e);
+        error!(
+            "write_string_to_caller: Failed to write string data at ptr={}: {}",
+            ptr + STRING_LENGTH_PREFIX_SIZE,
+            e
+        );
         return 0;
     }
 
-    debug!("write_string_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
+    debug!(
+        "write_string_to_caller: Successfully wrote {} bytes at ptr={}",
+        len, ptr
+    );
     ptr as i32
 }
 
@@ -279,38 +363,54 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
     let len = bytes.len();
     let total_size = STRING_LENGTH_PREFIX_SIZE + len;
 
-    debug!("write_bytes_to_caller: Writing {} bytes (total_size={})", len, total_size);
+    debug!(
+        "write_bytes_to_caller: Writing {} bytes (total_size={})",
+        len, total_size
+    );
 
     // Read __heap_ptr BEFORE malloc to track heap state
-    let heap_ptr_before = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+    let heap_ptr_before = if let Some(heap_global) = caller
+        .get_export("__heap_ptr")
+        .and_then(|e| e.into_global())
+    {
         heap_global.get(&mut *caller).i32().unwrap_or(-1)
     } else {
         -1
     };
-    debug!("write_bytes_to_caller: __heap_ptr BEFORE malloc = {}", heap_ptr_before);
+    debug!(
+        "write_bytes_to_caller: __heap_ptr BEFORE malloc = {}",
+        heap_ptr_before
+    );
 
     // MUST use WASM's malloc to allocate - using State allocator causes memory overlap
     // because WASM's allocator uses a global variable that grows from ~1024 upward,
     // while State's allocator starts at 65536 and grows upward - they can overlap!
     let ptr = if let Some(malloc) = caller.get_export("malloc").and_then(|e| e.into_func()) {
-        debug!("write_bytes_to_caller: Found malloc, calling WASM malloc({})", total_size);
+        debug!(
+            "write_bytes_to_caller: Found malloc, calling WASM malloc({})",
+            total_size
+        );
         match malloc.typed::<i32, i32>(&*caller) {
-            Ok(typed_malloc) => {
-                match typed_malloc.call(&mut *caller, total_size as i32) {
-                    Ok(p) if p > 0 => {
-                        debug!("write_bytes_to_caller: WASM malloc({}) returned ptr={}", total_size, p);
-                        p as usize
-                    }
-                    Ok(p) => {
-                        error!("write_bytes_to_caller: WASM malloc returned invalid ptr={}", p);
-                        return 0;
-                    }
-                    Err(e) => {
-                        error!("write_bytes_to_caller: WASM malloc call failed: {}", e);
-                        return 0;
-                    }
+            Ok(typed_malloc) => match typed_malloc.call(&mut *caller, total_size as i32) {
+                Ok(p) if p > 0 => {
+                    debug!(
+                        "write_bytes_to_caller: WASM malloc({}) returned ptr={}",
+                        total_size, p
+                    );
+                    p as usize
                 }
-            }
+                Ok(p) => {
+                    error!(
+                        "write_bytes_to_caller: WASM malloc returned invalid ptr={}",
+                        p
+                    );
+                    return 0;
+                }
+                Err(e) => {
+                    error!("write_bytes_to_caller: WASM malloc call failed: {}", e);
+                    return 0;
+                }
+            },
             Err(e) => {
                 error!("write_bytes_to_caller: malloc type mismatch: {}", e);
                 return 0;
@@ -322,27 +422,45 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
     };
 
     // Read __heap_ptr AFTER malloc to verify it was updated
-    let heap_ptr_after = if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+    let heap_ptr_after = if let Some(heap_global) = caller
+        .get_export("__heap_ptr")
+        .and_then(|e| e.into_global())
+    {
         heap_global.get(&mut *caller).i32().unwrap_or(-1)
     } else {
         -1
     };
-    debug!("write_bytes_to_caller: __heap_ptr AFTER malloc = {}", heap_ptr_after);
+    debug!(
+        "write_bytes_to_caller: __heap_ptr AFTER malloc = {}",
+        heap_ptr_after
+    );
 
     // Calculate expected heap pointer after allocation (with 8-byte alignment)
     let expected_heap_ptr = ((ptr + total_size + 7) & !7) as i32;
     if heap_ptr_after >= 0 && heap_ptr_after < expected_heap_ptr {
         error!("write_bytes_to_caller: HEAP POINTER NOT PROPERLY UPDATED!");
-        error!("  malloc returned ptr={}, allocated {} bytes", ptr, total_size);
-        error!("  __heap_ptr is {} but should be at least {}", heap_ptr_after, expected_heap_ptr);
+        error!(
+            "  malloc returned ptr={}, allocated {} bytes",
+            ptr, total_size
+        );
+        error!(
+            "  __heap_ptr is {} but should be at least {}",
+            heap_ptr_after, expected_heap_ptr
+        );
         error!("  This will cause memory overlap with subsequent allocations!");
 
         // FIX: Manually update __heap_ptr to prevent overlap
-        if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+        if let Some(heap_global) = caller
+            .get_export("__heap_ptr")
+            .and_then(|e| e.into_global())
+        {
             if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(expected_heap_ptr)) {
                 error!("write_bytes_to_caller: Failed to update __heap_ptr: {}", e);
             } else {
-                debug!("write_bytes_to_caller: Manually updated __heap_ptr to {}", expected_heap_ptr);
+                debug!(
+                    "write_bytes_to_caller: Manually updated __heap_ptr to {}",
+                    expected_heap_ptr
+                );
             }
         }
     }
@@ -358,7 +476,10 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
 
     // Ensure memory is large enough for the write (WASM malloc doesn't grow memory)
     if !ensure_memory_capacity(caller, &memory, ptr, total_size) {
-        error!("write_bytes_to_caller: Failed to ensure memory capacity for {} bytes at ptr={}", total_size, ptr);
+        error!(
+            "write_bytes_to_caller: Failed to ensure memory capacity for {} bytes at ptr={}",
+            total_size, ptr
+        );
         return 0;
     }
 
@@ -375,7 +496,10 @@ pub fn write_bytes_to_caller<S: WasmStateCore>(caller: &mut Caller<'_, S>, bytes
         return 0;
     }
 
-    debug!("write_bytes_to_caller: Successfully wrote {} bytes at ptr={}", len, ptr);
+    debug!(
+        "write_bytes_to_caller: Successfully wrote {} bytes at ptr={}",
+        len, ptr
+    );
     ptr as i32
 }
 
@@ -429,7 +553,10 @@ pub fn write_string_list_to_caller<S: WasmStateCore>(
             Ok(typed_malloc) => match typed_malloc.call(&mut *caller, list_size as i32) {
                 Ok(p) if p > 0 => p as usize,
                 Ok(p) => {
-                    error!("write_string_list_to_caller: malloc returned invalid ptr={}", p);
+                    error!(
+                        "write_string_list_to_caller: malloc returned invalid ptr={}",
+                        p
+                    );
                     return 0;
                 }
                 Err(e) => {
@@ -450,11 +577,17 @@ pub fn write_string_list_to_caller<S: WasmStateCore>(
     // Defensive __heap_ptr fix-up: mirrors write_string_to_caller's pattern so
     // any malloc that fails to bump the global doesn't cause later overlap.
     let expected_heap_ptr = ((list_ptr + list_size + 7) & !7) as i32;
-    if let Some(heap_global) = caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+    if let Some(heap_global) = caller
+        .get_export("__heap_ptr")
+        .and_then(|e| e.into_global())
+    {
         let actual = heap_global.get(&mut *caller).i32().unwrap_or(-1);
         if actual >= 0 && actual < expected_heap_ptr {
             if let Err(e) = heap_global.set(&mut *caller, wasmtime::Val::I32(expected_heap_ptr)) {
-                error!("write_string_list_to_caller: failed to update __heap_ptr: {}", e);
+                error!(
+                    "write_string_list_to_caller: failed to update __heap_ptr: {}",
+                    e
+                );
             }
         }
     }
@@ -484,7 +617,10 @@ pub fn write_string_list_to_caller<S: WasmStateCore>(
     header[12..16].copy_from_slice(&0u32.to_le_bytes()); // padding
 
     if let Err(e) = memory.write(&mut *caller, list_ptr, &header) {
-        error!("write_string_list_to_caller: failed to write list header: {}", e);
+        error!(
+            "write_string_list_to_caller: failed to write list header: {}",
+            e
+        );
         return 0;
     }
 
@@ -529,7 +665,6 @@ pub fn read_length_prefixed_bytes(data: &[u8], ptr: usize) -> Vec<u8> {
 
     data[data_start..data_end].to_vec()
 }
-
 
 #[cfg(test)]
 mod tests {

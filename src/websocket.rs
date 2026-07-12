@@ -46,8 +46,8 @@ use crate::wasm::{AuthContext, RequestContext, WasmInstance};
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -248,7 +248,15 @@ pub async fn ws_handle_connection(
     });
 
     // Call onConnect.
-    call_wasm_ws_handler(&wasm, &handlers.on_connect, &request_ctx, &auth_ctx, client_id, "").await;
+    call_wasm_ws_handler(
+        &wasm,
+        &handlers.on_connect,
+        &request_ctx,
+        &auth_ctx,
+        client_id,
+        "",
+    )
+    .await;
 
     // Receive loop.
     loop {
@@ -309,7 +317,15 @@ pub async fn ws_handle_connection(
     }
 
     // Call onClose.
-    call_wasm_ws_handler(&wasm, &handlers.on_close, &request_ctx, &auth_ctx, client_id, "").await;
+    call_wasm_ws_handler(
+        &wasm,
+        &handlers.on_close,
+        &request_ctx,
+        &auth_ctx,
+        client_id,
+        "",
+    )
+    .await;
 
     // Abort the writer task.
     writer_handle.abort();
@@ -373,7 +389,11 @@ pub async fn remove_client(ws_state: &SharedWsState, client_id: i64) {
         .iter_mut()
         .filter_map(|(room, members)| {
             members.remove(&client_id);
-            if members.is_empty() { Some(room.clone()) } else { None }
+            if members.is_empty() {
+                Some(room.clone())
+            } else {
+                None
+            }
         })
         .collect();
     for room in empty_rooms {
@@ -516,10 +536,7 @@ pub async fn ws_room_broadcast(ws_state: &SharedWsState, room: &str, message: St
             if let Some(entry) = state.connections.get(&client_id)
                 && entry.sender.send(WsCommand::Text(message.clone())).is_err()
             {
-                debug!(
-                    "ws_room_broadcast: client {} channel closed",
-                    client_id
-                );
+                debug!("ws_room_broadcast: client {} channel closed", client_id);
             }
         }
     } else {

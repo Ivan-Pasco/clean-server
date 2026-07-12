@@ -61,9 +61,13 @@ fn extract_quoted(line: &str, key: &str) -> Option<String> {
 
 fn extract_array(line: &str, key: &str) -> Vec<String> {
     let needle = format!("{} = [", key);
-    let Some(start) = line.find(&needle) else { return Vec::new() };
+    let Some(start) = line.find(&needle) else {
+        return Vec::new();
+    };
     let start = start + needle.len();
-    let Some(end_rel) = line[start..].find(']') else { return Vec::new() };
+    let Some(end_rel) = line[start..].find(']') else {
+        return Vec::new();
+    };
     let inner = &line[start..start + end_rel];
     inner
         .split(',')
@@ -74,7 +78,9 @@ fn extract_array(line: &str, key: &str) -> Vec<String> {
 
 /// Parse bridge entries with `server_impl = "stub"` from plugin.toml.
 fn parse_stub_entries(text: &str) -> Vec<BridgeEntry> {
-    let bridge_start = text.find("[bridge]").expect("frame.ui plugin.toml missing [bridge] section");
+    let bridge_start = text
+        .find("[bridge]")
+        .expect("frame.ui plugin.toml missing [bridge] section");
     let rest = &text[bridge_start + "[bridge]".len()..];
     let bridge_end = rest
         .find("\n[")
@@ -92,21 +98,27 @@ fn parse_stub_entries(text: &str) -> Vec<BridgeEntry> {
         if !trimmed.contains("server_impl = \"stub\"") {
             continue;
         }
-        let Some(name) = extract_quoted(trimmed, "name") else { continue };
+        let Some(name) = extract_quoted(trimmed, "name") else {
+            continue;
+        };
         let params = extract_array(trimmed, "params");
         let returns = extract_quoted(trimmed, "returns").unwrap_or_default();
-        entries.push(BridgeEntry { name, params, returns });
+        entries.push(BridgeEntry {
+            name,
+            params,
+            returns,
+        });
     }
     entries
 }
 
 fn expand_param_type(t: &str) -> Vec<&'static str> {
     match t {
-        "string"  => vec!["i32", "i32"],
+        "string" => vec!["i32", "i32"],
         "integer" => vec!["i32"],
-        "number"  => vec!["f64"],
+        "number" => vec!["f64"],
         "boolean" => vec!["i32"],
-        "ptr"     => vec!["i32"],
+        "ptr" => vec!["i32"],
         other => panic!("Unknown param type in frame.ui/plugin.toml: '{}'", other),
     }
 }
@@ -114,18 +126,22 @@ fn expand_param_type(t: &str) -> Vec<&'static str> {
 fn expand_return_type(t: &str) -> Option<&'static str> {
     match t {
         "" | "void" => None,
-        "string"    => Some("i32"),
-        "ptr"       => Some("i32"),
-        "integer"   => Some("i32"),
-        "number"    => Some("f64"),
-        "boolean"   => Some("i32"),
+        "string" => Some("i32"),
+        "ptr" => Some("i32"),
+        "integer" => Some("i32"),
+        "number" => Some("f64"),
+        "boolean" => Some("i32"),
         other => panic!("Unknown return type in frame.ui/plugin.toml: '{}'", other),
     }
 }
 
 fn generate_wat_import(entry: &BridgeEntry) -> String {
     let mut import = format!("  (import \"env\" \"{}\" (func", entry.name);
-    let params: Vec<&str> = entry.params.iter().flat_map(|t| expand_param_type(t)).collect();
+    let params: Vec<&str> = entry
+        .params
+        .iter()
+        .flat_map(|t| expand_param_type(t))
+        .collect();
     if !params.is_empty() {
         import.push_str(" (param");
         for p in &params {
@@ -144,10 +160,26 @@ fn generate_wat_import(entry: &BridgeEntry) -> String {
 /// These are not declared with `server_impl = "stub"` but still need stubs.
 fn extra_browser_only_entries() -> Vec<BridgeEntry> {
     vec![
-        BridgeEntry { name: "_ui_shortcut_register".into(), params: vec!["string".into(), "string".into(), "string".into()], returns: "integer".into() },
-        BridgeEntry { name: "_ui_shortcut_remove".into(),   params: vec!["integer".into()], returns: "void".into() },
-        BridgeEntry { name: "_ui_shortcut_clear".into(),    params: vec![], returns: "void".into() },
-        BridgeEntry { name: "_ui_navigate".into(),          params: vec!["string".into()], returns: "void".into() },
+        BridgeEntry {
+            name: "_ui_shortcut_register".into(),
+            params: vec!["string".into(), "string".into(), "string".into()],
+            returns: "integer".into(),
+        },
+        BridgeEntry {
+            name: "_ui_shortcut_remove".into(),
+            params: vec!["integer".into()],
+            returns: "void".into(),
+        },
+        BridgeEntry {
+            name: "_ui_shortcut_clear".into(),
+            params: vec![],
+            returns: "void".into(),
+        },
+        BridgeEntry {
+            name: "_ui_navigate".into(),
+            params: vec!["string".into()],
+            returns: "void".into(),
+        },
     ]
 }
 

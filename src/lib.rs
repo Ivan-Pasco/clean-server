@@ -77,12 +77,11 @@ pub mod bridge;
 pub mod bridge_browser_stubs;
 pub mod bridge_canvas_stubs;
 pub mod bridge_ui_stubs;
-pub mod jobs;
-pub mod locale;
-pub mod websocket;
 pub mod build_manifest;
 pub mod error;
 pub mod error_reporting;
+pub mod jobs;
+pub mod locale;
 pub mod memory;
 pub mod permissions;
 pub mod rate_limit;
@@ -91,16 +90,17 @@ pub mod runtime_config;
 pub mod server;
 pub mod session;
 pub mod wasm;
+pub mod websocket;
 
 // Re-exports for convenience
 pub use error::{HttpError, RuntimeError, RuntimeResult};
+pub use jobs::{SharedJobsState, create_shared_jobs_state};
 pub use router::{HttpMethod, RouteHandler, Router, SharedRouter};
 pub use server::{MemoryTier, ServerConfig, start_server};
 pub use session::{
     SessionConfig, SessionData, SessionStore, SharedSessionStore, create_session_store,
     parse_cookies,
 };
-pub use jobs::{SharedJobsState, create_shared_jobs_state};
 pub use wasm::{
     AuthContext, RequestContext, SharedDbBridge, SharedWasmInstance, WasmInstance, WasmState,
     create_shared_instance_with_db,

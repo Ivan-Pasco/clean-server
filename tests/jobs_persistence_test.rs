@@ -4,9 +4,8 @@
 //! persistence layer in isolation without touching the filesystem.
 
 use clean_server::jobs::{
-    BackoffStrategy, JobStatus,
-    create_shared_jobs_state, ensure_jobs_table, enqueue_job, init_persistence,
-    job_result, job_status, now_ms, recover_from_disk_with_pool, register_job,
+    BackoffStrategy, JobStatus, create_shared_jobs_state, enqueue_job, ensure_jobs_table,
+    init_persistence, job_result, job_status, now_ms, recover_from_disk_with_pool, register_job,
 };
 use sqlx::SqlitePool;
 
@@ -55,17 +54,19 @@ async fn enqueue_persists_to_sqlite() {
     assert!(!job_id.is_empty(), "enqueue must return a non-empty job ID");
 
     // Query the DB directly to confirm the row exists with the expected values.
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, status, args_json FROM __clean_jobs WHERE id = ?",
-    )
-    .bind(&job_id)
-    .fetch_optional(&pool)
-    .await
-    .expect("DB query should not fail");
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT id, status, args_json FROM __clean_jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("DB query should not fail");
 
     let (db_id, db_status, db_args) = row.expect("row must exist in __clean_jobs after enqueue");
     assert_eq!(db_id, job_id);
-    assert_eq!(db_status, "pending", "newly enqueued job must have status=pending");
+    assert_eq!(
+        db_status, "pending",
+        "newly enqueued job must have status=pending"
+    );
     assert!(
         db_args.contains("user@example.com"),
         "args_json must contain the enqueued payload"
@@ -121,14 +122,16 @@ async fn recover_resets_running_to_pending() {
     drop(store);
 
     // Confirm the DB row was also updated to `pending`.
-    let (db_status,): (String,) =
-        sqlx::query_as("SELECT status FROM __clean_jobs WHERE id = ?")
-            .bind(&job_id)
-            .fetch_one(&pool)
-            .await
-            .expect("DB query should succeed");
+    let (db_status,): (String,) = sqlx::query_as("SELECT status FROM __clean_jobs WHERE id = ?")
+        .bind(&job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("DB query should succeed");
 
-    assert_eq!(db_status, "pending", "DB row must be updated to pending during recovery");
+    assert_eq!(
+        db_status, "pending",
+        "DB row must be updated to pending during recovery"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -170,12 +173,11 @@ async fn cleanup_deletes_old_finished_jobs() {
     init_persistence(&state, retention_days).await;
 
     // The stale row must have been deleted.
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM __clean_jobs WHERE id = ?")
-            .bind(&job_id)
-            .fetch_optional(&pool)
-            .await
-            .expect("DB query should succeed");
+    let row: Option<(String,)> = sqlx::query_as("SELECT id FROM __clean_jobs WHERE id = ?")
+        .bind(&job_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("DB query should succeed");
 
     assert!(
         row.is_none(),

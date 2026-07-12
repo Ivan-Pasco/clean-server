@@ -51,31 +51,19 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // print_integer - Print integer (i64 per spec)
-    linker.func_wrap(
-        "env",
-        "print_integer",
-        |_: Caller<'_, S>, value: i64| {
-            print!("{}", value);
-        },
-    )?;
+    linker.func_wrap("env", "print_integer", |_: Caller<'_, S>, value: i64| {
+        print!("{}", value);
+    })?;
 
     // print_float - Print float
-    linker.func_wrap(
-        "env",
-        "print_float",
-        |_: Caller<'_, S>, value: f64| {
-            print!("{}", value);
-        },
-    )?;
+    linker.func_wrap("env", "print_float", |_: Caller<'_, S>, value: f64| {
+        print!("{}", value);
+    })?;
 
     // print_boolean - Print boolean
-    linker.func_wrap(
-        "env",
-        "print_boolean",
-        |_: Caller<'_, S>, value: i32| {
-            print!("{}", if value != 0 { "true" } else { "false" });
-        },
-    )?;
+    linker.func_wrap("env", "print_boolean", |_: Caller<'_, S>, value: i32| {
+        print!("{}", if value != 0 { "true" } else { "false" });
+    })?;
 
     // =========================================
     // CONSOLE LOGGING FUNCTIONS
@@ -181,9 +169,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     linker.func_wrap(
         "env",
         "input_integer",
-        |_: Caller<'_, S>, _prompt_ptr: i32| -> i32 {
-            0
-        },
+        |_: Caller<'_, S>, _prompt_ptr: i32| -> i32 { 0 },
     )?;
 
     // input_float - Read float from user
@@ -191,9 +177,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     linker.func_wrap(
         "env",
         "input_float",
-        |_: Caller<'_, S>, _prompt_ptr: i32| -> f64 {
-            0.0
-        },
+        |_: Caller<'_, S>, _prompt_ptr: i32| -> f64 { 0.0 },
     )?;
 
     // input_yesno - Read yes/no from user
@@ -201,9 +185,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     linker.func_wrap(
         "env",
         "input_yesno",
-        |_: Caller<'_, S>, _prompt_ptr: i32| -> i32 {
-            0
-        },
+        |_: Caller<'_, S>, _prompt_ptr: i32| -> i32 { 0 },
     )?;
 
     // input_range - Read integer in range from user
@@ -211,9 +193,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     linker.func_wrap(
         "env",
         "input_range",
-        |_: Caller<'_, S>, _prompt_ptr: i32, min: i32, _max: i32, _step: i32| -> i32 {
-            min
-        },
+        |_: Caller<'_, S>, _prompt_ptr: i32, min: i32, _max: i32, _step: i32| -> i32 { min },
     )?;
 
     Ok(())

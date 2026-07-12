@@ -62,7 +62,10 @@ fn run() -> ExitCode {
     let module = match Module::new(&engine, &wasm_bytes) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("canary_runner: WASM parse/compile failed for {}: {}", wasm_path, e);
+            eprintln!(
+                "canary_runner: WASM parse/compile failed for {}: {}",
+                wasm_path, e
+            );
             return ExitCode::from(2);
         }
     };
@@ -82,7 +85,10 @@ fn run() -> ExitCode {
     let instance = match linker.instantiate(&mut store, &module) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("canary_runner: instantiate failed (LinkError likely): {}", e);
+            eprintln!(
+                "canary_runner: instantiate failed (LinkError likely): {}",
+                e
+            );
             return ExitCode::from(3);
         }
     };

@@ -135,7 +135,11 @@ pub fn read_string_from_memory<T>(
     let data = memory.data(store);
     let ptr = ptr as usize;
 
-    debug!("read_string_from_memory: ptr={}, memory_size={}", ptr, data.len());
+    debug!(
+        "read_string_from_memory: ptr={}, memory_size={}",
+        ptr,
+        data.len()
+    );
 
     // Check bounds for length prefix
     if ptr + STRING_LENGTH_PREFIX_SIZE > data.len() {
@@ -152,15 +156,24 @@ pub fn read_string_from_memory<T>(
         .map_err(|_| RuntimeError::memory("Failed to read string length"))?;
     let len = u32::from_le_bytes(len_bytes) as usize;
 
-    debug!("read_string_from_memory: length prefix indicates {} bytes", len);
+    debug!(
+        "read_string_from_memory: length prefix indicates {} bytes",
+        len
+    );
 
     // Sanity check: length should not be unreasonably large
     if len > 10_000_000 {
-        error!("read_string_from_memory: suspiciously large length {} at ptr={}", len, ptr);
+        error!(
+            "read_string_from_memory: suspiciously large length {} at ptr={}",
+            len, ptr
+        );
         // Log the raw bytes around the ptr for debugging
         let start = ptr.saturating_sub(16);
         let end = (ptr + 32).min(data.len());
-        error!("read_string_from_memory: bytes around ptr: {:02x?}", &data[start..end]);
+        error!(
+            "read_string_from_memory: bytes around ptr: {:02x?}",
+            &data[start..end]
+        );
         return Err(RuntimeError::memory(format!(
             "String length {} is unreasonably large (possible memory corruption at ptr={})",
             len, ptr
@@ -183,8 +196,15 @@ pub fn read_string_from_memory<T>(
     // Read and convert to string
     match std::str::from_utf8(&data[data_start..data_end]) {
         Ok(s) => {
-            debug!("read_string_from_memory: successfully read {} bytes: '{}'",
-                   len, if s.len() > 100 { format!("{}...", &s[..100]) } else { s.to_string() });
+            debug!(
+                "read_string_from_memory: successfully read {} bytes: '{}'",
+                len,
+                if s.len() > 100 {
+                    format!("{}...", &s[..100])
+                } else {
+                    s.to_string()
+                }
+            );
             Ok(s.to_string())
         }
         Err(e) => {
@@ -192,13 +212,24 @@ pub fn read_string_from_memory<T>(
             let error_index = e.valid_up_to();
             let start = data_start + error_index.saturating_sub(8);
             let end = (data_start + error_index + 16).min(data_end);
-            error!("read_string_from_memory: UTF-8 error at offset {} (absolute position {})",
-                   error_index, data_start + error_index);
-            error!("read_string_from_memory: valid prefix: '{}'",
-                   String::from_utf8_lossy(&data[data_start..data_start + error_index]));
-            error!("read_string_from_memory: bytes around error: {:02x?}", &data[start..end]);
+            error!(
+                "read_string_from_memory: UTF-8 error at offset {} (absolute position {})",
+                error_index,
+                data_start + error_index
+            );
+            error!(
+                "read_string_from_memory: valid prefix: '{}'",
+                String::from_utf8_lossy(&data[data_start..data_start + error_index])
+            );
+            error!(
+                "read_string_from_memory: bytes around error: {:02x?}",
+                &data[start..end]
+            );
 
-            Err(RuntimeError::memory(format!("Invalid UTF-8 in string: {}", e)))
+            Err(RuntimeError::memory(format!(
+                "Invalid UTF-8 in string: {}",
+                e
+            )))
         }
     }
 }
@@ -315,7 +346,8 @@ fn ensure_memory_size<T>(
                 current_pages = current_pages,
                 requested_pages = pages_to_grow,
                 new_total_pages = current_pages + pages_to_grow,
-                "ensure_memory_size: growing memory (required {} bytes)", required
+                "ensure_memory_size: growing memory (required {} bytes)",
+                required
             );
 
             memory.grow(&mut *store, pages_to_grow).map_err(|e| {
@@ -323,7 +355,8 @@ fn ensure_memory_size<T>(
                     event = "wasm_memory_oom",
                     current_pages = current_pages,
                     requested_pages = pages_to_grow,
-                    "Failed to grow memory: {}", e
+                    "Failed to grow memory: {}",
+                    e
                 );
                 RuntimeError::memory(format!(
                     "Failed to grow memory by {} pages: {}",

@@ -77,7 +77,9 @@ fn build_request_headers(extra_headers: Option<serde_json::Value>) -> serde_json
             _ => serde_json::Map::new(),
         };
         if let Some(ref ua) = config.user_agent {
-            headers.entry("User-Agent").or_insert_with(|| serde_json::Value::String(ua.clone()));
+            headers
+                .entry("User-Agent")
+                .or_insert_with(|| serde_json::Value::String(ua.clone()));
         }
         serde_json::Value::Object(headers)
     })
@@ -98,13 +100,13 @@ fn store_last_response(result: &serde_json::Value) {
     HTTP_LAST_RESPONSE.with(|last| {
         let mut last = last.borrow_mut();
         if let Some(data) = result.get("data") {
-            last.status_code = data.get("status")
-                .and_then(|s| s.as_i64())
-                .unwrap_or(0) as i32;
-            last.headers_json = data.get("headers")
+            last.status_code = data.get("status").and_then(|s| s.as_i64()).unwrap_or(0) as i32;
+            last.headers_json = data
+                .get("headers")
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| "{}".to_string());
-            last.body = data.get("body")
+            last.body = data
+                .get("body")
                 .and_then(|b| b.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -485,21 +487,26 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
 
             let timeout = get_timeout_ms();
             let max_redirects = get_max_redirects();
-            let headers = build_request_headers(Some(json!({ "Content-Type": "application/json" })));
+            let headers =
+                build_request_headers(Some(json!({ "Content-Type": "application/json" })));
 
             let result = HTTP_BRIDGE.with(|bridge| {
                 let bridge = bridge.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("request", json!({
-                            "method": "POST",
-                            "url": url,
-                            "body": json_body,
-                            "headers": headers,
-                            "timeout": timeout,
-                            "max_redirects": max_redirects
-                        })).await
+                        b.call(
+                            "request",
+                            json!({
+                                "method": "POST",
+                                "url": url,
+                                "body": json_body,
+                                "headers": headers,
+                                "timeout": timeout,
+                                "max_redirects": max_redirects
+                            }),
+                        )
+                        .await
                     })
                 })
             });
@@ -507,7 +514,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             match result {
                 Ok(v) => {
                     store_last_response(&v);
-                    let resp_body = v.get("data")
+                    let resp_body = v
+                        .get("data")
                         .and_then(|d| d.get("body"))
                         .and_then(|b| b.as_str())
                         .unwrap_or("");
@@ -543,7 +551,11 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         "env",
         "http_set_timeout",
         |_: Caller<'_, S>, timeout_ms: i32| {
-            let ms = if timeout_ms <= 0 { 30000 } else { timeout_ms as u64 };
+            let ms = if timeout_ms <= 0 {
+                30000
+            } else {
+                timeout_ms as u64
+            };
             debug!("http_set_timeout: {}ms", ms);
             HTTP_CONFIG.with(|config| {
                 config.borrow_mut().timeout_ms = ms;
@@ -578,13 +590,9 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // http_get_response_code - Return status code from the last HTTP response
-    linker.func_wrap(
-        "env",
-        "http_get_response_code",
-        |_: Caller<'_, S>| -> i32 {
-            HTTP_LAST_RESPONSE.with(|last| last.borrow().status_code)
-        },
-    )?;
+    linker.func_wrap("env", "http_get_response_code", |_: Caller<'_, S>| -> i32 {
+        HTTP_LAST_RESPONSE.with(|last| last.borrow().status_code)
+    })?;
 
     // http_get_response_headers - Return headers JSON string from the last HTTP response
     linker.func_wrap(
@@ -605,7 +613,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let lname = name.to_ascii_lowercase();
             let headers_json = HTTP_LAST_RESPONSE.with(|last| last.borrow().headers_json.clone());
             let value = match serde_json::from_str::<serde_json::Value>(&headers_json) {
-                Ok(serde_json::Value::Object(map)) => map.iter()
+                Ok(serde_json::Value::Object(map)) => map
+                    .iter()
                     .find(|(k, _)| k.to_ascii_lowercase() == lname)
                     .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
                     .unwrap_or_default(),
@@ -647,8 +656,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                     .remove(b'.')
                     .remove(b'_')
                     .remove(b'~');
-            let encoded = percent_encoding::utf8_percent_encode(&url, RFC3986_RESERVED)
-                .to_string();
+            let encoded = percent_encoding::utf8_percent_encode(&url, RFC3986_RESERVED).to_string();
             write_string_to_caller(&mut caller, &encoded)
         },
     )?;
@@ -663,7 +671,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 None => return write_string_to_caller(&mut caller, ""),
             };
             let decoded = url::form_urlencoded::parse(url.as_bytes())
-                .map(|(k, v)| if v.is_empty() { k.to_string() } else { format!("{}={}", k, v) })
+                .map(|(k, v)| {
+                    if v.is_empty() {
+                        k.to_string()
+                    } else {
+                        format!("{}={}", k, v)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("&");
             write_string_to_caller(&mut caller, &decoded)
@@ -992,21 +1006,26 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let json_body = read_raw_string(&mut caller, json_ptr, json_len).unwrap_or_default();
             let timeout = get_timeout_ms();
             let max_redirects = get_max_redirects();
-            let headers = build_request_headers(Some(json!({ "Content-Type": "application/json" })));
+            let headers =
+                build_request_headers(Some(json!({ "Content-Type": "application/json" })));
 
             let result = HTTP_BRIDGE.with(|bridge| {
                 let bridge = bridge.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("request", json!({
-                            "method": "PUT",
-                            "url": url,
-                            "body": json_body,
-                            "headers": headers,
-                            "timeout": timeout,
-                            "max_redirects": max_redirects
-                        })).await
+                        b.call(
+                            "request",
+                            json!({
+                                "method": "PUT",
+                                "url": url,
+                                "body": json_body,
+                                "headers": headers,
+                                "timeout": timeout,
+                                "max_redirects": max_redirects
+                            }),
+                        )
+                        .await
                     })
                 })
             });
@@ -1014,7 +1033,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             match result {
                 Ok(v) => {
                     store_last_response(&v);
-                    let resp_body = v.get("data")
+                    let resp_body = v
+                        .get("data")
                         .and_then(|d| d.get("body"))
                         .and_then(|b| b.as_str())
                         .unwrap_or("");
@@ -1045,21 +1065,26 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let json_body = read_raw_string(&mut caller, json_ptr, json_len).unwrap_or_default();
             let timeout = get_timeout_ms();
             let max_redirects = get_max_redirects();
-            let headers = build_request_headers(Some(json!({ "Content-Type": "application/json" })));
+            let headers =
+                build_request_headers(Some(json!({ "Content-Type": "application/json" })));
 
             let result = HTTP_BRIDGE.with(|bridge| {
                 let bridge = bridge.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("request", json!({
-                            "method": "PATCH",
-                            "url": url,
-                            "body": json_body,
-                            "headers": headers,
-                            "timeout": timeout,
-                            "max_redirects": max_redirects
-                        })).await
+                        b.call(
+                            "request",
+                            json!({
+                                "method": "PATCH",
+                                "url": url,
+                                "body": json_body,
+                                "headers": headers,
+                                "timeout": timeout,
+                                "max_redirects": max_redirects
+                            }),
+                        )
+                        .await
                     })
                 })
             });
@@ -1067,7 +1092,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             match result {
                 Ok(v) => {
                     store_last_response(&v);
-                    let resp_body = v.get("data")
+                    let resp_body = v
+                        .get("data")
                         .and_then(|d| d.get("body"))
                         .and_then(|b| b.as_str())
                         .unwrap_or("");
@@ -1098,21 +1124,27 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             let form_body = read_raw_string(&mut caller, form_ptr, form_len).unwrap_or_default();
             let timeout = get_timeout_ms();
             let max_redirects = get_max_redirects();
-            let headers = build_request_headers(Some(json!({ "Content-Type": "application/x-www-form-urlencoded" })));
+            let headers = build_request_headers(Some(
+                json!({ "Content-Type": "application/x-www-form-urlencoded" }),
+            ));
 
             let result = HTTP_BRIDGE.with(|bridge| {
                 let bridge = bridge.clone();
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let mut b = bridge.write().await;
-                        b.call("request", json!({
-                            "method": "POST",
-                            "url": url,
-                            "body": form_body,
-                            "headers": headers,
-                            "timeout": timeout,
-                            "max_redirects": max_redirects
-                        })).await
+                        b.call(
+                            "request",
+                            json!({
+                                "method": "POST",
+                                "url": url,
+                                "body": form_body,
+                                "headers": headers,
+                                "timeout": timeout,
+                                "max_redirects": max_redirects
+                            }),
+                        )
+                        .await
                     })
                 })
             });
@@ -1120,7 +1152,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
             match result {
                 Ok(v) => {
                     store_last_response(&v);
-                    let resp_body = v.get("data")
+                    let resp_body = v
+                        .get("data")
                         .and_then(|d| d.get("body"))
                         .and_then(|b| b.as_str())
                         .unwrap_or("");

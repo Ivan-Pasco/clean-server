@@ -43,13 +43,25 @@ fn probe(name: &str, params: &str, result: &str) {
 #[test]
 fn create_reset_token_canonical_and_alias() {
     // (user_id: i64, ttl_seconds: i64) -> i32 (length-prefixed string ptr)
-    probe("_auth_create_reset_token", "(param i64 i64)", "(result i32)");
+    probe(
+        "_auth_create_reset_token",
+        "(param i64 i64)",
+        "(result i32)",
+    );
     probe("auth.create_reset_token", "(param i64 i64)", "(result i32)");
 }
 
 #[test]
 fn consume_reset_token_canonical_and_alias() {
     // (token_ptr: i32, token_len: i32) -> i64 (user_id or 0)
-    probe("_auth_consume_reset_token", "(param i32 i32)", "(result i64)");
-    probe("auth.consume_reset_token", "(param i32 i32)", "(result i64)");
+    probe(
+        "_auth_consume_reset_token",
+        "(param i32 i32)",
+        "(result i64)",
+    );
+    probe(
+        "auth.consume_reset_token",
+        "(param i32 i32)",
+        "(result i64)",
+    );
 }

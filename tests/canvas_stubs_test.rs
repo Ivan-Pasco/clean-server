@@ -65,7 +65,9 @@ struct BridgeEntry {
 /// Parse the `[bridge].functions` array of frame.canvas/plugin.toml using a
 /// line-level regex. Mirrors `tools/gen_canvas_stubs.py::parse_entries`.
 fn parse_canvas_bridge(text: &str) -> Vec<BridgeEntry> {
-    let bridge_start = text.find("[bridge]").expect("frame.canvas plugin.toml missing [bridge] section");
+    let bridge_start = text
+        .find("[bridge]")
+        .expect("frame.canvas plugin.toml missing [bridge] section");
     // The [bridge] section ends at the next top-level [...] heading.
     let rest = &text[bridge_start + "[bridge]".len()..];
     let bridge_end = rest
@@ -80,7 +82,9 @@ fn parse_canvas_bridge(text: &str) -> Vec<BridgeEntry> {
         if !trimmed.starts_with("{") {
             continue;
         }
-        let Some(name) = extract_quoted(trimmed, "name") else { continue };
+        let Some(name) = extract_quoted(trimmed, "name") else {
+            continue;
+        };
         let params = extract_array(trimmed, "params");
         let returns = extract_quoted(trimmed, "returns").unwrap_or_default();
         entries.push(BridgeEntry {
@@ -103,9 +107,13 @@ fn extract_quoted(line: &str, key: &str) -> Option<String> {
 /// Extract `key = ["a", "b", ...]` from a bridge entry line.
 fn extract_array(line: &str, key: &str) -> Vec<String> {
     let needle = format!("{} = [", key);
-    let Some(start) = line.find(&needle) else { return Vec::new() };
+    let Some(start) = line.find(&needle) else {
+        return Vec::new();
+    };
     let start = start + needle.len();
-    let Some(end_rel) = line[start..].find(']') else { return Vec::new() };
+    let Some(end_rel) = line[start..].find(']') else {
+        return Vec::new();
+    };
     let inner = &line[start..start + end_rel];
     inner
         .split(',')
@@ -118,11 +126,11 @@ fn extract_array(line: &str, key: &str) -> Vec<String> {
 /// **using the compiler's plugin-bridge convention** (Integer → i32).
 fn expand_param_type(t: &str) -> Vec<&'static str> {
     match t {
-        "string"  => vec!["i32", "i32"],
+        "string" => vec!["i32", "i32"],
         "integer" => vec!["i32"],
-        "number"  => vec!["f64"],
+        "number" => vec!["f64"],
         "boolean" => vec!["i32"],
-        "ptr"     => vec!["i32"],
+        "ptr" => vec!["i32"],
         other => panic!(
             "Unknown parameter type in frame.canvas/plugin.toml: '{}'. \
              Update expand_param_type() in canvas_stubs_test.rs if a new type was added.",
@@ -134,11 +142,11 @@ fn expand_param_type(t: &str) -> Vec<&'static str> {
 /// Expand a return type to a WASM value type token, or `None` for void.
 fn expand_return_type(t: &str) -> Option<&'static str> {
     match t {
-        ""        => None,
-        "string"  => Some("i32"),
-        "ptr"     => Some("i32"),
+        "" => None,
+        "string" => Some("i32"),
+        "ptr" => Some("i32"),
         "integer" => Some("i32"),
-        "number"  => Some("f64"),
+        "number" => Some("f64"),
         "boolean" => Some("i32"),
         other => panic!(
             "Unknown return type in frame.canvas/plugin.toml: '{}'. \
@@ -151,7 +159,11 @@ fn expand_return_type(t: &str) -> Option<&'static str> {
 fn generate_wat_import(entry: &BridgeEntry) -> String {
     let mut import = format!("  (import \"env\" \"{}\" (func", entry.name);
 
-    let params: Vec<&str> = entry.params.iter().flat_map(|t| expand_param_type(t)).collect();
+    let params: Vec<&str> = entry
+        .params
+        .iter()
+        .flat_map(|t| expand_param_type(t))
+        .collect();
     if !params.is_empty() {
         import.push_str(" (param");
         for p in &params {

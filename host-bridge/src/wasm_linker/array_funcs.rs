@@ -78,7 +78,10 @@ fn call_indirect<S: WasmStateCore>(
     let func = match func_ref {
         Ref::Func(Some(f)) => f,
         _ => {
-            warn!("array callback: null/invalid funcref at index {}", callback_idx);
+            warn!(
+                "array callback: null/invalid funcref at index {}",
+                callback_idx
+            );
             return 0;
         }
     };
@@ -106,82 +109,107 @@ fn call_indirect<S: WasmStateCore>(
 /// Register all array_* functions.
 pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResult<()> {
     // array_get(arr, idx) -> i32 — 0 on invalid handle or OOB
-    linker.func_wrap("env", "array_get",
+    linker.func_wrap(
+        "env",
+        "array_get",
         |_: Caller<'_, S>, arr: i32, idx: i32| -> i32 {
             with_array(arr, |v| {
-                if idx < 0 { return 0; }
+                if idx < 0 {
+                    return 0;
+                }
                 v.get(idx as usize).copied().unwrap_or(0)
-            }).unwrap_or(0)
-        })?;
+            })
+            .unwrap_or(0)
+        },
+    )?;
 
     // array_set(arr, idx, value) -> void
-    linker.func_wrap("env", "array_set",
+    linker.func_wrap(
+        "env",
+        "array_set",
         |_: Caller<'_, S>, arr: i32, idx: i32, value: i32| {
             let _ = with_array_mut(arr, |v| {
                 if idx >= 0 && (idx as usize) < v.len() {
                     v[idx as usize] = value;
                 }
             });
-        })?;
+        },
+    )?;
 
     // array_push(arr, value) -> i32 — returns the same handle
-    linker.func_wrap("env", "array_push",
+    linker.func_wrap(
+        "env",
+        "array_push",
         |_: Caller<'_, S>, arr: i32, value: i32| -> i32 {
             with_array_mut(arr, |v| v.push(value)).unwrap_or(());
             arr
-        })?;
+        },
+    )?;
 
     // array_pop(arr) -> i32 — popped value, 0 if empty/invalid
-    linker.func_wrap("env", "array_pop",
-        |_: Caller<'_, S>, arr: i32| -> i32 {
-            with_array_mut(arr, |v| v.pop().unwrap_or(0)).unwrap_or(0)
-        })?;
+    linker.func_wrap("env", "array_pop", |_: Caller<'_, S>, arr: i32| -> i32 {
+        with_array_mut(arr, |v| v.pop().unwrap_or(0)).unwrap_or(0)
+    })?;
 
     // array_slice(arr, start, end) -> new handle
-    linker.func_wrap("env", "array_slice",
+    linker.func_wrap(
+        "env",
+        "array_slice",
         |_: Caller<'_, S>, arr: i32, start: i32, end: i32| -> i32 {
             let sliced = with_array(arr, |v| {
                 let len = v.len() as i32;
                 let s = start.clamp(0, len) as usize;
                 let e = end.clamp(0, len).max(start.clamp(0, len)) as usize;
                 v[s..e].to_vec()
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
             store_array(sliced)
-        })?;
+        },
+    )?;
 
     // array_concat(a, b) -> new handle
-    linker.func_wrap("env", "array_concat",
+    linker.func_wrap(
+        "env",
+        "array_concat",
         |_: Caller<'_, S>, a: i32, b: i32| -> i32 {
             let mut combined = Vec::new();
             with_array(a, |v| combined.extend_from_slice(v));
             with_array(b, |v| combined.extend_from_slice(v));
             store_array(combined)
-        })?;
+        },
+    )?;
 
     // array_reverse(arr) -> new handle (matches node-server: non-mutating)
-    linker.func_wrap("env", "array_reverse",
+    linker.func_wrap(
+        "env",
+        "array_reverse",
         |_: Caller<'_, S>, arr: i32| -> i32 {
             let mut reversed = with_array(arr, |v| v.clone()).unwrap_or_default();
             reversed.reverse();
             store_array(reversed)
-        })?;
+        },
+    )?;
 
     // array_sort(arr) -> new handle (ascending)
-    linker.func_wrap("env", "array_sort",
-        |_: Caller<'_, S>, arr: i32| -> i32 {
-            let mut sorted = with_array(arr, |v| v.clone()).unwrap_or_default();
-            sorted.sort();
-            store_array(sorted)
-        })?;
+    linker.func_wrap("env", "array_sort", |_: Caller<'_, S>, arr: i32| -> i32 {
+        let mut sorted = with_array(arr, |v| v.clone()).unwrap_or_default();
+        sorted.sort();
+        store_array(sorted)
+    })?;
 
     // array_contains(arr, value) -> boolean
-    linker.func_wrap("env", "array_contains",
+    linker.func_wrap(
+        "env",
+        "array_contains",
         |_: Caller<'_, S>, arr: i32, value: i32| -> i32 {
             with_array(arr, |v| if v.contains(&value) { 1 } else { 0 }).unwrap_or(0)
-        })?;
+        },
+    )?;
 
     // array_filter(arr, callback_idx) -> new handle of elements where cb(e) != 0
-    linker.func_wrap("env", "array_filter",
+    linker.func_wrap(
+        "env",
+        "array_filter",
         |mut caller: Caller<'_, S>, arr: i32, callback_idx: i32| -> i32 {
             let snapshot = with_array(arr, |v| v.clone()).unwrap_or_default();
             let mut out = Vec::with_capacity(snapshot.len());
@@ -191,10 +219,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             }
             store_array(out)
-        })?;
+        },
+    )?;
 
     // array_map(arr, callback_idx) -> new handle of cb(e) for each e
-    linker.func_wrap("env", "array_map",
+    linker.func_wrap(
+        "env",
+        "array_map",
         |mut caller: Caller<'_, S>, arr: i32, callback_idx: i32| -> i32 {
             let snapshot = with_array(arr, |v| v.clone()).unwrap_or_default();
             let mut out = Vec::with_capacity(snapshot.len());
@@ -202,10 +233,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 out.push(call_indirect(&mut caller, callback_idx, &[elem]));
             }
             store_array(out)
-        })?;
+        },
+    )?;
 
     // array_reduce(arr, callback_idx, initial) -> i32
-    linker.func_wrap("env", "array_reduce",
+    linker.func_wrap(
+        "env",
+        "array_reduce",
         |mut caller: Caller<'_, S>, arr: i32, callback_idx: i32, initial: i32| -> i32 {
             let snapshot = with_array(arr, |v| v.clone()).unwrap_or_default();
             let mut acc = initial;
@@ -213,10 +247,13 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 acc = call_indirect(&mut caller, callback_idx, &[acc, elem]);
             }
             acc
-        })?;
+        },
+    )?;
 
     // array_find(arr, callback_idx) -> first element where cb(e) != 0, else 0
-    linker.func_wrap("env", "array_find",
+    linker.func_wrap(
+        "env",
+        "array_find",
         |mut caller: Caller<'_, S>, arr: i32, callback_idx: i32| -> i32 {
             let snapshot = with_array(arr, |v| v.clone()).unwrap_or_default();
             for elem in snapshot {
@@ -225,7 +262,8 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             }
             0
-        })?;
+        },
+    )?;
 
     debug!("array_funcs: registered 13 functions, callback dispatch via __indirect_function_table");
     Ok(())

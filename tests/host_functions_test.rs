@@ -1112,7 +1112,10 @@ functions:
     let server = match TestServer::new(source, port).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Server setup failed (compiler may not support _req_param yet): {}", e);
+            eprintln!(
+                "Server setup failed (compiler may not support _req_param yet): {}",
+                e
+            );
             return;
         }
     };
@@ -1155,4 +1158,3 @@ functions:
         }
     }
 }
-

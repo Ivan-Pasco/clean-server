@@ -178,7 +178,13 @@ impl LocaleState {
         Some(safe)
     }
 
-    pub fn translate_count(&self, key: &str, count: i32, locale: &str, params_json: &str) -> String {
+    pub fn translate_count(
+        &self,
+        key: &str,
+        count: i32,
+        locale: &str,
+        params_json: &str,
+    ) -> String {
         let merged = inject_count(params_json, count);
 
         // Per CLDR spec: if count == 0 and a `{key}_zero` form exists, use it
@@ -337,11 +343,19 @@ pub fn plural_category(count: i32, locale: &str, _key: &str, _state: &LocaleStat
             }
         }
         "fr" | "pt" => {
-            if abs <= 1 { "one" } else { "other" }
+            if abs <= 1 {
+                "one"
+            } else {
+                "other"
+            }
         }
         "ja" | "zh" | "ko" | "th" | "vi" | "id" | "ms" => "other",
         _ => {
-            if abs == 1 { "one" } else { "other" }
+            if abs == 1 {
+                "one"
+            } else {
+                "other"
+            }
         }
     }
 }
@@ -372,10 +386,19 @@ fn number_format_for(locale: &str) -> LocaleNumberFormat {
     match primary.as_str() {
         "de" | "nl" | "it" | "pl" | "cs" | "sk" | "hu" | "hr" | "bg" | "ro" | "tr" | "el"
         | "ru" | "uk" | "be" | "sl" | "sr" | "no" | "fi" | "da" | "sv" | "nb" => {
-            LocaleNumberFormat { group: '.', decimal: ',' }
+            LocaleNumberFormat {
+                group: '.',
+                decimal: ',',
+            }
         }
-        "fr" => LocaleNumberFormat { group: '\u{202F}', decimal: ',' },
-        _ => LocaleNumberFormat { group: ',', decimal: '.' },
+        "fr" => LocaleNumberFormat {
+            group: '\u{202F}',
+            decimal: ',',
+        },
+        _ => LocaleNumberFormat {
+            group: ',',
+            decimal: '.',
+        },
     }
 }
 
@@ -384,7 +407,11 @@ pub fn format_number(value: f64, locale: &str, decimals: i32, use_grouping: bool
         return "NaN".to_string();
     }
     if value.is_infinite() {
-        return if value > 0.0 { "\u{221E}".to_string() } else { "-\u{221E}".to_string() };
+        return if value > 0.0 {
+            "\u{221E}".to_string()
+        } else {
+            "-\u{221E}".to_string()
+        };
     }
     let fmt = number_format_for(locale);
     let d = if decimals < 0 { 2 } else { decimals as usize };
@@ -443,7 +470,13 @@ fn currency_symbol(code: &str, locale: &str) -> String {
     let upper = code.to_uppercase();
     let primary = locale.split('-').next().unwrap_or(locale).to_lowercase();
     match upper.as_str() {
-        "USD" => if primary.starts_with("en") { "$".to_string() } else { "US$".to_string() },
+        "USD" => {
+            if primary.starts_with("en") {
+                "$".to_string()
+            } else {
+                "US$".to_string()
+            }
+        }
         "EUR" => "\u{20AC}".to_string(),
         "GBP" => "\u{00A3}".to_string(),
         "JPY" => "\u{00A5}".to_string(),
@@ -541,51 +574,123 @@ fn format_date_short(dt: &DateTime<Utc>, primary: &str, _region: &str) -> String
 fn month_abbr(month: u32, primary: &str) -> &'static str {
     match primary {
         "fr" => match month {
-            1 => "janv.", 2 => "f\u{00E9}vr.", 3 => "mars", 4 => "avr.",
-            5 => "mai", 6 => "juin", 7 => "juil.", 8 => "ao\u{00FB}t",
-            9 => "sept.", 10 => "oct.", 11 => "nov.", 12 => "d\u{00E9}c.",
+            1 => "janv.",
+            2 => "f\u{00E9}vr.",
+            3 => "mars",
+            4 => "avr.",
+            5 => "mai",
+            6 => "juin",
+            7 => "juil.",
+            8 => "ao\u{00FB}t",
+            9 => "sept.",
+            10 => "oct.",
+            11 => "nov.",
+            12 => "d\u{00E9}c.",
             _ => "???",
         },
         "de" => match month {
-            1 => "Jan.", 2 => "Feb.", 3 => "M\u{00E4}r.", 4 => "Apr.",
-            5 => "Mai", 6 => "Juni", 7 => "Juli", 8 => "Aug.",
-            9 => "Sep.", 10 => "Okt.", 11 => "Nov.", 12 => "Dez.",
+            1 => "Jan.",
+            2 => "Feb.",
+            3 => "M\u{00E4}r.",
+            4 => "Apr.",
+            5 => "Mai",
+            6 => "Juni",
+            7 => "Juli",
+            8 => "Aug.",
+            9 => "Sep.",
+            10 => "Okt.",
+            11 => "Nov.",
+            12 => "Dez.",
             _ => "???",
         },
         "es" => match month {
-            1 => "ene.", 2 => "feb.", 3 => "mar.", 4 => "abr.",
-            5 => "may.", 6 => "jun.", 7 => "jul.", 8 => "ago.",
-            9 => "sep.", 10 => "oct.", 11 => "nov.", 12 => "dic.",
+            1 => "ene.",
+            2 => "feb.",
+            3 => "mar.",
+            4 => "abr.",
+            5 => "may.",
+            6 => "jun.",
+            7 => "jul.",
+            8 => "ago.",
+            9 => "sep.",
+            10 => "oct.",
+            11 => "nov.",
+            12 => "dic.",
             _ => "???",
         },
         "pt" => match month {
-            1 => "jan.", 2 => "fev.", 3 => "mar.", 4 => "abr.",
-            5 => "mai.", 6 => "jun.", 7 => "jul.", 8 => "ago.",
-            9 => "set.", 10 => "out.", 11 => "nov.", 12 => "dez.",
+            1 => "jan.",
+            2 => "fev.",
+            3 => "mar.",
+            4 => "abr.",
+            5 => "mai.",
+            6 => "jun.",
+            7 => "jul.",
+            8 => "ago.",
+            9 => "set.",
+            10 => "out.",
+            11 => "nov.",
+            12 => "dez.",
             _ => "???",
         },
         "ja" => match month {
-            1 => "1\u{6708}", 2 => "2\u{6708}", 3 => "3\u{6708}", 4 => "4\u{6708}",
-            5 => "5\u{6708}", 6 => "6\u{6708}", 7 => "7\u{6708}", 8 => "8\u{6708}",
-            9 => "9\u{6708}", 10 => "10\u{6708}", 11 => "11\u{6708}", 12 => "12\u{6708}",
+            1 => "1\u{6708}",
+            2 => "2\u{6708}",
+            3 => "3\u{6708}",
+            4 => "4\u{6708}",
+            5 => "5\u{6708}",
+            6 => "6\u{6708}",
+            7 => "7\u{6708}",
+            8 => "8\u{6708}",
+            9 => "9\u{6708}",
+            10 => "10\u{6708}",
+            11 => "11\u{6708}",
+            12 => "12\u{6708}",
             _ => "???",
         },
         "zh" => match month {
-            1 => "1\u{6708}", 2 => "2\u{6708}", 3 => "3\u{6708}", 4 => "4\u{6708}",
-            5 => "5\u{6708}", 6 => "6\u{6708}", 7 => "7\u{6708}", 8 => "8\u{6708}",
-            9 => "9\u{6708}", 10 => "10\u{6708}", 11 => "11\u{6708}", 12 => "12\u{6708}",
+            1 => "1\u{6708}",
+            2 => "2\u{6708}",
+            3 => "3\u{6708}",
+            4 => "4\u{6708}",
+            5 => "5\u{6708}",
+            6 => "6\u{6708}",
+            7 => "7\u{6708}",
+            8 => "8\u{6708}",
+            9 => "9\u{6708}",
+            10 => "10\u{6708}",
+            11 => "11\u{6708}",
+            12 => "12\u{6708}",
             _ => "???",
         },
         "ko" => match month {
-            1 => "1\u{C6D4}", 2 => "2\u{C6D4}", 3 => "3\u{C6D4}", 4 => "4\u{C6D4}",
-            5 => "5\u{C6D4}", 6 => "6\u{C6D4}", 7 => "7\u{C6D4}", 8 => "8\u{C6D4}",
-            9 => "9\u{C6D4}", 10 => "10\u{C6D4}", 11 => "11\u{C6D4}", 12 => "12\u{C6D4}",
+            1 => "1\u{C6D4}",
+            2 => "2\u{C6D4}",
+            3 => "3\u{C6D4}",
+            4 => "4\u{C6D4}",
+            5 => "5\u{C6D4}",
+            6 => "6\u{C6D4}",
+            7 => "7\u{C6D4}",
+            8 => "8\u{C6D4}",
+            9 => "9\u{C6D4}",
+            10 => "10\u{C6D4}",
+            11 => "11\u{C6D4}",
+            12 => "12\u{C6D4}",
             _ => "???",
         },
         _ => match month {
-            1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
-            5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
-            9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+            1 => "Jan",
+            2 => "Feb",
+            3 => "Mar",
+            4 => "Apr",
+            5 => "May",
+            6 => "Jun",
+            7 => "Jul",
+            8 => "Aug",
+            9 => "Sep",
+            10 => "Oct",
+            11 => "Nov",
+            12 => "Dec",
             _ => "???",
         },
     }
@@ -594,36 +699,81 @@ fn month_abbr(month: u32, primary: &str) -> &'static str {
 fn month_full(month: u32, primary: &str) -> &'static str {
     match primary {
         "fr" => match month {
-            1 => "janvier", 2 => "f\u{00E9}vrier", 3 => "mars", 4 => "avril",
-            5 => "mai", 6 => "juin", 7 => "juillet", 8 => "ao\u{00FB}t",
-            9 => "septembre", 10 => "octobre", 11 => "novembre", 12 => "d\u{00E9}cembre",
+            1 => "janvier",
+            2 => "f\u{00E9}vrier",
+            3 => "mars",
+            4 => "avril",
+            5 => "mai",
+            6 => "juin",
+            7 => "juillet",
+            8 => "ao\u{00FB}t",
+            9 => "septembre",
+            10 => "octobre",
+            11 => "novembre",
+            12 => "d\u{00E9}cembre",
             _ => "???",
         },
         "de" => match month {
-            1 => "Januar", 2 => "Februar", 3 => "M\u{00E4}rz", 4 => "April",
-            5 => "Mai", 6 => "Juni", 7 => "Juli", 8 => "August",
-            9 => "September", 10 => "Oktober", 11 => "November", 12 => "Dezember",
+            1 => "Januar",
+            2 => "Februar",
+            3 => "M\u{00E4}rz",
+            4 => "April",
+            5 => "Mai",
+            6 => "Juni",
+            7 => "Juli",
+            8 => "August",
+            9 => "September",
+            10 => "Oktober",
+            11 => "November",
+            12 => "Dezember",
             _ => "???",
         },
         "es" => match month {
-            1 => "enero", 2 => "febrero", 3 => "marzo", 4 => "abril",
-            5 => "mayo", 6 => "junio", 7 => "julio", 8 => "agosto",
-            9 => "septiembre", 10 => "octubre", 11 => "noviembre", 12 => "diciembre",
+            1 => "enero",
+            2 => "febrero",
+            3 => "marzo",
+            4 => "abril",
+            5 => "mayo",
+            6 => "junio",
+            7 => "julio",
+            8 => "agosto",
+            9 => "septiembre",
+            10 => "octubre",
+            11 => "noviembre",
+            12 => "diciembre",
             _ => "???",
         },
         "pt" => match month {
-            1 => "janeiro", 2 => "fevereiro", 3 => "mar\u{00E7}o", 4 => "abril",
-            5 => "maio", 6 => "junho", 7 => "julho", 8 => "agosto",
-            9 => "setembro", 10 => "outubro", 11 => "novembro", 12 => "dezembro",
+            1 => "janeiro",
+            2 => "fevereiro",
+            3 => "mar\u{00E7}o",
+            4 => "abril",
+            5 => "maio",
+            6 => "junho",
+            7 => "julho",
+            8 => "agosto",
+            9 => "setembro",
+            10 => "outubro",
+            11 => "novembro",
+            12 => "dezembro",
             _ => "???",
         },
         "ja" => month_abbr(month, "ja"),
         "zh" => month_abbr(month, "zh"),
         "ko" => month_abbr(month, "ko"),
         _ => match month {
-            1 => "January", 2 => "February", 3 => "March", 4 => "April",
-            5 => "May", 6 => "June", 7 => "July", 8 => "August",
-            9 => "September", 10 => "October", 11 => "November", 12 => "December",
+            1 => "January",
+            2 => "February",
+            3 => "March",
+            4 => "April",
+            5 => "May",
+            6 => "June",
+            7 => "July",
+            8 => "August",
+            9 => "September",
+            10 => "October",
+            11 => "November",
+            12 => "December",
             _ => "???",
         },
     }
@@ -632,51 +782,75 @@ fn month_full(month: u32, primary: &str) -> &'static str {
 fn weekday_full(weekday: Weekday, primary: &str) -> &'static str {
     match primary {
         "fr" => match weekday {
-            Weekday::Mon => "lundi", Weekday::Tue => "mardi",
-            Weekday::Wed => "mercredi", Weekday::Thu => "jeudi",
-            Weekday::Fri => "vendredi", Weekday::Sat => "samedi",
+            Weekday::Mon => "lundi",
+            Weekday::Tue => "mardi",
+            Weekday::Wed => "mercredi",
+            Weekday::Thu => "jeudi",
+            Weekday::Fri => "vendredi",
+            Weekday::Sat => "samedi",
             Weekday::Sun => "dimanche",
         },
         "de" => match weekday {
-            Weekday::Mon => "Montag", Weekday::Tue => "Dienstag",
-            Weekday::Wed => "Mittwoch", Weekday::Thu => "Donnerstag",
-            Weekday::Fri => "Freitag", Weekday::Sat => "Samstag",
+            Weekday::Mon => "Montag",
+            Weekday::Tue => "Dienstag",
+            Weekday::Wed => "Mittwoch",
+            Weekday::Thu => "Donnerstag",
+            Weekday::Fri => "Freitag",
+            Weekday::Sat => "Samstag",
             Weekday::Sun => "Sonntag",
         },
         "es" => match weekday {
-            Weekday::Mon => "lunes", Weekday::Tue => "martes",
-            Weekday::Wed => "mi\u{00E9}rcoles", Weekday::Thu => "jueves",
-            Weekday::Fri => "viernes", Weekday::Sat => "s\u{00E1}bado",
+            Weekday::Mon => "lunes",
+            Weekday::Tue => "martes",
+            Weekday::Wed => "mi\u{00E9}rcoles",
+            Weekday::Thu => "jueves",
+            Weekday::Fri => "viernes",
+            Weekday::Sat => "s\u{00E1}bado",
             Weekday::Sun => "domingo",
         },
         "pt" => match weekday {
-            Weekday::Mon => "segunda-feira", Weekday::Tue => "ter\u{00E7}a-feira",
-            Weekday::Wed => "quarta-feira", Weekday::Thu => "quinta-feira",
-            Weekday::Fri => "sexta-feira", Weekday::Sat => "s\u{00E1}bado",
+            Weekday::Mon => "segunda-feira",
+            Weekday::Tue => "ter\u{00E7}a-feira",
+            Weekday::Wed => "quarta-feira",
+            Weekday::Thu => "quinta-feira",
+            Weekday::Fri => "sexta-feira",
+            Weekday::Sat => "s\u{00E1}bado",
             Weekday::Sun => "domingo",
         },
         "ja" => match weekday {
-            Weekday::Mon => "\u{6708}\u{66DC}\u{65E5}", Weekday::Tue => "\u{706B}\u{66DC}\u{65E5}",
-            Weekday::Wed => "\u{6C34}\u{66DC}\u{65E5}", Weekday::Thu => "\u{6728}\u{66DC}\u{65E5}",
-            Weekday::Fri => "\u{91D1}\u{66DC}\u{65E5}", Weekday::Sat => "\u{571F}\u{66DC}\u{65E5}",
+            Weekday::Mon => "\u{6708}\u{66DC}\u{65E5}",
+            Weekday::Tue => "\u{706B}\u{66DC}\u{65E5}",
+            Weekday::Wed => "\u{6C34}\u{66DC}\u{65E5}",
+            Weekday::Thu => "\u{6728}\u{66DC}\u{65E5}",
+            Weekday::Fri => "\u{91D1}\u{66DC}\u{65E5}",
+            Weekday::Sat => "\u{571F}\u{66DC}\u{65E5}",
             Weekday::Sun => "\u{65E5}\u{66DC}\u{65E5}",
         },
         "zh" => match weekday {
-            Weekday::Mon => "\u{661F}\u{671F}\u{4E00}", Weekday::Tue => "\u{661F}\u{671F}\u{4E8C}",
-            Weekday::Wed => "\u{661F}\u{671F}\u{4E09}", Weekday::Thu => "\u{661F}\u{671F}\u{56DB}",
-            Weekday::Fri => "\u{661F}\u{671F}\u{4E94}", Weekday::Sat => "\u{661F}\u{671F}\u{516D}",
+            Weekday::Mon => "\u{661F}\u{671F}\u{4E00}",
+            Weekday::Tue => "\u{661F}\u{671F}\u{4E8C}",
+            Weekday::Wed => "\u{661F}\u{671F}\u{4E09}",
+            Weekday::Thu => "\u{661F}\u{671F}\u{56DB}",
+            Weekday::Fri => "\u{661F}\u{671F}\u{4E94}",
+            Weekday::Sat => "\u{661F}\u{671F}\u{516D}",
             Weekday::Sun => "\u{661F}\u{671F}\u{65E5}",
         },
         "ko" => match weekday {
-            Weekday::Mon => "\u{C6D4}\u{C694}\u{C77C}", Weekday::Tue => "\u{D654}\u{C694}\u{C77C}",
-            Weekday::Wed => "\u{C218}\u{C694}\u{C77C}", Weekday::Thu => "\u{BAA9}\u{C694}\u{C77C}",
-            Weekday::Fri => "\u{AE08}\u{C694}\u{C77C}", Weekday::Sat => "\u{D1A0}\u{C694}\u{C77C}",
+            Weekday::Mon => "\u{C6D4}\u{C694}\u{C77C}",
+            Weekday::Tue => "\u{D654}\u{C694}\u{C77C}",
+            Weekday::Wed => "\u{C218}\u{C694}\u{C77C}",
+            Weekday::Thu => "\u{BAA9}\u{C694}\u{C77C}",
+            Weekday::Fri => "\u{AE08}\u{C694}\u{C77C}",
+            Weekday::Sat => "\u{D1A0}\u{C694}\u{C77C}",
             Weekday::Sun => "\u{C77C}\u{C694}\u{C77C}",
         },
         _ => match weekday {
-            Weekday::Mon => "Monday", Weekday::Tue => "Tuesday",
-            Weekday::Wed => "Wednesday", Weekday::Thu => "Thursday",
-            Weekday::Fri => "Friday", Weekday::Sat => "Saturday",
+            Weekday::Mon => "Monday",
+            Weekday::Tue => "Tuesday",
+            Weekday::Wed => "Wednesday",
+            Weekday::Thu => "Thursday",
+            Weekday::Fri => "Friday",
+            Weekday::Sat => "Saturday",
             Weekday::Sun => "Sunday",
         },
     }
@@ -687,8 +861,8 @@ fn format_date_medium(dt: &DateTime<Utc>, primary: &str) -> String {
     let d = dt.day();
     let y = dt.year();
     match primary {
-        "fr" | "de" | "es" | "pt" | "it" | "pl" | "cs" | "sk" | "hu" | "ro" | "nl"
-        | "sv" | "nb" | "da" | "fi" | "tr" => format!("{} {} {}", d, abbr, y),
+        "fr" | "de" | "es" | "pt" | "it" | "pl" | "cs" | "sk" | "hu" | "ro" | "nl" | "sv"
+        | "nb" | "da" | "fi" | "tr" => format!("{} {} {}", d, abbr, y),
         "ja" => format!("{}年{}日", y, abbr),
         "zh" => format!("{}年{}日", y, abbr),
         "ko" => format!("{}년 {} {}일", y, abbr, d),
@@ -731,14 +905,18 @@ mod tests {
     #[test]
     fn test_translate_key_found() {
         let mut state = LocaleState::new("en");
-        state.load_json("en", r#"{"common": {"save": "Save"}}"#).unwrap();
+        state
+            .load_json("en", r#"{"common": {"save": "Save"}}"#)
+            .unwrap();
         assert_eq!(state.translate("common.save", "en", "{}"), "Save");
     }
 
     #[test]
     fn test_translate_fallback_to_default() {
         let mut state = LocaleState::new("en");
-        state.load_json("en", r#"{"common": {"save": "Save"}}"#).unwrap();
+        state
+            .load_json("en", r#"{"common": {"save": "Save"}}"#)
+            .unwrap();
         assert_eq!(state.translate("common.save", "fr", "{}"), "Save");
     }
 
@@ -751,8 +929,13 @@ mod tests {
     #[test]
     fn test_translate_interpolation() {
         let mut state = LocaleState::new("en");
-        state.load_json("en", r#"{"greeting": "Hello, {name}!"}"#).unwrap();
-        assert_eq!(state.translate("greeting", "en", r#"{"name": "Alice"}"#), "Hello, Alice!");
+        state
+            .load_json("en", r#"{"greeting": "Hello, {name}!"}"#)
+            .unwrap();
+        assert_eq!(
+            state.translate("greeting", "en", r#"{"name": "Alice"}"#),
+            "Hello, Alice!"
+        );
     }
 
     #[test]
@@ -765,11 +948,16 @@ mod tests {
     #[test]
     fn test_translate_count_en() {
         let mut state = LocaleState::new("en");
-        state.load_json("en", r#"{
+        state
+            .load_json(
+                "en",
+                r#"{
             "users_zero": "No users",
             "users_one": "One user",
             "users_other": "{count} users"
-        }"#).unwrap();
+        }"#,
+            )
+            .unwrap();
         assert_eq!(state.translate_count("users", 0, "en", "{}"), "No users");
         assert_eq!(state.translate_count("users", 1, "en", "{}"), "One user");
         assert_eq!(state.translate_count("users", 5, "en", "{}"), "5 users");
@@ -778,7 +966,12 @@ mod tests {
     #[test]
     fn test_translate_count_fallback_other() {
         let mut state = LocaleState::new("en");
-        state.load_json("en", r#"{"items_one": "One item", "items_other": "{count} items"}"#).unwrap();
+        state
+            .load_json(
+                "en",
+                r#"{"items_one": "One item", "items_other": "{count} items"}"#,
+            )
+            .unwrap();
         // No _zero: should fall back to _other
         assert_eq!(state.translate_count("items", 0, "en", "{}"), "0 items");
         assert_eq!(state.translate_count("items", 5, "en", "{}"), "5 items");
@@ -827,7 +1020,10 @@ mod tests {
 
     #[test]
     fn test_format_date_full_en() {
-        assert_eq!(format_date(1767225600.0, "full", "en"), "Thursday, January 1, 2026");
+        assert_eq!(
+            format_date(1767225600.0, "full", "en"),
+            "Thursday, January 1, 2026"
+        );
     }
 
     #[test]
@@ -846,7 +1042,12 @@ mod tests {
     #[test]
     fn test_flatten_nested() {
         let mut state = LocaleState::new("en");
-        state.load_json("en", r#"{"users": {"greeting": "Hello", "bye": "Goodbye"}}"#).unwrap();
+        state
+            .load_json(
+                "en",
+                r#"{"users": {"greeting": "Hello", "bye": "Goodbye"}}"#,
+            )
+            .unwrap();
         assert_eq!(state.translate("users.greeting", "en", "{}"), "Hello");
         assert_eq!(state.translate("users.bye", "en", "{}"), "Goodbye");
     }
