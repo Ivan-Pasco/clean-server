@@ -572,7 +572,9 @@ const FULL_CONTRACT_WAT: &str = r#"
   ;; -----------------------------------------------------------------------
   ;; Note: _json_parse is NOT registered by the server — only _json_get,
   ;; _json_encode, _json_decode are available.
-  (import "env" "_json_get"    (func (param i32 i32 i32 i32) (result i32)))
+  ;; _json_get: (any: i32, path_lp_ptr: i32) -> any (i32)
+  ;; Frame.server v2.8.4+ / compiler 0.33.54+ shape — see function-registry.toml.
+  (import "env" "_json_get"    (func (param i32 i32) (result i32)))
   (import "env" "_json_encode" (func (param i32 i32) (result i32)))
   (import "env" "_json_decode" (func (param i32 i32) (result i32)))
 
