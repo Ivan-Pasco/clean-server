@@ -99,7 +99,9 @@ CI runs the full T2 lane plus:
 
 The `integration-monorepo` CI job stages both siblings (from `Ivan-Pasco/clean-language-spec` for foundation and `Ivan-Pasco/clean-framework` for plugins) before running the tests. If `clean-framework` is private/unavailable to the runner, the canvas/ui pair is skipped with a warning — the pre-push hook still runs them locally, so the guard survives.
 
-**`continue-on-error` on spec-compliance and integration-monorepo.** These two CI jobs run in **warn-only** mode. They surface pre-existing spec ↔ implementation drift (e.g. `_json_get` signature mismatch, missing browser-scoped `_ui_*` registrations) but do not block PR merges. Rationale: the drift predates this test strategy; blocking on it would gate every unrelated PR on cleanup work of unknown scope. The **pre-push hook runs the same tests strictly** — a developer working locally in the full monorepo cannot push code that regresses these tests further. This is a deliberate asymmetry: strict local enforcement, permissive CI surface, so drift is always visible but never a merge blocker. Remove `continue-on-error` when the pre-existing drift is closed.
+**`continue-on-error` on spec-compliance only.** As of v1.9.81 the `integration-monorepo` job is a hard gate — the `TypeConvention` split in `bridge_contract_test` / `bridge_compliance_test` (plugin-bridge functions use `integer→i32`, host-bridge functions use `integer→i64`) closed the previously-flagged 23 `_ui_*` drift.
+
+The `spec-compliance` job stays `continue-on-error` for a **different, upstream reason**: CI checks out the registry from `Ivan-Pasco/clean-language-spec@main`, which currently lags the local monorepo registry (specifically, `_json_get` was updated to the `["any","i32"] -> any` signature in v2.8.4+ locally, but that change has not been synced upstream to `clean-language-spec@main` yet). Locally — against the up-to-date registry — both spec compliance tests pass, and the pre-push hook runs them strictly. Remove `continue-on-error` on `spec-compliance` when the upstream registry sync catches up.
 
 Duration target: < 15 minutes.
 

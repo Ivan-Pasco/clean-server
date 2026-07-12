@@ -159,17 +159,10 @@ jobs:
   #   $GITHUB_WORKSPACE/foundation/      (function-registry.toml)
   #   $GITHUB_WORKSPACE/clean-framework/ (frame.canvas + frame.ui plugin.toml)
   # ---------------------------------------------------------------
-  # NOTE: `continue-on-error: true` — this job surfaces pre-existing spec ↔
-  # implementation drift (e.g. _ui_* browser-scoped functions in the
-  # foundation registry that clean-server intentionally does not register).
-  # We keep the job running so the drift is visible in CI, but do not block
-  # PRs on it. Pre-push runs the same tests strictly on the local monorepo.
-  # See system-documents/TEST_STRATEGY.md § 3.3.
   integration-monorepo:
     name: T2 · Integration (monorepo-only)
     runs-on: ubuntu-latest
     needs: policy
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -254,10 +247,15 @@ jobs:
   # ---------------------------------------------------------------
   # T3 · Spec compliance (registry ↔ implementation, full run — was skipped)
   # ---------------------------------------------------------------
-  # NOTE: `continue-on-error: true` — this job surfaces pre-existing spec ↔
-  # implementation drift (e.g. `_json_get` signature mismatch, missing
-  # browser-scoped `_ui_*` registrations). The job runs so drift is visible
-  # in CI; pre-push runs it strictly locally.
+  # NOTE: `continue-on-error: true` — this job checks out the registry from
+  # Ivan-Pasco/clean-language-spec@main, which currently lags the local
+  # monorepo registry. Specifically, `_json_get` was updated to the
+  # `["any","i32"] -> any` signature in v2.8.4+ locally but that change has
+  # not been synced upstream to clean-language-spec@main yet.
+  #
+  # Locally (against the up-to-date registry) both spec compliance tests
+  # pass — see pre-push hook. Remove continue-on-error when the upstream
+  # registry sync catches up.
   # See system-documents/TEST_STRATEGY.md § 3.3.
   spec-compliance:
     name: T3 · Spec compliance

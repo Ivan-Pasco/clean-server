@@ -76,24 +76,54 @@ struct FunctionEntry {
     aliases: Vec<String>,
     #[allow(dead_code)]
     description: String,
+    // Empty = unrestricted (backward compat with pre-2026-06 entries).
+    // See registry header "HOST SCOPING". Server-side compliance only
+    // exercises entries whose `hosts` includes "server" (or is empty).
+    #[serde(default)]
+    hosts: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Type expansion helpers
 // ---------------------------------------------------------------------------
 
-/// Expand a registry high-level parameter type to one or more WASM value types.
+/// Type-expansion convention selector. See bridge_contract_test.rs for the
+/// full rationale — the short version: the registry uses "integer" for two
+/// different WASM types depending on the function's ownership.
 ///
-/// `"string"` expands to two `i32` values (ptr + len pair).
-/// All other types map to a single primitive.
-fn expand_param_type(t: &str) -> Vec<&str> {
+/// - `HostBridge` — pure Layer 2/3 host functions (math, db, http_client
+///   internals). `integer` → `i64` (native register width).
+/// - `PluginBridge` — plugin-side functions with `hosts` containing
+///   "browser" (frame.ui, frame.canvas). `integer` → `i32` because the
+///   compiler emits `i32` on the plugin-bridge ABI so the browser JS
+///   shim can consume it directly. Server no-op stubs must match that.
+#[derive(Copy, Clone)]
+enum TypeConvention {
+    HostBridge,
+    PluginBridge,
+}
+
+fn convention_for(hosts: &[String]) -> TypeConvention {
+    if hosts.iter().any(|h| h == "browser") {
+        TypeConvention::PluginBridge
+    } else {
+        TypeConvention::HostBridge
+    }
+}
+
+fn expand_param_type(t: &str, conv: TypeConvention) -> Vec<&str> {
     match t {
         "string" => vec!["i32", "i32"],
-        "integer" => vec!["i64"],
+        "integer" => match conv {
+            TypeConvention::HostBridge => vec!["i64"],
+            TypeConvention::PluginBridge => vec!["i32"],
+        },
         "number" => vec!["f64"],
         "boolean" => vec!["i32"],
         "i32" => vec!["i32"],
         "i64" => vec!["i64"],
+        // "any" is a Clean Language boxed-any pointer (i32 heap address).
+        "any" => vec!["i32"],
         other => panic!(
             "Unknown parameter type in function-registry.toml: '{}'. \
              Update expand_param_type() in bridge_compliance_test.rs if a new type was added.",
@@ -102,11 +132,7 @@ fn expand_param_type(t: &str) -> Vec<&str> {
     }
 }
 
-/// Expand a registry high-level return type to a WASM value type, or `None`
-/// for void / no return value.
-///
-/// `"ptr"` means the function returns a length-prefixed string pointer (i32).
-fn expand_return_type(t: &str) -> Option<&str> {
+fn expand_return_type(t: &str, conv: TypeConvention) -> Option<&str> {
     match t {
         "void" => None,
         "ptr" => Some("i32"),
@@ -114,8 +140,13 @@ fn expand_return_type(t: &str) -> Option<&str> {
         "i32" => Some("i32"),
         "i64" => Some("i64"),
         "boolean" => Some("i32"),
-        "integer" => Some("i64"),
+        "integer" => match conv {
+            TypeConvention::HostBridge => Some("i64"),
+            TypeConvention::PluginBridge => Some("i32"),
+        },
         "number" => Some("f64"),
+        // "any" is a Clean Language boxed-any pointer (i32 heap address).
+        "any" => Some("i32"),
         other => panic!(
             "Unknown return type in function-registry.toml: '{}'. \
              Update expand_return_type() in bridge_compliance_test.rs if a new type was added.",
@@ -125,15 +156,19 @@ fn expand_return_type(t: &str) -> Option<&str> {
 }
 
 /// Generate a single WAT import declaration line for the given function.
-///
-/// Example output:
-/// ```text
-///   (import "env" "math_sin" (func (param f64) (result f64)))
-/// ```
-fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
+fn generate_wat_import(
+    module: &str,
+    name: &str,
+    params: &[String],
+    returns: &str,
+    conv: TypeConvention,
+) -> String {
     let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
 
-    let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
+    let wasm_params: Vec<&str> = params
+        .iter()
+        .flat_map(|t| expand_param_type(t, conv))
+        .collect();
 
     if !wasm_params.is_empty() {
         import.push_str(" (param");
@@ -143,7 +178,7 @@ fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &st
         import.push(')');
     }
 
-    if let Some(ret) = expand_return_type(returns) {
+    if let Some(ret) = expand_return_type(returns, conv) {
         import.push_str(&format!(" (result {})", ret));
     }
 
@@ -207,13 +242,19 @@ fn test_full_bridge_compliance() {
         )
     });
 
-    // Collect all functions from every layer (Layer 2 + Layer 3).
-    // The registry may define functions for additional layers in the future;
-    // this test intentionally covers all layers to remain future-proof.
+    // Collect all functions from every layer (Layer 2 + Layer 3) whose
+    // `hosts` field includes "server" or is empty (unrestricted). Browser-
+    // only functions (frame.ui client-side stubs, canvas draw primitives)
+    // are intentionally NOT registered on the server and must be excluded
+    // here — otherwise the module fails to instantiate with a linker error.
+    // Matches the filter in bridge_contract_test.rs.
     let all_funcs: Vec<&FunctionEntry> = registry
         .functions
         .iter()
-        .filter(|f| f.layer == 2 || f.layer == 3)
+        .filter(|f| {
+            (f.layer == 2 || f.layer == 3)
+                && (f.hosts.is_empty() || f.hosts.iter().any(|h| h == "server"))
+        })
         .collect();
 
     // Sanity-check that the registry was loaded with a reasonable number of entries.
@@ -248,11 +289,13 @@ fn test_full_bridge_compliance() {
         .iter()
         .filter(|f| f.layer == 2 && f.module == "memory_runtime")
     {
+        let conv = convention_for(&func.hosts);
         wat.push_str(&generate_wat_import(
             &func.module,
             &func.name,
             &func.params,
             &func.returns,
+            conv,
         ));
         import_count += 1;
         layer2_import_total += 1;
@@ -262,6 +305,7 @@ fn test_full_bridge_compliance() {
                 alias,
                 &func.params,
                 &func.returns,
+                conv,
             ));
             import_count += 1;
             layer2_import_total += 1;
@@ -273,11 +317,13 @@ fn test_full_bridge_compliance() {
         .iter()
         .filter(|f| f.layer == 2 && f.module == "env")
     {
+        let conv = convention_for(&func.hosts);
         wat.push_str(&generate_wat_import(
             &func.module,
             &func.name,
             &func.params,
             &func.returns,
+            conv,
         ));
         import_count += 1;
         layer2_import_total += 1;
@@ -287,6 +333,7 @@ fn test_full_bridge_compliance() {
                 alias,
                 &func.params,
                 &func.returns,
+                conv,
             ));
             import_count += 1;
             layer2_import_total += 1;
@@ -295,11 +342,13 @@ fn test_full_bridge_compliance() {
 
     wat.push_str("\n  ;; --- Layer 3: env module (server-specific) ---\n");
     for func in all_funcs.iter().filter(|f| f.layer == 3) {
+        let conv = convention_for(&func.hosts);
         wat.push_str(&generate_wat_import(
             &func.module,
             &func.name,
             &func.params,
             &func.returns,
+            conv,
         ));
         import_count += 1;
         layer3_import_total += 1;
@@ -309,6 +358,7 @@ fn test_full_bridge_compliance() {
                 alias,
                 &func.params,
                 &func.returns,
+                conv,
             ));
             import_count += 1;
             layer3_import_total += 1;

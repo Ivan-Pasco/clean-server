@@ -61,10 +61,45 @@ struct FunctionEntry {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn expand_param_type(t: &str) -> Vec<&str> {
+/// Type-expansion convention selector.
+///
+/// The registry uses the same word "integer" for two different WASM types
+/// depending on which layer the function belongs to:
+///
+/// - **HostBridge (Layer 2 host functions like `math_sin`, `db_query`)** —
+///   `integer` expands to `i64`. This is the wide native register width used
+///   for portable host bridge signatures.
+/// - **PluginBridge (frame.ui / frame.canvas helpers with `hosts = ["browser", ...]`
+///   or plugin-owned server stubs)** — `integer` expands to `i32`. This
+///   matches the compiler's plugin-bridge convention: plugin-side function
+///   ABIs are compiled to `i32` so they fit the browser JS bridge cleanly,
+///   and the server no-op stubs must match the compiler-emitted import.
+///
+/// Both conventions coexist in the same registry file; the `hosts` field
+/// tells them apart. Anything with `browser` in `hosts` is a plugin-side
+/// function → PluginBridge convention. Everything else (pure server layer 2
+/// or 3) → HostBridge convention.
+#[derive(Copy, Clone)]
+enum TypeConvention {
+    HostBridge,
+    PluginBridge,
+}
+
+fn convention_for(hosts: &[String]) -> TypeConvention {
+    if hosts.iter().any(|h| h == "browser") {
+        TypeConvention::PluginBridge
+    } else {
+        TypeConvention::HostBridge
+    }
+}
+
+fn expand_param_type(t: &str, conv: TypeConvention) -> Vec<&str> {
     match t {
         "string" => vec!["i32", "i32"],
-        "integer" => vec!["i64"],
+        "integer" => match conv {
+            TypeConvention::HostBridge => vec!["i64"],
+            TypeConvention::PluginBridge => vec!["i32"],
+        },
         "number" => vec!["f64"],
         "boolean" => vec!["i32"],
         "i32" => vec!["i32"],
@@ -74,7 +109,7 @@ fn expand_param_type(t: &str) -> Vec<&str> {
     }
 }
 
-fn expand_return_type(t: &str) -> Option<&str> {
+fn expand_return_type(t: &str, conv: TypeConvention) -> Option<&str> {
     match t {
         "void" => None,
         "ptr" => Some("i32"),
@@ -82,16 +117,28 @@ fn expand_return_type(t: &str) -> Option<&str> {
         "i32" => Some("i32"),
         "i64" => Some("i64"),
         "boolean" => Some("i32"),
-        "integer" => Some("i64"),
+        "integer" => match conv {
+            TypeConvention::HostBridge => Some("i64"),
+            TypeConvention::PluginBridge => Some("i32"),
+        },
         "number" => Some("f64"),
         "any" => Some("i32"),
         other => panic!("Unknown return type in registry: '{}'", other),
     }
 }
 
-fn single_import_wat(module: &str, name: &str, params: &[String], returns: &str) -> String {
+fn single_import_wat(
+    module: &str,
+    name: &str,
+    params: &[String],
+    returns: &str,
+    conv: TypeConvention,
+) -> String {
     let mut wat = format!("(module\n  (import \"{}\" \"{}\" (func", module, name);
-    let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
+    let wasm_params: Vec<&str> = params
+        .iter()
+        .flat_map(|t| expand_param_type(t, conv))
+        .collect();
     if !wasm_params.is_empty() {
         wat.push_str(" (param");
         for p in &wasm_params {
@@ -99,7 +146,7 @@ fn single_import_wat(module: &str, name: &str, params: &[String], returns: &str)
         }
         wat.push(')');
     }
-    if let Some(ret) = expand_return_type(returns) {
+    if let Some(ret) = expand_return_type(returns, conv) {
         wat.push_str(&format!(" (result {})", ret));
     }
     wat.push_str("))\n)\n");
@@ -153,8 +200,9 @@ fn bridge_covers_registry() {
         (f.layer == 2 || f.layer == 3)
             && (f.hosts.is_empty() || f.hosts.iter().any(|h| h == "server"))
     }) {
+        let conv = convention_for(&func.hosts);
         // Probe canonical name.
-        let wat = single_import_wat(&func.module, &func.name, &func.params, &func.returns);
+        let wat = single_import_wat(&func.module, &func.name, &func.params, &func.returns, conv);
         if let Ok(module) = Module::new(&engine, &wat) {
             let mut store = make_store(&engine);
             if linker.instantiate(&mut store, &module).is_err() {
@@ -164,7 +212,7 @@ fn bridge_covers_registry() {
 
         // Probe every alias.
         for alias in &func.aliases {
-            let wat = single_import_wat(&func.module, alias, &func.params, &func.returns);
+            let wat = single_import_wat(&func.module, alias, &func.params, &func.returns, conv);
             if let Ok(module) = Module::new(&engine, &wat) {
                 let mut store = make_store(&engine);
                 if linker.instantiate(&mut store, &module).is_err() {
