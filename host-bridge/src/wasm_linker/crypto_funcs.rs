@@ -219,6 +219,63 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // _crypto_sha256_bytes - SHA-256 of a length-prefixed byte buffer at a handle.
+    //
+    // Signature: (handle: i32) -> i32
+    // - `handle` points at [4-byte LE length][bytes] — the exact layout
+    //   produced by `_req_body_bytes` and consumed by `_fs_write_bytes`.
+    // - Returns a length-prefixed lowercase-hex string pointer (64 chars data).
+    //
+    // Companion to `_req_body_bytes`: binary uploads (gzip tarballs, arbitrary
+    // octet-stream) flow request → hash → disk without a UTF-8 detour. The
+    // errors dashboard tarball-upload endpoint verifies SHA-256 against a
+    // request header; `_crypto_hash_sha256` cannot serve that path because it
+    // takes a UTF-8 string.
+    linker.func_wrap(
+        "env",
+        "_crypto_sha256_bytes",
+        |mut caller: Caller<'_, S>, handle: i32| -> i32 {
+            // Read [4-byte LE length][bytes] at `handle` from linear memory.
+            // Same pattern as `_fs_write_bytes`; we resolve `memory` here to
+            // avoid tying up a `caller` borrow across `write_string_to_caller`.
+            let bytes: Vec<u8> = {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => {
+                        error!("_crypto_sha256_bytes: no exported 'memory'");
+                        return write_string_to_caller(&mut caller, "");
+                    }
+                };
+                let data = memory.data(&caller);
+                let base = handle as usize;
+                if base + 4 > data.len() {
+                    error!("_crypto_sha256_bytes: handle out of bounds");
+                    return write_string_to_caller(&mut caller, "");
+                }
+                let len_bytes: [u8; 4] = match data[base..base + 4].try_into() {
+                    Ok(b) => b,
+                    Err(_) => return write_string_to_caller(&mut caller, ""),
+                };
+                let payload_len = u32::from_le_bytes(len_bytes) as usize;
+                let start = base + 4;
+                let end = start + payload_len;
+                if end > data.len() {
+                    error!(
+                        "_crypto_sha256_bytes: payload out of bounds: {}..{} (memory size: {})",
+                        start,
+                        end,
+                        data.len()
+                    );
+                    return write_string_to_caller(&mut caller, "");
+                }
+                data[start..end].to_vec()
+            };
+
+            let digest = Sha256::digest(&bytes);
+            write_string_to_caller(&mut caller, &hex::encode(digest))
+        },
+    )?;
+
     // _crypto_hash_sha512 - Compute SHA-512 hash
     // Args: data_ptr, data_len
     // Returns: pointer to hex hash string (length-prefixed)

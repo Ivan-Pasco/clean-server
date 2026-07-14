@@ -187,6 +187,7 @@ fn register_dot_aliases<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeResul
         ("_crypto_random_bytes", "crypto.random_bytes"),
         ("_crypto_random_hex", "crypto.random_hex"),
         ("_crypto_hash_sha256", "crypto.hash_sha256"),
+        ("_crypto_sha256_bytes", "crypto.sha256_bytes"),
         ("_crypto_hash_sha512", "crypto.hash_sha512"),
         ("_crypto_hmac", "crypto.hmac"),
         // Crypto extras (Phase 2)
@@ -320,6 +321,10 @@ mod tests {
             "i32" => vec!["i32"],
             "i64" => vec!["i64"],
             "any" => vec!["i32"],
+            // A `ptr` parameter is a single i32 pointing into linear memory —
+            // the callee reads a length prefix (or other framing) from that
+            // address. This mirrors the return-type expansion.
+            "ptr" => vec!["i32"],
             other => panic!("Unknown param type in registry: '{}'", other),
         }
     }

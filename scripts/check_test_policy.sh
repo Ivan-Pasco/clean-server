@@ -41,6 +41,8 @@ TIER2_FILES=(
   string_split_test.rs
   page_guard_redirect_test.rs
   http_bridge_defaults_test.rs
+  req_body_bytes_bridge_test.rs
+  crypto_sha256_bytes_bridge_test.rs
 )
 
 TIER3_FILES=(
