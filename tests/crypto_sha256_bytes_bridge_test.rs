@@ -183,7 +183,9 @@ fn sha256_digest_is_always_64_lowercase_hex_chars() {
         let digest = h.sha256_hex(input);
         assert_eq!(digest.len(), 64, "digest length must be 64 chars");
         assert!(
-            digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "digest must be lowercase hex: {}",
             digest
         );
