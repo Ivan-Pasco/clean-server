@@ -22,23 +22,19 @@ use wasmtime::{Caller, Linker};
 
 /// `_fs_write_bytes` return codes (see foundation/platform-architecture/HOST_BRIDGE.md).
 ///
-/// The registry declares `returns = "integer"` which maps to WASM `i64` — this
-/// is wider than the 0..=5 range in the contract table, but matches the way
-/// Clean Language surfaces `integer` (i64) return values. Non-zero codes MUST
-/// stay within the 1..=5 range from HOST_BRIDGE.md so callers can compare
-/// against them with i32-like semantics.
-const FS_WRITE_OK: i64 = 0;
-const FS_WRITE_ERR_PERMISSION: i64 = 1;
-const FS_WRITE_ERR_DISK_FULL: i64 = 2;
-const FS_WRITE_ERR_INVALID_PATH: i64 = 3;
-const FS_WRITE_ERR_PARENT_NOT_DIR: i64 = 4;
-const FS_WRITE_ERR_IO: i64 = 5;
+/// The registry declares `returns = "i32"`; values live in 0..=5.
+const FS_WRITE_OK: i32 = 0;
+const FS_WRITE_ERR_PERMISSION: i32 = 1;
+const FS_WRITE_ERR_DISK_FULL: i32 = 2;
+const FS_WRITE_ERR_INVALID_PATH: i32 = 3;
+const FS_WRITE_ERR_PARENT_NOT_DIR: i32 = 4;
+const FS_WRITE_ERR_IO: i32 = 5;
 
 /// Hard-blocked path prefixes — refused regardless of `CLEAN_FS_WRITE_ROOT`.
 const FS_WRITE_BLOCKED_PREFIXES: &[&str] = &["/proc", "/sys", "/dev"];
 
 /// Classify a `std::io::Error` into an `_fs_write_bytes` error code.
-fn classify_io_error(e: &std::io::Error) -> i64 {
+fn classify_io_error(e: &std::io::Error) -> i32 {
     use std::io::ErrorKind;
     match e.kind() {
         ErrorKind::PermissionDenied => FS_WRITE_ERR_PERMISSION,
@@ -122,7 +118,7 @@ fn canonicalize_lenient(p: &Path) -> Option<PathBuf> {
 /// Validate `path` against the allowlist and blocked prefixes. On success
 /// returns the canonicalized target path. On failure returns the appropriate
 /// error code.
-fn resolve_allowlisted_path(path: &str) -> Result<PathBuf, i64> {
+fn resolve_allowlisted_path(path: &str) -> Result<PathBuf, i32> {
     if path.is_empty() || path_has_forbidden_syntax(path) {
         return Err(FS_WRITE_ERR_INVALID_PATH);
     }
@@ -148,7 +144,7 @@ fn resolve_allowlisted_path(path: &str) -> Result<PathBuf, i64> {
 /// Rename is atomic on POSIX when source and destination live on the same
 /// filesystem. On Windows the rename is not atomic across drives; both hosts
 /// document the caveat (see HOST_BRIDGE.md).
-fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), i64> {
+fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), i32> {
     // Parent directory: create if missing; reject if it exists as a file.
     if let Some(parent) = target.parent() {
         if !parent.as_os_str().is_empty() {
@@ -621,7 +617,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     linker.func_wrap(
         "env",
         "_fs_write_bytes",
-        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, bytes_ptr: i32| -> i64 {
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, bytes_ptr: i32| -> i32 {
             let path = match read_raw_string(&mut caller, path_ptr, path_len) {
                 Some(s) => s,
                 None => {
