@@ -43,6 +43,7 @@ TIER2_FILES=(
   http_bridge_defaults_test.rs
   req_body_bytes_bridge_test.rs
   crypto_sha256_bytes_bridge_test.rs
+  dev_snapshot_bridge_test.rs
 )
 
 TIER3_FILES=(

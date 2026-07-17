@@ -29,7 +29,9 @@ use clean_server::server::MemoryTier;
 use clean_server::{ServerConfig, start_server};
 use std::path::PathBuf;
 use tracing::{Level, error, info};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::Registry;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Clean Server - HTTP Server for Clean Language Applications
 #[derive(Parser, Debug)]
@@ -137,13 +139,20 @@ async fn main() {
         Level::INFO
     };
 
-    FmtSubscriber::builder()
-        .with_max_level(log_level)
+    // Compose the console formatter with the dev-mode capture layer. The
+    // capture layer is a no-op unless CLEAN_DEV=1, but installing it
+    // unconditionally means an operator can toggle CLEAN_DEV without
+    // restarting the server. See `dev_capture::DevCaptureTracingLayer`.
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
         .with_line_number(false)
         .compact()
+        .with_filter(tracing_subscriber::filter::LevelFilter::from(log_level));
+    Registry::default()
+        .with(fmt_layer)
+        .with(clean_server::dev_capture::DevCaptureTracingLayer)
         .init();
 
     match args.command {

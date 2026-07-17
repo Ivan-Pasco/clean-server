@@ -105,6 +105,9 @@ fn expand_param_type(t: &str, conv: TypeConvention) -> Vec<&str> {
         "i32" => vec!["i32"],
         "i64" => vec!["i64"],
         "any" => vec!["i32"],
+        // "ptr" param is a single i32 pointing into linear memory — the
+        // callee reads a length prefix (or other framing) from that address.
+        "ptr" => vec!["i32"],
         other => panic!("Unknown param type in registry: '{}'", other),
     }
 }

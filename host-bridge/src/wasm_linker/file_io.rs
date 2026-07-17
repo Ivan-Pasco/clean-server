@@ -16,9 +16,168 @@ use crate::error::BridgeResult;
 use base64::Engine as _;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error};
 use wasmtime::{Caller, Linker};
+
+/// `_fs_write_bytes` return codes (see foundation/platform-architecture/HOST_BRIDGE.md).
+///
+/// The registry declares `returns = "integer"` which maps to WASM `i64` — this
+/// is wider than the 0..=5 range in the contract table, but matches the way
+/// Clean Language surfaces `integer` (i64) return values. Non-zero codes MUST
+/// stay within the 1..=5 range from HOST_BRIDGE.md so callers can compare
+/// against them with i32-like semantics.
+const FS_WRITE_OK: i64 = 0;
+const FS_WRITE_ERR_PERMISSION: i64 = 1;
+const FS_WRITE_ERR_DISK_FULL: i64 = 2;
+const FS_WRITE_ERR_INVALID_PATH: i64 = 3;
+const FS_WRITE_ERR_PARENT_NOT_DIR: i64 = 4;
+const FS_WRITE_ERR_IO: i64 = 5;
+
+/// Hard-blocked path prefixes — refused regardless of `CLEAN_FS_WRITE_ROOT`.
+const FS_WRITE_BLOCKED_PREFIXES: &[&str] = &["/proc", "/sys", "/dev"];
+
+/// Classify a `std::io::Error` into an `_fs_write_bytes` error code.
+fn classify_io_error(e: &std::io::Error) -> i64 {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::PermissionDenied => FS_WRITE_ERR_PERMISSION,
+        // ErrorKind::StorageFull is unstable; fall back to raw errno on unix.
+        _ => {
+            #[cfg(unix)]
+            {
+                if let Some(code) = e.raw_os_error() {
+                    // ENOSPC = 28 on linux/macos.
+                    if code == 28 {
+                        return FS_WRITE_ERR_DISK_FULL;
+                    }
+                }
+            }
+            FS_WRITE_ERR_IO
+        }
+    }
+}
+
+/// Reject a path containing `..`, null bytes, or that resolves to a blocked
+/// system directory. Enforced BEFORE canonicalization so a symlink can't sneak
+/// a `..` past us.
+fn path_has_forbidden_syntax(path: &str) -> bool {
+    if path.contains('\0') {
+        return true;
+    }
+    Path::new(path)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+}
+
+fn under_blocked_system_prefix(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    FS_WRITE_BLOCKED_PREFIXES
+        .iter()
+        .any(|p| s == *p || s.starts_with(&format!("{}/", p)))
+}
+
+/// Resolve the effective root from `CLEAN_FS_WRITE_ROOT`. Returns `None` when
+/// the env var is unset OR set to the empty string — both mean "no writable
+/// paths".
+fn fs_write_root() -> Option<PathBuf> {
+    std::env::var_os("CLEAN_FS_WRITE_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Canonical form of `p` that also works when `p` (and some of its ancestors)
+/// do not yet exist. Walks up until an existing ancestor is found, canonicalizes
+/// it, then re-appends the trailing components. Returns None if no ancestor
+/// exists (e.g. bare relative filename with no cwd).
+fn canonicalize_lenient(p: &Path) -> Option<PathBuf> {
+    if let Ok(c) = p.canonicalize() {
+        return Some(c);
+    }
+    let mut trailing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cursor: &Path = p;
+    loop {
+        if let Ok(c) = cursor.canonicalize() {
+            let mut out = c;
+            for seg in trailing.iter().rev() {
+                out.push(seg);
+            }
+            return Some(out);
+        }
+        let leaf = cursor.file_name()?;
+        trailing.push(leaf);
+        cursor = cursor.parent()?;
+        if cursor.as_os_str().is_empty() {
+            // Relative path with no existing prefix — try cwd.
+            let base = Path::new(".").canonicalize().ok()?;
+            let mut out = base;
+            for seg in trailing.iter().rev() {
+                out.push(seg);
+            }
+            return Some(out);
+        }
+    }
+}
+
+/// Validate `path` against the allowlist and blocked prefixes. On success
+/// returns the canonicalized target path. On failure returns the appropriate
+/// error code.
+fn resolve_allowlisted_path(path: &str) -> Result<PathBuf, i64> {
+    if path.is_empty() || path_has_forbidden_syntax(path) {
+        return Err(FS_WRITE_ERR_INVALID_PATH);
+    }
+
+    let root = fs_write_root().ok_or(FS_WRITE_ERR_INVALID_PATH)?;
+    let canonical_root = root.canonicalize().map_err(|_| FS_WRITE_ERR_INVALID_PATH)?;
+
+    let requested = Path::new(path);
+    let canonical_target = canonicalize_lenient(requested).ok_or(FS_WRITE_ERR_INVALID_PATH)?;
+
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(FS_WRITE_ERR_INVALID_PATH);
+    }
+    if under_blocked_system_prefix(&canonical_target) {
+        return Err(FS_WRITE_ERR_INVALID_PATH);
+    }
+
+    Ok(canonical_target)
+}
+
+/// Atomic write of `bytes` to `target`: write to `<target>.tmp` then rename.
+///
+/// Rename is atomic on POSIX when source and destination live on the same
+/// filesystem. On Windows the rename is not atomic across drives; both hosts
+/// document the caveat (see HOST_BRIDGE.md).
+fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), i64> {
+    // Parent directory: create if missing; reject if it exists as a file.
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            if parent.exists() && !parent.is_dir() {
+                return Err(FS_WRITE_ERR_PARENT_NOT_DIR);
+            }
+            if let Err(e) = fs::create_dir_all(parent) {
+                return Err(classify_io_error(&e));
+            }
+        }
+    }
+
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+
+    if let Err(e) = fs::write(&tmp, bytes) {
+        // Best-effort cleanup; ignore result.
+        let _ = fs::remove_file(&tmp);
+        return Err(classify_io_error(&e));
+    }
+
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(classify_io_error(&e));
+    }
+
+    Ok(())
+}
 
 /// Ensure the parent directory of `path` exists, creating it (and any missing
 /// ancestors) if necessary. Returns Ok on success or if `path` has no parent
@@ -445,6 +604,94 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
+    // =========================================
+    // _fs_write_bytes — binary-safe atomic write with allowlist
+    // =========================================
+    //
+    // Signature: (path_ptr: i32, path_len: i32, bytes_ptr: i32) -> i32
+    // - `path`  is (ptr, len) — a raw UTF-8 path.
+    // - `bytes` is a pointer to a length-prefixed byte buffer
+    //   ([4-byte LE length][bytes]) — the exact layout produced by
+    //   `_req_body_bytes`, so binary payloads flow request → hash → disk
+    //   verbatim without a UTF-8 detour.
+    //
+    // Returns 0 on success; non-zero error code on failure (see error code
+    // constants at the top of this file, and the contract table in
+    // foundation/platform-architecture/HOST_BRIDGE.md).
+    linker.func_wrap(
+        "env",
+        "_fs_write_bytes",
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32, bytes_ptr: i32| -> i64 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                Some(s) => s,
+                None => {
+                    error!("_fs_write_bytes: failed to read path");
+                    return FS_WRITE_ERR_INVALID_PATH;
+                }
+            };
+
+            let target = match resolve_allowlisted_path(&path) {
+                Ok(p) => p,
+                Err(code) => {
+                    debug!(
+                        "_fs_write_bytes: rejected path '{}' with code {}",
+                        path, code
+                    );
+                    return code;
+                }
+            };
+
+            // Read the [4-byte LE length][bytes] buffer at bytes_ptr from
+            // linear memory. We must resolve `memory` here rather than call
+            // `read_length_prefixed_bytes` on a borrowed slice returned from
+            // `caller`, because that would tie up the caller borrow.
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => {
+                    error!("_fs_write_bytes: no exported 'memory'");
+                    return FS_WRITE_ERR_IO;
+                }
+            };
+            let data = memory.data(&caller);
+            let base = bytes_ptr as usize;
+            if base + 4 > data.len() {
+                error!("_fs_write_bytes: bytes_ptr out of bounds");
+                return FS_WRITE_ERR_IO;
+            }
+            let len_bytes: [u8; 4] = match data[base..base + 4].try_into() {
+                Ok(b) => b,
+                Err(_) => return FS_WRITE_ERR_IO,
+            };
+            let payload_len = u32::from_le_bytes(len_bytes) as usize;
+            let start = base + 4;
+            let end = start + payload_len;
+            if end > data.len() {
+                error!(
+                    "_fs_write_bytes: payload out of bounds: {}..{} (memory size: {})",
+                    start,
+                    end,
+                    data.len()
+                );
+                return FS_WRITE_ERR_IO;
+            }
+            let payload = data[start..end].to_vec();
+
+            debug!(
+                "_fs_write_bytes: path='{}' target='{}' bytes={}",
+                path,
+                target.display(),
+                payload.len()
+            );
+
+            match atomic_write_bytes(&target, &payload) {
+                Ok(()) => FS_WRITE_OK,
+                Err(code) => code,
+            }
+        },
+    )?;
+    // Dot-notation alias (compiler >= 0.30.120 emits both forms).
+    linker.alias("env", "_fs_write_bytes", "env", "fs.write_bytes")?;
+
     Ok(())
 }
 
@@ -536,5 +783,251 @@ mod tests {
         let bad_path = blocker.join("child/log.txt");
         let result = append_file_with_parents(bad_path.to_str().unwrap(), "data");
         assert_eq!(result, 0);
+    }
+
+    // ---------- _fs_write_bytes ----------
+    //
+    // These tests target the Rust helpers directly (`resolve_allowlisted_path`
+    // + `atomic_write_bytes`). The WASM linker entry point is covered by
+    // `test_spec_compliance` in wasm_linker/mod.rs, which validates the
+    // function signature matches the registry.
+    //
+    // Env-var access is serialized via `ENV_LOCK` because `CLEAN_FS_WRITE_ROOT`
+    // is a process-global and cargo runs tests in parallel by default.
+
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(root: &Path) -> Self {
+            let prev = std::env::var_os("CLEAN_FS_WRITE_ROOT");
+            std::env::set_var("CLEAN_FS_WRITE_ROOT", root);
+            Self { prev }
+        }
+        fn unset() -> Self {
+            let prev = std::env::var_os("CLEAN_FS_WRITE_ROOT");
+            std::env::remove_var("CLEAN_FS_WRITE_ROOT");
+            Self { prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("CLEAN_FS_WRITE_ROOT", v),
+                None => std::env::remove_var("CLEAN_FS_WRITE_ROOT"),
+            }
+        }
+    }
+
+    /// Full round-trip: resolve path via allowlist, then atomically write.
+    /// Panics if the allowlist rejects the path. Returns whatever
+    /// `atomic_write_bytes` returned.
+    fn write_bytes_within_root(rel: &str, root: &Path, bytes: &[u8]) -> Result<PathBuf, i64> {
+        let full = root.join(rel);
+        let target = resolve_allowlisted_path(full.to_str().unwrap())?;
+        atomic_write_bytes(&target, bytes)?;
+        Ok(target)
+    }
+
+    #[test]
+    fn fs_write_bytes_preserves_null_bytes() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let payload = b"before\x00middle\x00after";
+        let written = write_bytes_within_root("null.bin", &root, payload).unwrap();
+        let on_disk = fs::read(&written).unwrap();
+        assert_eq!(on_disk, payload);
+    }
+
+    #[test]
+    fn fs_write_bytes_preserves_high_bytes() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let payload: Vec<u8> = (0u8..=255).collect();
+        let mut with_ff = payload.clone();
+        with_ff.extend_from_slice(&[0xFF; 32]);
+
+        let written = write_bytes_within_root("all_bytes.bin", &root, &with_ff).unwrap();
+        let on_disk = fs::read(&written).unwrap();
+        assert_eq!(on_disk, with_ff);
+    }
+
+    #[test]
+    fn fs_write_bytes_preserves_gzip_magic() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        // gzip magic (1f 8b) + deflate method (08) + FLG (00) + MTIME (0000) + XFL/OS.
+        let payload = &[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        let written = write_bytes_within_root("payload.tar.gz", &root, payload).unwrap();
+        let on_disk = fs::read(&written).unwrap();
+        assert_eq!(on_disk, payload);
+        assert_eq!(&on_disk[..2], &[0x1f, 0x8b]);
+    }
+
+    #[test]
+    fn fs_write_bytes_zero_length_succeeds() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let written = write_bytes_within_root("empty.bin", &root, &[]).unwrap();
+        assert!(written.exists());
+        assert_eq!(fs::metadata(&written).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fs_write_bytes_rejects_path_outside_root() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root_tmp = TempDir::new().unwrap();
+        let outside_tmp = TempDir::new().unwrap();
+        let root = root_tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let outside = outside_tmp.path().canonicalize().unwrap().join("bad.bin");
+        let code = resolve_allowlisted_path(outside.to_str().unwrap()).unwrap_err();
+        assert_eq!(code, FS_WRITE_ERR_INVALID_PATH);
+    }
+
+    #[test]
+    fn fs_write_bytes_rejects_when_root_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let _env = EnvGuard::unset();
+
+        let path = tmp.path().join("anywhere.bin");
+        let code = resolve_allowlisted_path(path.to_str().unwrap()).unwrap_err();
+        assert_eq!(code, FS_WRITE_ERR_INVALID_PATH);
+    }
+
+    #[test]
+    fn fs_write_bytes_rejects_dotdot() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        // The `..` component alone is enough to reject regardless of where it
+        // canonicalizes — path_has_forbidden_syntax runs before canonicalization.
+        let bad = root.join("sub/../escape.bin");
+        let code = resolve_allowlisted_path(bad.to_str().unwrap()).unwrap_err();
+        assert_eq!(code, FS_WRITE_ERR_INVALID_PATH);
+    }
+
+    #[test]
+    fn fs_write_bytes_rejects_null_byte_in_path() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let bad = format!("{}/bad\0.bin", root.display());
+        let code = resolve_allowlisted_path(&bad).unwrap_err();
+        assert_eq!(code, FS_WRITE_ERR_INVALID_PATH);
+    }
+
+    #[test]
+    fn fs_write_bytes_no_tmp_leftover_on_success() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let written = write_bytes_within_root("atomic.bin", &root, b"payload").unwrap();
+        // The transient .tmp file must be gone after a successful rename.
+        let tmp_leftover = {
+            let mut s = written.as_os_str().to_owned();
+            s.push(".tmp");
+            PathBuf::from(s)
+        };
+        assert!(written.exists());
+        assert!(!tmp_leftover.exists());
+        assert_eq!(fs::read(&written).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn fs_write_bytes_creates_parent_directory() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let written = write_bytes_within_root("deeply/nested/dir/f.bin", &root, b"hi").unwrap();
+        assert!(written.exists());
+        assert!(written.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn fs_write_bytes_overwrites_existing() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        let first = write_bytes_within_root("dup.bin", &root, b"first").unwrap();
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        let second = write_bytes_within_root("dup.bin", &root, b"second").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(fs::read(&second).unwrap(), b"second");
+    }
+
+    #[test]
+    fn fs_write_bytes_content_length_parity() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        for len in [1usize, 100, 4096, 65_537] {
+            let payload: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+            let name = format!("len_{}.bin", len);
+            let written = write_bytes_within_root(&name, &root, &payload).unwrap();
+            assert_eq!(fs::metadata(&written).unwrap().len() as usize, payload.len());
+            assert_eq!(fs::read(&written).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn fs_write_bytes_parent_is_file_returns_code_4() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _env = EnvGuard::set(&root);
+
+        // Create a regular file, then try to write "underneath" it.
+        let blocker = root.join("blocker");
+        fs::write(&blocker, b"i am a file").unwrap();
+        let bad = root.join("blocker/child.bin");
+        // resolve_allowlisted_path uses canonicalize_lenient; since the leaf
+        // doesn't exist, it canonicalizes the parent — which IS an existing
+        // file. That resolves under the root, so allowlist passes; the failure
+        // then surfaces from atomic_write_bytes.
+        let target = resolve_allowlisted_path(bad.to_str().unwrap()).unwrap();
+        let code = atomic_write_bytes(&target, b"data").unwrap_err();
+        assert_eq!(code, FS_WRITE_ERR_PARENT_NOT_DIR);
+    }
+
+    #[test]
+    fn fs_write_bytes_rejects_blocked_system_prefix() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Set root to `/` so the target path passes the allowlist prefix check;
+        // the blocked-prefix guard must still refuse `/proc/self/mem`.
+        let _env = EnvGuard::set(Path::new("/"));
+
+        let code = resolve_allowlisted_path("/proc/self/mem").unwrap_err();
+        assert_eq!(code, FS_WRITE_ERR_INVALID_PATH);
     }
 }

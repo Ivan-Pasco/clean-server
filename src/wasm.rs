@@ -302,6 +302,17 @@ pub struct RequestContext {
     pub path: String,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    /// Raw request body bytes, preserved byte-for-byte from the wire.
+    ///
+    /// Populated by the HTTP entry point (see `handle_request` in `server.rs`)
+    /// and by any test/job dispatcher that ingests a request body.
+    /// `_req_body_bytes` returns this verbatim when set; when `None`, it falls
+    /// back to the UTF-8 bytes of `body` so text-only handlers still work.
+    ///
+    /// Additive to `body` (the UTF-8 string surface, consumed by `_req_body`).
+    /// Both fields describe the same request payload — `body` is the lossy
+    /// UTF-8 view, `body_bytes` is the lossless view.
+    pub body_bytes: Option<Vec<u8>>,
     pub params: std::collections::HashMap<String, String>,
     pub query: std::collections::HashMap<String, String>,
 }
@@ -843,6 +854,15 @@ impl WasmInstance {
 
         debug!("WASM module compiled successfully");
 
+        // Stash the raw WASM bytes for `_dev_snapshot()`. This is a one-time
+        // copy at load; the ring buffer's read side base64-encodes on demand.
+        // No-op path when CLEAN_DEV isn't `1` — the setter always writes, but
+        // the snapshot function ignores the value in production mode.
+        crate::dev_capture::set_current_wasm(
+            wasm_bytes.to_vec(),
+            module_path.map(|p| p.to_path_buf()),
+        );
+
         // Create linker with host functions
         let linker = create_linker(&engine)?;
 
@@ -1327,6 +1347,7 @@ mod tests {
             path: "/test".to_string(),
             headers: vec![],
             body: String::new(),
+            body_bytes: None,
             params: std::collections::HashMap::new(),
             query: std::collections::HashMap::new(),
         };
@@ -1351,6 +1372,7 @@ mod tests {
             path: "/users/123".to_string(),
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
             body: String::new(),
+            body_bytes: None,
             params,
             query,
         };

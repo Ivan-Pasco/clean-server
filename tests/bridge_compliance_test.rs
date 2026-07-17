@@ -124,6 +124,10 @@ fn expand_param_type(t: &str, conv: TypeConvention) -> Vec<&str> {
         "i64" => vec!["i64"],
         // "any" is a Clean Language boxed-any pointer (i32 heap address).
         "any" => vec!["i32"],
+        // "ptr" param is a single i32 pointing into linear memory — the
+        // callee reads a length prefix (or other framing) from that address.
+        // Mirrors the return-type expansion above.
+        "ptr" => vec!["i32"],
         other => panic!(
             "Unknown parameter type in function-registry.toml: '{}'. \
              Update expand_param_type() in bridge_compliance_test.rs if a new type was added.",

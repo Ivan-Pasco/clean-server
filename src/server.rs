@@ -16,7 +16,7 @@ use crate::wasm::{
 use crate::websocket::{SharedWsState, WsRouteHandlers, ws_handle_connection};
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{State, WebSocketUpgrade},
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
@@ -907,15 +907,93 @@ async fn serve_manifest_artifact(absolute_path: PathBuf, content_type: String) -
     }
 }
 
-/// Handle all incoming requests (HTTP, SSE, and WebSocket)
+/// Handle all incoming requests (HTTP, SSE, and WebSocket).
+///
+/// Outer wrapper that captures timing and the final response status into the
+/// dev-mode request ring buffer (see `dev_capture::record_request`). All
+/// routing/handler logic lives in `handle_request_inner`; keeping the wrapper
+/// thin avoids threading dev-capture state through every early-return path.
+///
+/// The wrapper is always compiled in; `record_request` becomes a no-op when
+/// `CLEAN_DEV != "1"`, so the cost in production is a single env-var lookup
+/// per request (~50 ns).
 async fn handle_request(
     State(state): State<AppState>,
     ws_upgrade: Option<WebSocketUpgrade>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: String,
+    body_bytes: Bytes,
 ) -> Response {
+    let start = std::time::Instant::now();
+
+    // Snapshot the fields dev-capture needs before we move `method`, `uri`,
+    // `headers`, and `body_bytes` into the inner. The captured header pairs
+    // are the raw HeaderMap contents; redaction of Cookie/Authorization
+    // happens at ring-buffer write time in `dev_capture::record_request`.
+    let (path_and_query, method_str, header_pairs, body_snapshot, content_type) =
+        if crate::dev_capture::is_enabled() {
+            let path = uri.path().to_string();
+            let full = match uri.query() {
+                Some(q) if !q.is_empty() => format!("{}?{}", path, q),
+                _ => path,
+            };
+            let mut pairs = Vec::with_capacity(headers.len());
+            for (k, v) in headers.iter() {
+                if let Ok(vs) = v.to_str() {
+                    pairs.push((k.as_str().to_string(), vs.to_string()));
+                }
+            }
+            let ct = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            (
+                Some(full),
+                Some(method.as_str().to_string()),
+                Some(pairs),
+                Some(body_bytes.to_vec()),
+                ct,
+            )
+        } else {
+            (None, None, None, None, None)
+        };
+
+    let response =
+        handle_request_inner(State(state), ws_upgrade, method, uri, headers, body_bytes).await;
+
+    if let (Some(pq), Some(m), Some(hs), Some(body)) =
+        (path_and_query, method_str, header_pairs, body_snapshot)
+    {
+        let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        crate::dev_capture::record_request(
+            &m,
+            &pq,
+            response.status().as_u16(),
+            elapsed,
+            &hs,
+            &body,
+            content_type.as_deref(),
+        );
+    }
+
+    response
+}
+
+async fn handle_request_inner(
+    State(state): State<AppState>,
+    ws_upgrade: Option<WebSocketUpgrade>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    // Extract the body as `Bytes` (not `String`) so binary payloads (gzip
+    // tarballs, images, application/octet-stream) survive verbatim for
+    // `_req_body_bytes`. The UTF-8 string surface consumed by `_req_body`
+    // is derived below via `from_utf8_lossy`, matching prior semantics for
+    // text handlers.
+    body_bytes: Bytes,
+) -> Response {
+    let body: String = String::from_utf8_lossy(&body_bytes).into_owned();
     let path = uri.path();
     let query_string = uri.query().unwrap_or("");
 
@@ -1019,6 +1097,11 @@ async fn handle_request(
         path: path.to_string(),
         headers: header_vec,
         body,
+        // Preserve the raw wire bytes so `_req_body_bytes` can return them
+        // verbatim. The Bytes -> Vec<u8> conversion is a cheap clone from the
+        // ref-counted buffer (or a memcpy the first time it's cloned) — not
+        // a second read of the request stream.
+        body_bytes: Some(body_bytes.to_vec()),
         params,
         query: query_params,
     };

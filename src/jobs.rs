@@ -1164,6 +1164,7 @@ pub fn start_worker_loop(
                                                             path: String::new(),
                                                             headers: Vec::new(),
                                                             body: String::new(),
+                                                            body_bytes: None,
                                                             params: std::collections::HashMap::new(
                                                             ),
                                                             query: std::collections::HashMap::new(),
@@ -1512,6 +1513,7 @@ pub fn start_cron_scheduler(state: SharedJobsState, wasm: Arc<WasmInstance>) {
                                 path: sched_name,
                                 headers: Vec::new(),
                                 body: String::new(),
+                                body_bytes: None,
                                 params: std::collections::HashMap::new(),
                                 query: std::collections::HashMap::new(),
                             };

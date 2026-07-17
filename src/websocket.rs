@@ -491,6 +491,7 @@ pub fn start_heartbeat_task(ws_state: SharedWsState, wasm: Arc<WasmInstance>) {
                                     path: "/".to_string(),
                                     headers: Vec::new(),
                                     body: String::new(),
+                                    body_bytes: None,
                                     params: std::collections::HashMap::new(),
                                     query: std::collections::HashMap::new(),
                                 };

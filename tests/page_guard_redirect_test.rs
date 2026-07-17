@@ -77,6 +77,7 @@ fn build_request() -> RequestContext {
         path: "/dashboard".to_string(),
         headers: Vec::new(),
         body: String::new(),
+        body_bytes: None,
         params: Default::default(),
         query: Default::default(),
     }

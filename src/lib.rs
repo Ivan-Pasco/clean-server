@@ -78,6 +78,7 @@ pub mod bridge_browser_stubs;
 pub mod bridge_canvas_stubs;
 pub mod bridge_ui_stubs;
 pub mod build_manifest;
+pub mod dev_capture;
 pub mod error;
 pub mod error_reporting;
 pub mod jobs;

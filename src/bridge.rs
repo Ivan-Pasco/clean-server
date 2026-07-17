@@ -90,6 +90,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     register_islands_functions(&mut linker)?;
     register_ui_functions(&mut linker)?;
     register_async_functions(&mut linker)?;
+    register_dev_capture_functions(&mut linker)?;
     register_mcp_functions(&mut linker)?;
     register_test_functions(&mut linker)?;
     register_sse_functions(&mut linker)?;
@@ -649,6 +650,47 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
             },
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_body: {}", e)))?;
+
+    // _req_body_bytes - Get the raw request body as opaque bytes.
+    //
+    // Returns a length-prefixed buffer ([4-byte LE length][bytes]) — the same
+    // layout consumed by `_fs_write_bytes` and produced by `write_string_to_caller`
+    // for text bodies. When `body_bytes` is populated (HTTP entry point + test
+    // dispatcher), the raw wire bytes flow through verbatim so binary payloads
+    // (gzip tarballs, invalid-UTF-8 sequences, 0x00 / 0xFF bytes) survive with
+    // their SHA-256 intact. When absent (background jobs, cron, WS handlers
+    // that don't own a request body), we fall back to the UTF-8 bytes of the
+    // `body` string surface — same contract as clean-node-server, keeps
+    // existing text-only handlers working.
+    //
+    // Additive to `_req_body`: same request, both bridges coexist. Registry
+    // entry: function-registry.toml `_req_body_bytes`, hosts = ["server"].
+    linker
+        .func_wrap(
+            "env",
+            "_req_body_bytes",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                let bytes: Vec<u8> = {
+                    let state = caller.data();
+                    match state.request_context.as_ref() {
+                        Some(ctx) => match &ctx.body_bytes {
+                            Some(b) => b.clone(),
+                            None => ctx.body.as_bytes().to_vec(),
+                        },
+                        None => Vec::new(),
+                    }
+                };
+
+                // `write_bytes_to_caller` allocates via WASM malloc and emits
+                // the [4-byte LE length][bytes] layout. Empty body → a valid
+                // pointer to a header with length 0 (never 0/null).
+                host_bridge::write_bytes_to_caller(&mut caller, &bytes)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_body_bytes: {}", e)))?;
+    // Dot-notation alias `req.body_bytes` is registered by
+    // `register_dot_aliases` at end-of-registration (compiler >= 0.30.120
+    // emits both forms).
 
     // _req_body_field - Get a field from JSON request body
     linker
@@ -4496,6 +4538,35 @@ fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
     Ok(())
 }
 
+/// Register dev-mode capture bridge functions.
+///
+/// Currently one function: `_dev_snapshot()` — returns a length-prefixed JSON
+/// string with the runtime capture payload, gated on `CLEAN_DEV=1`. In
+/// production (CLEAN_DEV unset or any other value) it returns a
+/// length-prefixed empty string, which the framework's `/_debug/capture`
+/// handler interprets as "not in dev mode" and responds 404.
+///
+/// The security boundary is the env var check inside
+/// `crate::dev_capture::snapshot_json()` — even if this function is
+/// mistakenly called in production, no capture data leaks.
+///
+/// See `foundation/platform-architecture/SERVER_EXTENSIONS.md` §Dev-mode
+/// Capture for the payload contract.
+fn register_dev_capture_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
+    register_bridge_fn!(linker, "_dev_snapshot", |mut caller: Caller<
+        '_,
+        WasmState,
+    >|
+     -> i32 {
+        if !check_bridge_permission(&caller, "_dev_snapshot") {
+            return write_string_to_caller(&mut caller, "");
+        }
+        let payload = crate::dev_capture::snapshot_json();
+        write_string_to_caller(&mut caller, &payload)
+    });
+    Ok(())
+}
+
 /// Register MCP bridge functions (_mcp_stdio_read, _mcp_stdio_write, _mcp_http_serve,
 /// _mcp_http_accept, _mcp_http_respond, _mcp_sse_send, _mcp_log)
 fn register_mcp_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
@@ -4943,6 +5014,9 @@ fn register_test_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                 method: method.clone(),
                 path: clean_path.clone(),
                 headers,
+                // The test dispatcher accepts a UTF-8 string body; the raw
+                // byte view is the same content encoded as UTF-8.
+                body_bytes: Some(body.as_bytes().to_vec()),
                 body,
                 params: path_params,
                 query,
@@ -6508,6 +6582,7 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         ("_req_param_int", "req.param_int"),
         ("_req_query", "req.query"),
         ("_req_body", "req.body"),
+        ("_req_body_bytes", "req.body_bytes"),
         ("_req_body_field", "req.body_field"),
         ("_req_header", "req.header"),
         ("_req_headers", "req.headers"),
