@@ -557,7 +557,7 @@ fn is_binary_content(content_type: Option<&str>, bytes: &[u8]) -> bool {
     // invalid UTF-8. Binary payloads (gzip, images, etc.) almost always
     // contain NULs in the first KB.
     let sniff_len = bytes.len().min(1024);
-    if bytes[..sniff_len].iter().any(|b| *b == 0) {
+    if bytes[..sniff_len].contains(&0) {
         return true;
     }
     // Try strict UTF-8: if it fails, treat as binary.
