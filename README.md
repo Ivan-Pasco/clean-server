@@ -116,48 +116,79 @@ curl http://localhost:3000/health
 
 ## Host Bridge Capabilities
 
-Clean Server provides comprehensive system integration through the Host Bridge:
+Clean Server registers **476 host bridge functions** against the WASM `env`
+linker, split across two layers:
 
-### HTTP Client (`bridge:http`)
-- Make HTTP requests (GET, POST, PUT, DELETE, etc.)
-- Handle headers, query parameters, and request bodies
-- Support for JSON, form data, and multipart uploads
+- **Layer 2 — portable (`host-bridge/src/wasm_linker/`)** — 308 functions
+  shared with every other Clean host (Node runtime, browser runtime,
+  future WASI hosts).
+- **Layer 3 — server-only (`src/bridge.rs`)** — 168 functions for HTTP
+  routing, request/response context, sessions, and server-side
+  frameworks. Not portable.
 
-### Database (`bridge:db`)
-- PostgreSQL, MySQL, SQLite support
-- Parameterized queries for SQL injection prevention
-- Connection pooling and transaction support
+Grouped by canonical prefix (function counts from `grep func_wrap "env",`
+and `register_bridge_fn!` on the current source; treat as rough):
 
-### Environment (`bridge:env`)
-- Read environment variables
-- Access system configuration
-- Secure credential management
+### Layer 2 — portable
 
-### Time (`bridge:time`)
-- Current timestamp and date/time operations
-- Timezone handling
-- Duration and interval calculations
+| Namespace | ~Count | What it does |
+|-----------|-------:|--------------|
+| `math.*` | 96 | IEEE-754 math + full Clean stdlib coverage |
+| `string.*` | 49 | UTF-8-aware ops, formatting, parsing |
+| `http.*` | 27 | HTTP client (GET/POST/PUT/…/response inspection) |
+| `array.*` + `list.*` | 23 | Heap collection ops |
+| `db.*` | 19 | SQL query/exec, transactions, connection state |
+| `time.*` | 16 | Epoch, ISO, timezone offsets, sleep |
+| `crypto.*` | 16 | Hashing, HMAC, UUID, random, JWT helpers |
+| `file.*` / `fs.*` | 16 | File I/O, incl. opaque byte-handle bridges |
+| `print*` / `console.*` | 11 | Stdout formatting for primitives |
+| `env.*` | 7 | Environment variables, `NODE_ENV` |
+| `input.*` | 5 | Stdin readers (for CLI/test entry points) |
+| `arena.*` | 4 | Bump-allocator control |
+| `state.*` | 4 | Cross-request state slots |
+| `jwt.*` | 3 | JWT encode/decode |
+| Scalar coercions | ~5 | `int`, `boolean`, `float`, `number`, `integer` bridges |
 
-### Cryptography (`bridge:crypto`)
-- Password hashing (bcrypt, argon2)
-- JWT token generation and validation
-- Random number generation
-- SHA-256 hashing
+### Layer 3 — server-only
 
-### Logging (`bridge:log`)
-- Structured logging (trace, debug, info, warn, error)
-- JSON log output
-- Contextual logging with metadata
+| Namespace | ~Count | What it does |
+|-----------|-------:|--------------|
+| `_http_*` | 26 | Routing (`_http_route`, `_http_ws_route`, `_http_sse_route`), response helpers, CORS, cache, cookies |
+| `_req_*` | 24 | Request context: method, path, headers, cookies, form/body/JSON, params, queries, IP, auth token |
+| `_ui_*` | 19 | Server-side UI: component HTML registration, page rendering, layouts, patches, iframe messaging |
+| `_auth_*` | 16 | Authentication guards, session roles, user identity, password-reset tokens |
+| `_session_*` | 15 | Session lifecycle: create/extend/destroy/claim, CSRF, key/value store |
+| `_job_*` | 12 | Background jobs: enqueue, cancel, register, retry, status, results |
+| `_i18n_*` | 8 | Locale, translation lookup, currency/date/number formatting |
+| `_ws_*` | 8 | WebSocket lifecycle, send, broadcast, room membership |
+| `_mcp_*` | 7 | Model Context Protocol transport (stdio + HTTP + SSE) |
+| `_res_*` | 6 | Response mutation: status, body, JSON, redirect, download, headers |
+| `_sse_*` | 5 | Server-Sent Events: emit, close, retry |
+| `_email_*` | 3 | Send, configure, last-error |
+| `_role_*` / `_roles_*` | 3 | Role registration, permission lookup |
+| `_json_*` | 3 | Host-side JSON parse/encode (bypasses WASM memory) |
+| `_test_*` | 3 | In-process HTTP request helpers for tests |
+| `_async_*` | 2 | `_async_fire`, `_async_await` |
+| `_schedule_*` | 2 | Cron register / cancel |
+| Singletons | 6 | `_dev_snapshot`, `_island_register`, `_jwt_refresh_and_rotate`, `_cors_configure`, `_rate_limit_configure`, `_server_sleep` |
 
-### Filesystem (`bridge:fs`)
-- Read/write files
-- Directory operations
-- Path manipulation
+### Authoritative sources
 
-### System (`bridge:sys`)
-- System information (OS, architecture, hostname)
-- Process information
-- Resource usage
+- **`foundation/spec/platform/function-registry.toml`** — the machine-readable
+  signature registry for every Layer 2 + Layer 3 function (source of truth).
+- **`foundation/spec/platform/HOST_BRIDGE.md`** — Layer 2 contract details:
+  string-passing convention `(ptr, len)`, length-prefixed returns, dual
+  naming rules (`_ns_fn` and `ns.fn`).
+- **`foundation/spec/platform/SERVER_EXTENSIONS.md`** — Layer 3 contract for
+  the routing, request-context, and session APIs.
+- **`foundation/spec/platform/EXECUTION_LAYERS.md`** — which layer executes
+  which function, and why.
+
+Drift between this server's implementation and `function-registry.toml` is
+verified in CI via
+`foundation/management/scripts/check_host_parity.py --host server --strict`
+plus the in-repo compliance tests (`test_spec_compliance` for Layer 2,
+`test_layer3_spec_compliance` for Layer 3).
 
 ## Architecture
 
@@ -358,31 +389,76 @@ cargo run --release -- run examples/hello.wasm
 
 ### Project Structure
 
+Two crates live in this repo: the server binary (`src/`) and the portable
+Layer 2 host bridge (`host-bridge/`, published as its own crate so other
+runtimes can consume it).
+
 ```
 clean-server/
-├── src/
-│   ├── main.rs           # CLI entry point
-│   ├── lib.rs            # Library exports
-│   ├── server.rs         # HTTP server
-│   ├── router.rs         # Request routing
-│   ├── wasm.rs           # WASM runtime
-│   ├── bridge.rs         # Host Bridge integration
-│   ├── memory.rs         # Memory management
-│   └── error.rs          # Error types
-├── host-bridge/
+├── src/                              # Layer 3 — server-only
+│   ├── main.rs                       # CLI entry point
+│   ├── lib.rs                        # Library exports
+│   ├── server.rs                     # HTTP server (Axum)
+│   ├── router.rs                     # Request routing
+│   ├── wasm.rs                       # WASM runtime (Wasmtime)
+│   ├── bridge.rs                     # Layer 3 host bridge (~168 fns:
+│   │                                 #   _http_*, _req_*, _res_*, _auth_*,
+│   │                                 #   _session_*, _ws_*, _sse_*, _ui_*,
+│   │                                 #   _job_*, _i18n_*, _email_*, _mcp_*,
+│   │                                 #   _dev_snapshot, _schedule_*, …)
+│   ├── bridge_browser_stubs.rs       # Stubs for browser-only functions
+│   ├── bridge_canvas_stubs.rs        # Stubs for canvas-only functions
+│   ├── bridge_ui_stubs.rs            # Stubs for UI-only functions
+│   ├── session.rs                    # Session store + CSRF
+│   ├── websocket.rs                  # WebSocket transport
+│   ├── jobs.rs                       # Background job queue
+│   ├── locale.rs                     # i18n backend
+│   ├── permissions.rs                # Role/permission model
+│   ├── rate_limit.rs                 # Per-IP + per-route rate limiting
+│   ├── dev_capture.rs                # /_debug/capture snapshot backend
+│   ├── build_manifest.rs             # Build metadata
+│   ├── runtime_config.rs             # Config file loader
+│   ├── error_reporting.rs            # errors.cleanlanguage.dev shipper
+│   ├── memory.rs                     # WASM memory helpers
+│   ├── error.rs                      # Error types
+│   └── bin/                          # Auxiliary binaries
+├── host-bridge/                      # Layer 2 — portable across all hosts
 │   └── src/
-│       ├── lib.rs        # Bridge exports
-│       ├── http.rs       # HTTP client
-│       ├── db.rs         # Database
-│       ├── env.rs        # Environment
-│       ├── time.rs       # Time operations
-│       ├── crypto.rs     # Cryptography
-│       ├── log.rs        # Logging
-│       ├── fs.rs         # Filesystem
-│       └── sys.rs        # System info
+│       ├── lib.rs                    # Public crate exports
+│       ├── error.rs                  # Bridge error types
+│       ├── http.rs                   # HTTP client (reqwest-backed)
+│       ├── db.rs                     # SQL adapters (PG / MySQL / SQLite)
+│       ├── crypto.rs                 # Hashing, HMAC, UUID, JWT
+│       ├── env.rs                    # Environment variable access
+│       ├── time.rs                   # Epoch + ISO + timezone
+│       ├── fs.rs                     # Filesystem I/O + byte handles
+│       ├── log.rs                    # Structured logging
+│       ├── sys.rs                    # System info
+│       └── wasm_linker/              # Registers ~308 functions on the
+│           │                         # WASM `env` linker
+│           ├── mod.rs                # Entry point + dual-naming aliases
+│           ├── math.rs               # ~96 math.* functions
+│           ├── string_ops.rs         # ~59 string ops
+│           ├── http_client.rs        # ~27 http.* client fns
+│           ├── env_time.rs           # env/time bridge registrations
+│           ├── crypto_funcs.rs       # crypto.* + jwt.* bindings
+│           ├── database.rs           # db.* bindings
+│           ├── file_io.rs            # file.* / fs.* incl. byte handles
+│           ├── array_funcs.rs        # array.* ops
+│           ├── list_funcs.rs         # list.* ops
+│           ├── console.rs            # print/input primitives
+│           ├── memory.rs             # arena.* + WASM memory helpers
+│           ├── state.rs              # state.* cross-request slots
+│           └── helpers.rs            # Shared string-encoding helpers
 ├── Cargo.toml
+├── CHANGELOG.md
 └── README.md
 ```
+
+Signatures for every function in both layers are declared in
+`foundation/spec/platform/function-registry.toml` and enforced by
+`test_spec_compliance` (Layer 2) and `test_layer3_spec_compliance`
+(Layer 3).
 
 ## Contributing
 
