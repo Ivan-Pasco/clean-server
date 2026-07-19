@@ -18,7 +18,7 @@ Clean Server is the runtime server for Clean Language applications compiled to W
 | What you found | Channel | Why |
 |---|---|---|
 | A **bug** (crash, wrong output, spec violation, regression) | **`report_error` MCP tool** — MANDATORY | Fingerprint dedup, occurrence tracking, automatic user notification on fix, visible on errors.cleanlanguage.dev |
-| A **design proposal, directive change, schema/API request, architectural ask** | Markdown file in `../foundation/management/cross-component-prompts/` | Requires discussion, not auto-fix |
+| A **design proposal, directive change, schema/API request, architectural ask** | `/team-prompt` skill (publishes to https://errors.cleanlanguage.dev/prompts) | Requires discussion, not auto-fix |
 
 **Never** write a markdown file for something that is a bug. Bug reports in markdown are invisible to the dashboard, don't notify users when fixed, and can't be queried via `list_component_bugs`.
 
@@ -35,7 +35,7 @@ Clean Server is the runtime server for Clean Language applications compiled to W
 - Make changes to other components' configuration files
 - Write a markdown file for something that is a bug — use `report_error` instead
 
-See `../foundation/management/USER_TYPES_AND_ERROR_REPORTING.md` for the full policy.
+See `../foundation/docs/governance/USER_TYPES_AND_ERROR_REPORTING.md` for the full policy.
 
 ## Test Strategy
 
@@ -73,7 +73,7 @@ scripts/install_hooks.sh
 
 **CRITICAL: All host function signatures are enforced by the shared function registry.**
 
-The file `../foundation/platform-architecture/function-registry.toml` is the single source of truth for ALL host function signatures (Layer 2 + Layer 3). Two automated spec compliance tests validate that every registered function matches the implementation:
+The file `../foundation/spec/platform/function-registry.toml` is the single source of truth for ALL host function signatures (Layer 2 + Layer 3). Two automated spec compliance tests validate that every registered function matches the implementation:
 
 - **Layer 2 test** (`test_spec_compliance` in `host-bridge/src/wasm_linker/mod.rs`) — validates 154 portable host function imports
 - **Layer 3 test** (`test_layer3_spec_compliance` in `src/bridge.rs`) — validates 47 server-specific function imports
@@ -85,7 +85,7 @@ Both tests dynamically parse the TOML registry, expand high-level types to WASM 
 1. **NEVER** change a host function's WASM signature without updating `function-registry.toml`
 2. **NEVER** modify the registry just to make a test pass — fix the implementation instead
 3. When adding or changing a host function, follow this order:
-   1. Update `../foundation/platform-architecture/function-registry.toml` (the authoritative source)
+   1. Update `../foundation/spec/platform/function-registry.toml` (the authoritative source)
    2. Update the implementation (host-bridge for Layer 2, bridge.rs for Layer 3)
    3. Run `cargo test` to verify everything matches
 4. The registry uses high-level types that expand to WASM types:
@@ -120,7 +120,7 @@ Both must be registered until the compiler is fixed to emit only canonical names
 (tracked in `compiler-dual-naming-registry-sync.md`).
 
 Use `register_bridge_fn!` when adding new bridge functions. See
-`foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+`foundation/spec/platform/HOST_BRIDGE.md § Dual Naming`.
 
 ### How it works
 
@@ -134,15 +134,15 @@ Use `register_bridge_fn!` when adding new bridge functions. See
 
 ## Documentation Sync Protocol
 
-Facts about the language live in `foundation/spec/` (at the project root). Facts about the platform live in `foundation/platform-architecture/`. Do not duplicate them here — link to them instead.
+Facts about the language live in `foundation/spec/` (at the project root). Facts about the platform live in `foundation/spec/platform/`. Do not duplicate them here — link to them instead.
 
 **When you make a change in this component, update the corresponding spec file in the same commit:**
 
 | Change type | Update required |
 |-------------|-----------------|
-| New or changed host bridge function | `foundation/platform-architecture/HOST_BRIDGE.md` |
-| New or changed execution layer | `foundation/platform-architecture/EXECUTION_LAYERS.md` |
-| New or changed plugin contract | `foundation/spec/plugins/plugin-contract.md` |
+| New or changed host bridge function | `foundation/spec/platform/HOST_BRIDGE.md` |
+| New or changed execution layer | `foundation/spec/platform/EXECUTION_LAYERS.md` |
+| New or changed plugin contract | `foundation/spec/framework/plugin-contract.md` |
 
 The spec files are the single source of truth. Component documentation explains implementation — it does not redefine language rules.
 
