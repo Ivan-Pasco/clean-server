@@ -692,6 +692,38 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     // `register_dot_aliases` at end-of-registration (compiler >= 0.30.120
     // emits both forms).
 
+    // _req_body_sha256_hex - Server-computed SHA-256 (lowercase hex, 64 chars)
+    // of the raw pre-parse request body. Byte source matches _req_body_bytes:
+    // ctx.body_bytes when raw middleware buffered them, else UTF-8 of ctx.body.
+    // Returns a length-prefixed string (write_string_to_caller). One-shot for
+    // integrity checks against X-Tarball-SHA256 etc. — obviates the two-step
+    // _req_body_bytes → _crypto_sha256_bytes path. Registry entry:
+    // function-registry.toml `_req_body_sha256_hex`, hosts = ["server"].
+    linker
+        .func_wrap(
+            "env",
+            "_req_body_sha256_hex",
+            |mut caller: Caller<'_, WasmState>| -> i32 {
+                use sha2::Digest;
+                let hex_digest = {
+                    let state = caller.data();
+                    let bytes: &[u8] = match state.request_context.as_ref() {
+                        Some(ctx) => match &ctx.body_bytes {
+                            Some(b) => b.as_slice(),
+                            None => ctx.body.as_bytes(),
+                        },
+                        None => &[],
+                    };
+                    hex::encode(sha2::Sha256::digest(bytes))
+                };
+
+                write_string_to_caller(&mut caller, &hex_digest)
+            },
+        )
+        .map_err(|e| {
+            RuntimeError::wasm(format!("Failed to define _req_body_sha256_hex: {}", e))
+        })?;
+
     // _req_body_field - Get a field from JSON request body
     linker
         .func_wrap(
@@ -6583,6 +6615,7 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         ("_req_query", "req.query"),
         ("_req_body", "req.body"),
         ("_req_body_bytes", "req.body_bytes"),
+        ("_req_body_sha256_hex", "req.body_sha256_hex"),
         ("_req_body_field", "req.body_field"),
         ("_req_header", "req.header"),
         ("_req_headers", "req.headers"),
