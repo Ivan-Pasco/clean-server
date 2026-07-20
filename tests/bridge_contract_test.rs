@@ -10,7 +10,7 @@
 //! function added without its dot-notation alias will be caught here before
 //! it causes a production `LinkError`.
 //!
-//! See `foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+//! See `foundation/spec/platform/HOST_BRIDGE.md § Dual Naming`.
 
 use clean_server::bridge::create_linker;
 use clean_server::router::Router;
@@ -181,7 +181,7 @@ fn make_store(engine: &Engine) -> Store<WasmState> {
 fn bridge_covers_registry() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let registry_path =
-        manifest_dir.join("../foundation/platform-architecture/function-registry.toml");
+        manifest_dir.join("../foundation/spec/platform/function-registry.toml");
 
     let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
         panic!(

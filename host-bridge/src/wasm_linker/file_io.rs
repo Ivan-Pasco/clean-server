@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error};
 use wasmtime::{Caller, Linker};
 
-/// `_fs_write_bytes` return codes (see foundation/platform-architecture/HOST_BRIDGE.md).
+/// `_fs_write_bytes` return codes (see foundation/spec/platform/HOST_BRIDGE.md).
 ///
 /// The registry declares `returns = "i32"`; values live in 0..=5.
 const FS_WRITE_OK: i32 = 0;
@@ -613,7 +613,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     //
     // Returns 0 on success; non-zero error code on failure (see error code
     // constants at the top of this file, and the contract table in
-    // foundation/platform-architecture/HOST_BRIDGE.md).
+    // foundation/spec/platform/HOST_BRIDGE.md).
     linker.func_wrap(
         "env",
         "_fs_write_bytes",

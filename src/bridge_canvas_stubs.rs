@@ -27,7 +27,7 @@ use wasmtime::{Caller, Linker};
 /// Register Layer 3 bridge stubs for all frame.canvas host functions.
 ///
 /// Macro mirrors the canonical `_namespace_fn` → `namespace.fn` dual registration
-/// used in `bridge.rs`. See `foundation/platform-architecture/HOST_BRIDGE.md`
+/// used in `bridge.rs`. See `foundation/spec/platform/HOST_BRIDGE.md`
 /// § Dual Naming.
 macro_rules! register_bridge_fn {
     ($linker:expr, $name:literal, $func:expr) => {{

@@ -41,7 +41,7 @@ use wasmtime::{Caller, Engine, Linker};
 /// The macro calls `func_wrap` once (consuming the closure), then derives the
 /// alias via `linker.alias()` — no second closure needed.
 ///
-/// See `foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+/// See `foundation/spec/platform/HOST_BRIDGE.md § Dual Naming`.
 macro_rules! register_bridge_fn {
     ($linker:expr, $name:literal, $func:expr) => {{
         $linker
@@ -104,7 +104,7 @@ pub fn create_linker(engine: &Engine) -> RuntimeResult<Linker<WasmState>> {
     crate::bridge_browser_stubs::register_browser_stubs(&mut linker)?;
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
-    // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
+    // See foundation/spec/platform/HOST_BRIDGE.md § Dual Naming.
     register_dot_aliases(&mut linker)?;
 
     Ok(linker)
@@ -4550,7 +4550,7 @@ fn register_async_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()>
 /// `crate::dev_capture::snapshot_json()` — even if this function is
 /// mistakenly called in production, no capture data leaks.
 ///
-/// See `foundation/platform-architecture/SERVER_EXTENSIONS.md` §Dev-mode
+/// See `foundation/spec/platform/SERVER_EXTENSIONS.md` §Dev-mode
 /// Capture for the payload contract.
 fn register_dev_capture_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
     register_bridge_fn!(linker, "_dev_snapshot", |mut caller: Caller<
@@ -6969,7 +6969,7 @@ mod tests {
     fn test_layer3_spec_compliance() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let registry_path = std::path::Path::new(manifest_dir)
-            .join("../foundation/platform-architecture/function-registry.toml");
+            .join("../foundation/spec/platform/function-registry.toml");
         let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
             panic!(
                 "Failed to read function-registry.toml at {:?}: {}",

@@ -3,7 +3,7 @@
 //!
 //! Verifies the server linker resolves both the canonical names and their
 //! `auth.create_reset_token` / `auth.consume_reset_token` dot aliases with
-//! the signatures declared in `foundation/platform-architecture/function-registry.toml`.
+//! the signatures declared in `foundation/spec/platform/function-registry.toml`.
 //!
 //! Security-critical semantics (single-use consume, expiry) are covered by
 //! unit tests on `SessionStore::store_reset_token` / `consume_reset_token`

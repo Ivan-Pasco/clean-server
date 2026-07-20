@@ -2,7 +2,7 @@
 //!
 //! Verifies that the server linker resolves both the canonical name and the
 //! `jwt.refresh_and_rotate` dot alias with the signature declared in
-//! `foundation/platform-architecture/function-registry.toml`.
+//! `foundation/spec/platform/function-registry.toml`.
 //!
 //! Security-critical semantics (single-use rotation, replay rejection) are
 //! covered by unit tests on `SessionStore::mark_jti_consumed` /

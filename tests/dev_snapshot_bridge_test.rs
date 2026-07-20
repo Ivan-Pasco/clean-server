@@ -3,7 +3,7 @@
 //! Exercises the CLEAN_DEV gate, the request-log ring buffer's header
 //! redaction and body-shaping rules, and the project_hash formula.
 //!
-//! See `foundation/platform-architecture/SERVER_EXTENSIONS.md` §Dev-mode
+//! See `foundation/spec/platform/SERVER_EXTENSIONS.md` §Dev-mode
 //! Capture for the payload contract this test file verifies.
 
 use clean_server::bridge::create_linker;

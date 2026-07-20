@@ -158,7 +158,7 @@ impl WasmMemory {
     /// return the new stack depth (always >= 1). Used by the compiler-emitted
     /// `_arena_scope_push` bridge to bracket per-iteration scratch allocations
     /// inside HIR-rewritten dual-accumulator loops. See
-    /// foundation/platform-architecture/HOST_BRIDGE.md.
+    /// foundation/spec/platform/HOST_BRIDGE.md.
     pub fn push_arena_mark(&mut self) -> usize {
         self.arena_marks.push(self.offset);
         self.arena_marks.len()

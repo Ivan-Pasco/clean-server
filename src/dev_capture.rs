@@ -3,7 +3,7 @@
 //! Implements the `_dev_snapshot()` host bridge and the two supporting ring
 //! buffers (request log, stderr/stdout log) that back the errors dashboard's
 //! reproduction pipeline. See
-//! `foundation/platform-architecture/SERVER_EXTENSIONS.md § Dev-mode Capture`.
+//! `foundation/spec/platform/SERVER_EXTENSIONS.md § Dev-mode Capture`.
 //!
 //! Security boundary: the entire surface is gated on `CLEAN_DEV=1`. When the
 //! variable is unset or any other value, `snapshot_json()` returns an empty

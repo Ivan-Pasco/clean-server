@@ -12,7 +12,7 @@
 //! server are expected to receive sentinel values and degrade gracefully.
 //!
 //! AUTO-GENERATED via tools/gen_browser_stubs.py from
-//! foundation/platform-architecture/function-registry.toml. Re-run when
+//! foundation/spec/platform/function-registry.toml. Re-run when
 //! new browser-only Layer 2 functions are added to the registry.
 
 use crate::error::{RuntimeError, RuntimeResult};

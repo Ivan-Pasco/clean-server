@@ -40,7 +40,7 @@ use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
 //
 // The bump allocator starts at offset 1024 and returns the current cursor,
 // then advances by `size`. This mirrors the layout convention documented in
-// foundation/platform-architecture/MEMORY_MODEL.md — the first page is
+// foundation/spec/platform/MEMORY_MODEL.md — the first page is
 // reserved for the runtime, allocations grow from 1024 upward.
 const WAT: &str = r#"
 (module

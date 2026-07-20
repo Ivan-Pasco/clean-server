@@ -45,7 +45,7 @@ pub use array_funcs::reset_array_store;
 pub use list_funcs::reset_list_store;
 // NOTE: HTTP Server functions (Layer 3) are NOT in host-bridge.
 // They are server-specific and implemented in clean-server/src/bridge.rs.
-// See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
+// See foundation/spec/platform/EXECUTION_LAYERS.md for layer definitions.
 
 // Re-export core types
 pub use helpers::{
@@ -80,7 +80,7 @@ use wasmtime::{Engine, Linker};
 /// Existing functions registered before this macro was introduced are covered
 /// by the `register_dot_aliases` post-registration loop.
 ///
-/// See `foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming`.
+/// See `foundation/spec/platform/HOST_BRIDGE.md § Dual Naming`.
 #[macro_export]
 macro_rules! register_bridge_fn {
     ($linker:expr, $env:expr, $name:expr, $func:expr) => {{
@@ -143,10 +143,10 @@ pub fn register_all_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> Bridg
     // NOTE: HTTP Server functions (Layer 3) are NOT provided by host-bridge.
     // Server-specific functions like _req_param, _req_body, _http_route, etc.
     // must be implemented by the server runtime (e.g., clean-server/src/bridge.rs).
-    // See foundation/platform-architecture/EXECUTION_LAYERS.md for layer definitions.
+    // See foundation/spec/platform/EXECUTION_LAYERS.md for layer definitions.
 
     // Register dot-notation aliases (compiler >= 0.30.120 emits both forms).
-    // See foundation/platform-architecture/HOST_BRIDGE.md § Dual Naming.
+    // See foundation/spec/platform/HOST_BRIDGE.md § Dual Naming.
     register_dot_aliases(linker)?;
 
     Ok(())
@@ -366,7 +366,7 @@ mod tests {
     }
 
     /// Spec compliance test: validates that ALL Layer 2 host function signatures
-    /// match the shared function registry (foundation/platform-architecture/function-registry.toml).
+    /// match the shared function registry (foundation/spec/platform/function-registry.toml).
     ///
     /// The registry defines every function with high-level types that expand to
     /// exact WASM signatures. This test dynamically generates a WAT module from
@@ -379,7 +379,7 @@ mod tests {
     fn test_spec_compliance() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let registry_path = std::path::Path::new(manifest_dir)
-            .join("../../foundation/platform-architecture/function-registry.toml");
+            .join("../../foundation/spec/platform/function-registry.toml");
         let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
             panic!(
                 "Failed to read function-registry.toml at {:?}: {}",
