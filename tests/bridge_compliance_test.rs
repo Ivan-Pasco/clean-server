@@ -224,8 +224,7 @@ fn test_full_bridge_compliance() {
     // clean-server is at:  <project-root>/clean-server/
     // registry is at:      <project-root>/foundation/spec/platform/function-registry.toml
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let registry_path =
-        manifest_dir.join("../foundation/spec/platform/function-registry.toml");
+    let registry_path = manifest_dir.join("../foundation/spec/platform/function-registry.toml");
 
     let toml_str = std::fs::read_to_string(&registry_path).unwrap_or_else(|e| {
         panic!(

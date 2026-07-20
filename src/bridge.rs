@@ -720,9 +720,7 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
                 write_string_to_caller(&mut caller, &hex_digest)
             },
         )
-        .map_err(|e| {
-            RuntimeError::wasm(format!("Failed to define _req_body_sha256_hex: {}", e))
-        })?;
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _req_body_sha256_hex: {}", e)))?;
 
     // _req_body_field - Get a field from JSON request body
     linker
