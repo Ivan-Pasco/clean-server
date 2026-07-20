@@ -145,7 +145,7 @@ fn current_session_id(state: &WasmState) -> Option<String> {
         })
 }
 
-/// Format a JSON error body matching node-server's `{ok:false, err:{code, message}}` shape.
+/// Format a JSON error body in the canonical `{ok:false, err:{code, message}}` shape.
 fn err_body(code: &str, message: &str) -> String {
     serde_json::json!({
         "ok": false,
@@ -660,8 +660,7 @@ fn register_request_context_functions(linker: &mut Linker<WasmState>) -> Runtime
     // (gzip tarballs, invalid-UTF-8 sequences, 0x00 / 0xFF bytes) survive with
     // their SHA-256 intact. When absent (background jobs, cron, WS handlers
     // that don't own a request body), we fall back to the UTF-8 bytes of the
-    // `body` string surface — same contract as clean-node-server, keeps
-    // existing text-only handlers working.
+    // `body` string surface — keeps existing text-only handlers working.
     //
     // Additive to `_req_body`: same request, both bridges coexist. Registry
     // entry: function-registry.toml `_req_body_bytes`, hosts = ["server"].
@@ -2686,7 +2685,7 @@ fn register_response_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<
 
     // _http_set_header - fire-and-forget header setter
     // Args: name_ptr, name_len, value_ptr, value_len
-    // Returns: void (matches function-registry.toml; matches clean-node-server)
+    // Returns: void (matches function-registry.toml)
     linker
         .func_wrap(
             "env",

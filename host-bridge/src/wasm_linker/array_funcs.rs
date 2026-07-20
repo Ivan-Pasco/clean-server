@@ -1,9 +1,8 @@
 //! Array Host Functions — handle-based JS-style arrays
 //!
-//! Mirrors clean-node-server/src/bridge/array.ts. The `arr_ptr` argument
-//! is an opaque i32 handle into a host-side store, NOT a WASM memory
-//! pointer. Callback-taking variants (filter/map/reduce/find) invoke
-//! WASM-side functions through the module's `__indirect_function_table`.
+//! The `arr_ptr` argument is an opaque i32 handle into a host-side store,
+//! NOT a WASM memory pointer. Callback-taking variants (filter/map/reduce/find)
+//! invoke WASM-side functions through the module's `__indirect_function_table`.
 //!
 //! These are independent of the Clean Language native `list<T>` ops
 //! (which live in `list_funcs.rs` and operate on WASM-resident memory).
@@ -179,7 +178,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
         },
     )?;
 
-    // array_reverse(arr) -> new handle (matches node-server: non-mutating)
+    // array_reverse(arr) -> new handle (non-mutating)
     linker.func_wrap(
         "env",
         "array_reverse",

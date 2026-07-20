@@ -624,7 +624,7 @@ fn strip_ansi(s: &str) -> String {
 /// that's a known limitation acknowledged in the SERVER_EXTENSIONS spec;
 /// wiring println! interception would require patching `host-bridge`, which
 /// is out of scope for this bridge (dev-only capture must not distort the
-/// shared portable console I/O path used by CLI and node-server hosts).
+/// shared portable console I/O path used by other hosts).
 pub struct DevCaptureTracingLayer;
 
 impl<S> Layer<S> for DevCaptureTracingLayer

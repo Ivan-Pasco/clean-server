@@ -24,8 +24,8 @@ use wasmtime::{Caller, Linker};
 const LIST_HEADER_SIZE: usize = 16;
 const F64_SIZE: usize = 8;
 
-// Handle-based list store (mirrors clean-node-server/src/bridge/list.ts).
-// Distinct from the memory-backed list<T> used by list.push_f64.
+// Handle-based list store. Distinct from the memory-backed list<T> used by
+// list.push_f64.
 thread_local! {
     static LIST_STORE: RefCell<HashMap<i32, Vec<i32>>> = RefCell::new(HashMap::new());
     static NEXT_LIST_HANDLE: RefCell<i32> = const { RefCell::new(1) };
@@ -123,7 +123,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // =========================================
-    // Handle-based list ops (parity with clean-node-server/src/bridge/list.ts)
+    // Handle-based list ops.
     // These take an i32 handle, NOT a WASM memory pointer.
     // =========================================
 

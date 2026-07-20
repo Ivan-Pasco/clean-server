@@ -1,8 +1,7 @@
 //! `_req_body_bytes` bridge — raw request body byte access.
 //!
-//! Mirrors clean-node-server/tests/req-body-bytes-bridge.test.ts. Covers the
-//! guarantees the errors dashboard's POST /api/v1/reports/tarball-upload
-//! endpoint depends on:
+//! Covers the guarantees the errors dashboard's POST
+//! /api/v1/reports/tarball-upload endpoint depends on:
 //!
 //! - Binary payloads (0x00, 0xFF, invalid UTF-8) survive the round-trip
 //!   through `RequestContext.body_bytes` verbatim.
@@ -10,7 +9,7 @@
 //!   can compare against `Content-Length`).
 //! - Empty bodies return a zero-length buffer with a valid pointer, not 0/null.
 //! - When `body_bytes` is `None`, `_req_body_bytes` falls back to the UTF-8
-//!   bytes of `body` — matches node-server, keeps text-only handlers working.
+//!   bytes of `body` — keeps text-only handlers working.
 //! - `_req_body` still returns the string surface when both are populated
 //!   (additive contract, no regression).
 //!

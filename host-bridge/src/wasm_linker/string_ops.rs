@@ -614,8 +614,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // =========================================
-    // STRING EXTRAS — registry "string" convention: (ptr, len) raw pairs
-    // (parity with clean-node-server src/bridge/string.ts)
+    // STRING EXTRAS — registry "string" convention: (ptr, len) raw pairs.
     // String length matches JS String.length = UTF-16 code units.
     // =========================================
 
@@ -823,7 +822,7 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
 
     // string_join(string, string) -> ptr
-    // Matches node-server: first string is JSON-encoded array of strings, second is delimiter.
+    // First string is JSON-encoded array of strings, second is the delimiter.
     linker.func_wrap(
         "env",
         "string_join",

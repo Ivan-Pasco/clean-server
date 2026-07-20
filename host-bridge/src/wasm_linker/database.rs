@@ -1077,11 +1077,10 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     // =========================================
     // DB ASYNC EXTRAS (Phase 2)
     //
-    // node-server's Postgres driver is async-only, so it splits each query
-    // into "fire" (start) and "result" (collect) host calls. Rust drivers
-    // (sqlx) are sync-capable via block_on, so the "async" variant just
-    // runs the same sync path and caches the result for the matching getter.
-    // See HOST_BRIDGE.md § DB Async.
+    // Async-only drivers split each query into "fire" (start) and "result"
+    // (collect) host calls. Rust drivers (sqlx) are sync-capable via
+    // block_on, so the "async" variant here just runs the same sync path and
+    // caches the result for the matching getter. See HOST_BRIDGE.md § DB Async.
     // =========================================
 
     // _db_connected() -> boolean
