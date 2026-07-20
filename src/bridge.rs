@@ -6940,12 +6940,37 @@ mod tests {
         returns: String,
         #[serde(default)]
         aliases: Vec<String>,
+        #[serde(default = "default_expand_strings")]
+        expand_strings: bool,
         description: String,
     }
 
-    fn expand_param_type(t: &str) -> Vec<&str> {
+    /// Default for the `expand_strings` field on registry entries.
+    ///
+    /// Historical default: every `"string"` param expands to a pointer+length
+    /// pair `(i32, i32)`. Only plugin-declared bridges that opt out
+    /// (`expand_strings = false`, e.g. `_json_get`) collapse to a bare `i32`.
+    fn default_expand_strings() -> bool {
+        true
+    }
+
+    /// Expand a registry high-level param type to WASM types.
+    ///
+    /// `expand_strings` controls how `"string"` is materialized in the WASM
+    /// signature. When `true` (the default), a `"string"` param is emitted as
+    /// the traditional pointer+length pair `(i32, i32)`. When `false` (used by
+    /// plugin-declared bridges that ship `expand_strings = false` such as
+    /// `_json_get`), the compiler passes a single length-prefixed pointer, so
+    /// the WASM param is a bare `i32`.
+    fn expand_param_type(t: &str, expand_strings: bool) -> Vec<&str> {
         match t {
-            "string" => vec!["i32", "i32"],
+            "string" => {
+                if expand_strings {
+                    vec!["i32", "i32"]
+                } else {
+                    vec!["i32"]
+                }
+            }
             "integer" => vec!["i64"],
             "number" => vec!["f64"],
             "boolean" => vec!["i32"],
@@ -6971,10 +6996,19 @@ mod tests {
         }
     }
 
-    fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
+    fn generate_wat_import(
+        module: &str,
+        name: &str,
+        params: &[String],
+        returns: &str,
+        expand_strings: bool,
+    ) -> String {
         let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
 
-        let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
+        let wasm_params: Vec<&str> = params
+            .iter()
+            .flat_map(|t| expand_param_type(t, expand_strings))
+            .collect();
 
         if !wasm_params.is_empty() {
             import.push_str(" (param");
@@ -7033,6 +7067,7 @@ mod tests {
                 &func.name,
                 &func.params,
                 &func.returns,
+                func.expand_strings,
             ));
             import_count += 1;
 
@@ -7042,6 +7077,7 @@ mod tests {
                     alias,
                     &func.params,
                     &func.returns,
+                    func.expand_strings,
                 ));
                 import_count += 1;
             }

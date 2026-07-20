@@ -298,6 +298,8 @@ mod tests {
         aliases: Vec<String>,
         #[serde(default = "default_hosts_all")]
         hosts: Vec<String>,
+        #[serde(default = "default_expand_strings")]
+        expand_strings: bool,
         #[allow(dead_code)]
         description: String,
     }
@@ -306,15 +308,28 @@ mod tests {
         vec!["all".to_string()]
     }
 
+    /// Default for the `expand_strings` field on registry entries.
+    /// See the Layer 3 test for the full explanation — mirrored here so the
+    /// Layer 2 test doesn't silently break the day a Layer 2 entry opts out.
+    fn default_expand_strings() -> bool {
+        true
+    }
+
     /// True when this function's `hosts` field includes this host class
     /// ("all" or the specific class, here "server").
     fn applies_to_host(entry: &FunctionEntry, host: &str) -> bool {
         entry.hosts.iter().any(|h| h == "all" || h == host)
     }
 
-    fn expand_param_type(t: &str) -> Vec<&str> {
+    fn expand_param_type(t: &str, expand_strings: bool) -> Vec<&str> {
         match t {
-            "string" => vec!["i32", "i32"],
+            "string" => {
+                if expand_strings {
+                    vec!["i32", "i32"]
+                } else {
+                    vec!["i32"]
+                }
+            }
             "integer" => vec!["i64"],
             "number" => vec!["f64"],
             "boolean" => vec!["i32"],
@@ -344,10 +359,19 @@ mod tests {
         }
     }
 
-    fn generate_wat_import(module: &str, name: &str, params: &[String], returns: &str) -> String {
+    fn generate_wat_import(
+        module: &str,
+        name: &str,
+        params: &[String],
+        returns: &str,
+        expand_strings: bool,
+    ) -> String {
         let mut import = format!("  (import \"{}\" \"{}\" (func", module, name);
 
-        let wasm_params: Vec<&str> = params.iter().flat_map(|t| expand_param_type(t)).collect();
+        let wasm_params: Vec<&str> = params
+            .iter()
+            .flat_map(|t| expand_param_type(t, expand_strings))
+            .collect();
 
         if !wasm_params.is_empty() {
             import.push_str(" (param");
@@ -440,6 +464,7 @@ mod tests {
                 &func.name,
                 &func.params,
                 &func.returns,
+                func.expand_strings,
             ));
             import_count += 1;
 
@@ -449,6 +474,7 @@ mod tests {
                     alias,
                     &func.params,
                     &func.returns,
+                    func.expand_strings,
                 ));
                 import_count += 1;
             }
