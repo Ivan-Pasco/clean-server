@@ -180,6 +180,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ivan-Pasco/clean-language-spec
+          token: ${{ secrets.SPEC_REPO_TOKEN }}
           path: clean-language-spec
           sparse-checkout: |
             foundation
@@ -276,6 +277,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ivan-Pasco/clean-language-spec
+          token: ${{ secrets.SPEC_REPO_TOKEN }}
           path: clean-language-spec
           # Only paths under foundation/ are consumed. sparse-checkout keeps
           # the download small.
