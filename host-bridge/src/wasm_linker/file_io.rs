@@ -10,7 +10,7 @@
 //! String parameters use raw (ptr, len) pairs via expand_strings convention.
 //! All functions are generic over `WasmStateCore` to work with any runtime.
 
-use super::helpers::{read_raw_string, write_string_to_caller};
+use super::helpers::{read_raw_string, write_bytes_to_caller, write_string_to_caller};
 use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use base64::Engine as _;
@@ -687,6 +687,144 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
     )?;
     // Dot-notation alias (compiler >= 0.30.120 emits both forms).
     linker.alias("env", "_fs_write_bytes", "env", "fs.write_bytes")?;
+    // frame.storage plugin surface (registry entry lists storage.write alias).
+    linker.alias("env", "_fs_write_bytes", "env", "storage.write")?;
+
+    // =========================================
+    // _fs_read_bytes — binary-safe read under allowlist
+    // =========================================
+    //
+    // Signature: (path_ptr: i32, path_len: i32) -> i32
+    // Returns a pointer to a [4-byte LE length][bytes] buffer — same layout
+    // as `_fs_write_bytes` accepts and `_crypto_sha256_bytes` returns.
+    //
+    // Missing files, allowlist violations, and any I/O error all return an
+    // empty buffer (length 0). Callers disambiguate "missing" from "empty"
+    // via `_fs_exists`.
+    linker.func_wrap(
+        "env",
+        "_fs_read_bytes",
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                Some(s) => s,
+                None => {
+                    error!("_fs_read_bytes: failed to read path");
+                    return write_bytes_to_caller(&mut caller, &[]);
+                }
+            };
+
+            let target = match resolve_allowlisted_path(&path) {
+                Ok(p) => p,
+                Err(code) => {
+                    debug!(
+                        "_fs_read_bytes: rejected path '{}' with code {}",
+                        path, code
+                    );
+                    return write_bytes_to_caller(&mut caller, &[]);
+                }
+            };
+
+            match fs::read(&target) {
+                Ok(bytes) => {
+                    debug!(
+                        "_fs_read_bytes: path='{}' target='{}' bytes={}",
+                        path,
+                        target.display(),
+                        bytes.len()
+                    );
+                    write_bytes_to_caller(&mut caller, &bytes)
+                }
+                Err(e) => {
+                    debug!(
+                        "_fs_read_bytes: read failed for '{}': {}",
+                        target.display(),
+                        e
+                    );
+                    write_bytes_to_caller(&mut caller, &[])
+                }
+            }
+        },
+    )?;
+    linker.alias("env", "_fs_read_bytes", "env", "fs.read_bytes")?;
+    linker.alias("env", "_fs_read_bytes", "env", "storage.read")?;
+
+    // =========================================
+    // _fs_exists — allowlisted regular-file existence probe
+    // =========================================
+    //
+    // Signature: (path_ptr: i32, path_len: i32) -> i32
+    // Returns 1 iff the resolved allowlisted path is a regular file.
+    // Directories, symlinks that resolve outside the allowlist, allowlist
+    // violations, and any I/O error all return 0.
+    linker.func_wrap(
+        "env",
+        "_fs_exists",
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                Some(s) => s,
+                None => return 0,
+            };
+
+            let target = match resolve_allowlisted_path(&path) {
+                Ok(p) => p,
+                Err(_) => return 0,
+            };
+
+            match fs::metadata(&target) {
+                Ok(md) if md.is_file() => 1,
+                _ => 0,
+            }
+        },
+    )?;
+    linker.alias("env", "_fs_exists", "env", "fs.exists")?;
+    linker.alias("env", "_fs_exists", "env", "storage.exists")?;
+
+    // =========================================
+    // _fs_delete — allowlisted file removal
+    // =========================================
+    //
+    // Signature: (path_ptr: i32, path_len: i32) -> i32
+    // Returns 1 on successful removal, 0 when the file did not exist or
+    // removal failed for any reason. Underlying reason is logged so
+    // operators can distinguish 'already gone' from 'permission denied'.
+    linker.func_wrap(
+        "env",
+        "_fs_delete",
+        |mut caller: Caller<'_, S>, path_ptr: i32, path_len: i32| -> i32 {
+            let path = match read_raw_string(&mut caller, path_ptr, path_len) {
+                Some(s) => s,
+                None => return 0,
+            };
+
+            let target = match resolve_allowlisted_path(&path) {
+                Ok(p) => p,
+                Err(code) => {
+                    debug!(
+                        "_fs_delete: rejected path '{}' with code {}",
+                        path, code
+                    );
+                    return 0;
+                }
+            };
+
+            match fs::remove_file(&target) {
+                Ok(()) => {
+                    debug!("_fs_delete: removed '{}'", target.display());
+                    1
+                }
+                Err(e) => {
+                    debug!(
+                        "_fs_delete: remove failed for '{}': {}",
+                        target.display(),
+                        e
+                    );
+                    0
+                }
+            }
+        },
+    )?;
+    linker.alias("env", "_fs_delete", "env", "fs.delete")?;
+    linker.alias("env", "_fs_delete", "env", "storage.delete")?;
 
     Ok(())
 }
