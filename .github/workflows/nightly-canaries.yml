@@ -50,6 +50,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
 
+      - name: Install cleen
+        run: |
+          curl -fsSL https://github.com/Ivan-Pasco/clean-language-manager/releases/latest/download/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cleen/bin"  >> "$GITHUB_PATH"
+
+      - name: Install latest released compiler (cleen precondition)
+        run: |
+          cleen install latest
+          ver="$(ls -1 "$HOME/.cleen/versions" | sort -V | tail -n1)"
+          cleen use "$ver"
+
+      - name: Install latest Frame plugins
+        run: cleen frame install latest
+
       - name: Setup cargo cache
         uses: actions/cache@v4
         with:
