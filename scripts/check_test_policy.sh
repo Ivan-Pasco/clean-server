@@ -44,6 +44,7 @@ TIER2_FILES=(
   req_body_bytes_bridge_test.rs
   crypto_sha256_bytes_bridge_test.rs
   dev_snapshot_bridge_test.rs
+  json_v2_bridge_test.rs
 )
 
 TIER3_FILES=(

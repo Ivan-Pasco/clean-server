@@ -3283,7 +3283,399 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
         )
         .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_get: {}", e)))?;
 
+    // ------------------------------------------------------------------
+    // V2 bridges (Delivery-2 / [P3a-reissue-2])
+    //
+    // These operate on the compiler's boxed-Any wire format per
+    // foundation/spec/platform/BOXED_ANY_ABI.md (§3.2 Array, §3.3 Object).
+    // Container fragments are JSON-tree layouts (4-byte count header, then
+    // count × 4-byte pointers for Arrays / count × 8-byte (key,val) pairs
+    // for Objects) — NOT Clean list/pairs structures.
+    //
+    // Byte-for-byte reference: clean-language-compiler/src/stdlib/json_class.rs
+    //   __json_from_cln_list  (lines 4056–4104)
+    //   __json_from_cln_pairs (lines 4262–4297)
+    //
+    // Legacy _json_encode / _json_decode / _json_get above are unchanged for
+    // frame.server 2.9.5 backward compatibility (dropped in [P5]).
+    // ------------------------------------------------------------------
+    linker
+        .func_wrap(
+            "env",
+            "_json_encode_v2",
+            |mut caller: Caller<'_, WasmState>, boxed_ptr: i32| -> i32 {
+                let value = match read_boxed_any_recursive(&mut caller, boxed_ptr) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // D5: malformed boxed-Any traps (panic → wasmtime Trap).
+                        panic!("_json_encode_v2: malformed boxed-Any: {}", e);
+                    }
+                };
+                let encoded = serde_json::to_string(&value)
+                    .unwrap_or_else(|_| "null".to_string());
+                write_string_to_caller(&mut caller, &encoded)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_encode_v2: {}", e)))?;
+
+    linker
+        .func_wrap(
+            "env",
+            "_json_encode_pretty_v2",
+            |mut caller: Caller<'_, WasmState>, boxed_ptr: i32| -> i32 {
+                let value = match read_boxed_any_recursive(&mut caller, boxed_ptr) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        panic!("_json_encode_pretty_v2: malformed boxed-Any: {}", e);
+                    }
+                };
+                let encoded = serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|_| "null".to_string());
+                write_string_to_caller(&mut caller, &encoded)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_encode_pretty_v2: {}", e)))?;
+
+    linker
+        .func_wrap(
+            "env",
+            "_json_decode_v2",
+            |mut caller: Caller<'_, WasmState>, bytes_ptr: i32, len: i32| -> i32 {
+                let json_str = match read_raw_string(&mut caller, bytes_ptr, len) {
+                    Some(s) => s,
+                    None => return 0, // sentinel: parse failure per BOXED_ANY_ABI §6
+                };
+                let value: serde_json::Value = match serde_json::from_str(&json_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("_json_decode_v2: parse error: {}", e);
+                        return 0;
+                    }
+                };
+                match write_boxed_any_recursive(&mut caller, &value) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("_json_decode_v2: allocation failure: {}", e);
+                        0
+                    }
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_decode_v2: {}", e)))?;
+
     Ok(())
+}
+
+// ============================================================================
+// Boxed-Any ↔ serde_json::Value marshalling for v2 JSON bridges.
+// See foundation/spec/platform/BOXED_ANY_ABI.md §3 for the wire format.
+// ============================================================================
+
+/// Call the WASM module's exported `malloc(size: i32) -> i32` and return the
+/// allocated offset. Returns Err on any failure so the caller can propagate.
+fn wasm_malloc(caller: &mut Caller<'_, WasmState>, size: i32) -> Result<i32, String> {
+    let malloc = caller
+        .get_export("malloc")
+        .and_then(|e| e.into_func())
+        .ok_or_else(|| "no malloc export".to_string())?;
+    let typed = malloc
+        .typed::<i32, i32>(&*caller)
+        .map_err(|e| format!("malloc type mismatch: {}", e))?;
+    let ptr = typed
+        .call(&mut *caller, size)
+        .map_err(|e| format!("malloc call failed: {}", e))?;
+    if ptr <= 0 {
+        return Err(format!("malloc returned invalid ptr {}", ptr));
+    }
+    Ok(ptr)
+}
+
+/// Read a length-prefixed string at `ptr` (LP layout: 4-byte little-endian
+/// length header followed by UTF-8 content).
+fn read_lp_string(caller: &mut Caller<'_, WasmState>, ptr: i32) -> Result<String, String> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "no memory export".to_string())?;
+    let data = memory.data(&*caller);
+    let p = ptr as usize;
+    if p + 4 > data.len() {
+        return Err(format!("LP string header out of bounds at {}", ptr));
+    }
+    let len = i32::from_le_bytes(
+        data[p..p + 4]
+            .try_into()
+            .map_err(|_| "LP length read failed".to_string())?,
+    ) as usize;
+    if p + 4 + len > data.len() {
+        return Err(format!("LP string content out of bounds at {}", ptr));
+    }
+    let bytes = &data[p + 4..p + 4 + len];
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| format!("LP string not valid UTF-8: {}", e))
+}
+
+/// Allocate an LP string in guest memory via WASM malloc and return its offset.
+fn alloc_lp_string(caller: &mut Caller<'_, WasmState>, s: &str) -> Result<i32, String> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let ptr = wasm_malloc(caller, (4 + len) as i32)?;
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "no memory export".to_string())?;
+    let mut header = [0u8; 4];
+    header.copy_from_slice(&(len as i32).to_le_bytes());
+    memory
+        .write(&mut *caller, ptr as usize, &header)
+        .map_err(|e| format!("LP header write failed: {}", e))?;
+    if len > 0 {
+        memory
+            .write(&mut *caller, ptr as usize + 4, bytes)
+            .map_err(|e| format!("LP content write failed: {}", e))?;
+    }
+    Ok(ptr)
+}
+
+/// Read a 32-bit little-endian integer at absolute offset `off` in guest memory.
+fn read_i32_at(caller: &mut Caller<'_, WasmState>, off: usize) -> Result<i32, String> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "no memory export".to_string())?;
+    let data = memory.data(&*caller);
+    if off + 4 > data.len() {
+        return Err(format!("i32 read out of bounds at {}", off));
+    }
+    Ok(i32::from_le_bytes(
+        data[off..off + 4]
+            .try_into()
+            .map_err(|_| "i32 read failed".to_string())?,
+    ))
+}
+
+/// Read 8 bytes of a 12-byte boxed-Any's value slot (offset 4..12) as a raw
+/// buffer so callers can decode as i64 / f64 / (i32, i32) as needed.
+fn read_boxed_value_bytes(
+    caller: &mut Caller<'_, WasmState>,
+    ptr: i32,
+) -> Result<(i32, [u8; 8]), String> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "no memory export".to_string())?;
+    let data = memory.data(&*caller);
+    let p = ptr as usize;
+    if p + 12 > data.len() {
+        return Err(format!("boxed-Any read out of bounds at {}", ptr));
+    }
+    let tag = i32::from_le_bytes(
+        data[p..p + 4]
+            .try_into()
+            .map_err(|_| "tag read failed".to_string())?,
+    );
+    let mut val = [0u8; 8];
+    val.copy_from_slice(&data[p + 4..p + 12]);
+    Ok((tag, val))
+}
+
+/// Walk a boxed-Any tree rooted at `ptr` per BOXED_ANY_ABI §3 and produce a
+/// `serde_json::Value`. Container payloads use the JSON-tree fragment layout
+/// (§3.2 Array, §3.3 Object). Errors on invalid tags or OOB reads (caller maps
+/// to a wasmtime trap per D5).
+fn read_boxed_any_recursive(
+    caller: &mut Caller<'_, WasmState>,
+    ptr: i32,
+) -> Result<serde_json::Value, String> {
+    let (tag, val_bytes) = read_boxed_value_bytes(caller, ptr)?;
+    match tag {
+        0 => Ok(serde_json::Value::Null),
+        1 => {
+            // i64 split across offsets 4..12 (little-endian whole i64)
+            let n = i64::from_le_bytes(val_bytes);
+            Ok(serde_json::Value::Number(n.into()))
+        }
+        2 => {
+            // Boolean at offset 4 (low 4 bytes)
+            let b = i32::from_le_bytes([val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3]]);
+            Ok(serde_json::Value::Bool(b != 0))
+        }
+        3 => {
+            // f64 at offsets 4..12
+            let f = f64::from_le_bytes(val_bytes);
+            Ok(serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null))
+        }
+        4 => {
+            // LP-string pointer at offset 4
+            let str_ptr =
+                i32::from_le_bytes([val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3]]);
+            let s = read_lp_string(caller, str_ptr)?;
+            Ok(serde_json::Value::String(s))
+        }
+        5 => {
+            // JSON-tree Array pointer at offset 4 (§3.2)
+            //   [count:i32][elem_ptr_0:i32][elem_ptr_1:i32]…
+            let arr_ptr =
+                i32::from_le_bytes([val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3]]);
+            let count = read_i32_at(caller, arr_ptr as usize)?;
+            if count < 0 {
+                return Err(format!("negative Array count {}", count));
+            }
+            let mut items = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let slot = arr_ptr as usize + 4 + (i as usize) * 4;
+                let elem_ptr = read_i32_at(caller, slot)?;
+                items.push(read_boxed_any_recursive(caller, elem_ptr)?);
+            }
+            Ok(serde_json::Value::Array(items))
+        }
+        6 => {
+            // JSON-tree Object pointer at offset 4 (§3.3)
+            //   [count:i32] then count × [key_ptr:i32 (LP str), val_ptr:i32 (boxed)]
+            let obj_ptr =
+                i32::from_le_bytes([val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3]]);
+            let count = read_i32_at(caller, obj_ptr as usize)?;
+            if count < 0 {
+                return Err(format!("negative Object count {}", count));
+            }
+            // preserve_order is enabled on serde_json (Cargo.toml) so insertion
+            // order is retained per D3.
+            let mut map = serde_json::Map::new();
+            for i in 0..count {
+                let entry_off = obj_ptr as usize + 4 + (i as usize) * 8;
+                let key_ptr = read_i32_at(caller, entry_off)?;
+                let val_ptr = read_i32_at(caller, entry_off + 4)?;
+                let key = read_lp_string(caller, key_ptr)?;
+                let val = read_boxed_any_recursive(caller, val_ptr)?;
+                map.insert(key, val);
+            }
+            Ok(serde_json::Value::Object(map))
+        }
+        other => Err(format!("invalid boxed-Any tag {}", other)),
+    }
+}
+
+/// Materialize a `serde_json::Value` into a freshly-allocated boxed-Any tree in
+/// guest memory per BOXED_ANY_ABI §3 and return the root pointer. Container
+/// payloads use the JSON-tree fragment layout to match __json_from_cln_list /
+/// __json_from_cln_pairs byte-for-byte.
+fn write_boxed_any_recursive(
+    caller: &mut Caller<'_, WasmState>,
+    value: &serde_json::Value,
+) -> Result<i32, String> {
+    // 12-byte outer box first, so children live at higher offsets when malloc
+    // is a bump allocator. The order does not affect correctness; only
+    // that the returned root points at a valid 12-byte block.
+    let box_ptr = wasm_malloc(caller, 12)?;
+    let mut buf = [0u8; 12];
+
+    match value {
+        serde_json::Value::Null => {
+            buf[0..4].copy_from_slice(&0i32.to_le_bytes());
+        }
+        serde_json::Value::Bool(b) => {
+            buf[0..4].copy_from_slice(&2i32.to_le_bytes());
+            buf[4..8].copy_from_slice(&(if *b { 1i32 } else { 0i32 }).to_le_bytes());
+        }
+        serde_json::Value::Number(n) => {
+            // D1: integers in JS-safe range (|n| ≤ 2^53) → tag 1; else tag 3.
+            const JS_SAFE: i64 = 1i64 << 53;
+            if let Some(i) = n.as_i64() {
+                if i.abs() <= JS_SAFE {
+                    buf[0..4].copy_from_slice(&1i32.to_le_bytes());
+                    buf[4..12].copy_from_slice(&i.to_le_bytes());
+                } else {
+                    let f = i as f64;
+                    buf[0..4].copy_from_slice(&3i32.to_le_bytes());
+                    buf[4..12].copy_from_slice(&f.to_le_bytes());
+                }
+            } else if let Some(u) = n.as_u64() {
+                if u <= JS_SAFE as u64 {
+                    buf[0..4].copy_from_slice(&1i32.to_le_bytes());
+                    buf[4..12].copy_from_slice(&(u as i64).to_le_bytes());
+                } else {
+                    let f = u as f64;
+                    buf[0..4].copy_from_slice(&3i32.to_le_bytes());
+                    buf[4..12].copy_from_slice(&f.to_le_bytes());
+                }
+            } else if let Some(f) = n.as_f64() {
+                buf[0..4].copy_from_slice(&3i32.to_le_bytes());
+                buf[4..12].copy_from_slice(&f.to_le_bytes());
+            } else {
+                return Err(format!("unhandled JSON number {:?}", n));
+            }
+        }
+        serde_json::Value::String(s) => {
+            let str_ptr = alloc_lp_string(caller, s)?;
+            buf[0..4].copy_from_slice(&4i32.to_le_bytes());
+            buf[4..8].copy_from_slice(&str_ptr.to_le_bytes());
+        }
+        serde_json::Value::Array(items) => {
+            // First materialize every child boxed-Any so we know their pointers,
+            // then allocate the JSON-tree Array (4 + count*4) and store them.
+            let mut child_ptrs = Vec::with_capacity(items.len());
+            for item in items {
+                child_ptrs.push(write_boxed_any_recursive(caller, item)?);
+            }
+            let arr_size = 4 + items.len() as i32 * 4;
+            let arr_ptr = wasm_malloc(caller, arr_size)?;
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| "no memory export".to_string())?;
+            let mut arr_buf = vec![0u8; arr_size as usize];
+            arr_buf[0..4].copy_from_slice(&(items.len() as i32).to_le_bytes());
+            for (i, cp) in child_ptrs.iter().enumerate() {
+                let off = 4 + i * 4;
+                arr_buf[off..off + 4].copy_from_slice(&cp.to_le_bytes());
+            }
+            memory
+                .write(&mut *caller, arr_ptr as usize, &arr_buf)
+                .map_err(|e| format!("Array write failed: {}", e))?;
+            buf[0..4].copy_from_slice(&5i32.to_le_bytes());
+            buf[4..8].copy_from_slice(&arr_ptr.to_le_bytes());
+        }
+        serde_json::Value::Object(map) => {
+            // Materialize keys and children up front to know pointers before
+            // writing the entry table. Iteration order = insertion order (D3)
+            // because serde_json is compiled with preserve_order.
+            let mut entries: Vec<(i32, i32)> = Vec::with_capacity(map.len());
+            for (k, v) in map.iter() {
+                let key_ptr = alloc_lp_string(caller, k)?;
+                let val_ptr = write_boxed_any_recursive(caller, v)?;
+                entries.push((key_ptr, val_ptr));
+            }
+            let obj_size = 4 + map.len() as i32 * 8;
+            let obj_ptr = wasm_malloc(caller, obj_size)?;
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| "no memory export".to_string())?;
+            let mut obj_buf = vec![0u8; obj_size as usize];
+            obj_buf[0..4].copy_from_slice(&(map.len() as i32).to_le_bytes());
+            for (i, (kp, vp)) in entries.iter().enumerate() {
+                let off = 4 + i * 8;
+                obj_buf[off..off + 4].copy_from_slice(&kp.to_le_bytes());
+                obj_buf[off + 4..off + 8].copy_from_slice(&vp.to_le_bytes());
+            }
+            memory
+                .write(&mut *caller, obj_ptr as usize, &obj_buf)
+                .map_err(|e| format!("Object write failed: {}", e))?;
+            buf[0..4].copy_from_slice(&6i32.to_le_bytes());
+            buf[4..8].copy_from_slice(&obj_ptr.to_le_bytes());
+        }
+    }
+
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "no memory export".to_string())?;
+    memory
+        .write(&mut *caller, box_ptr as usize, &buf)
+        .map_err(|e| format!("box write failed: {}", e))?;
+    Ok(box_ptr)
 }
 
 /// Register island component functions (_island_register)
@@ -6656,8 +7048,14 @@ fn register_dot_aliases(linker: &mut Linker<WasmState>) -> RuntimeResult<()> {
         ("_http_no_cache", "http.no_cache"),
         // _res_download, _email_configure, _email_send, _email_last_error aliases are
         // derived automatically by the register_bridge_fn! macro.
-        ("_json_encode", "json.encode"),
-        ("_json_decode", "json.decode"),
+        // JSON — Delivery-2 wiring per function-registry.toml.
+        //   v2 canonicals own the dotted aliases (json.encode, json.encodePretty,
+        //   json.decode). Legacy _json_encode / _json_decode remain registered
+        //   under their underscored names for frame.server 2.9.5 backward compat
+        //   but declare no aliases (dropped in [P5] post-soak).
+        ("_json_encode_v2", "json.encode"),
+        ("_json_encode_pretty_v2", "json.encodePretty"),
+        ("_json_decode_v2", "json.decode"),
         ("_json_get", "json.get"),
         // Async aliases are registered by register_bridge_fn! macro in register_async_functions
         // Test bridge aliases are registered by register_bridge_fn! macro in register_test_functions
@@ -7195,21 +7593,23 @@ mod tests {
         assert_eq!(marshal_attrs_as_json("<my-tag />", "my-tag"), "{}");
     }
 
-    // `serde_json::Map` (BTreeMap-backed without `preserve_order` feature)
-    // outputs keys in lexicographic order. The export consumes the JSON by
-    // key lookup, so the on-the-wire order is irrelevant — these tests pin
+    // With `serde_json`'s `preserve_order` feature enabled (required for D3
+    // insertion-order compliance in JSON v2 bridges), `serde_json::Map`
+    // outputs keys in insertion order — i.e. HTML source order for
+    // marshal_attrs_as_json. The export consumes the JSON by key lookup, so
+    // the on-the-wire order is functionally irrelevant — these tests pin
     // the deterministic output for regression-detection.
 
     #[test]
     fn marshal_attrs_as_json_double_quoted() {
         let json = marshal_attrs_as_json(r#"<my-tag name="bob" count="3">"#, "my-tag");
-        assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
+        assert_eq!(json, r#"{"name":"bob","count":"3"}"#);
     }
 
     #[test]
     fn marshal_attrs_as_json_single_quoted_and_boolean() {
         let json = marshal_attrs_as_json("<my-tag name='alice' disabled count='7'>", "my-tag");
-        assert_eq!(json, r#"{"count":"7","disabled":"","name":"alice"}"#);
+        assert_eq!(json, r#"{"name":"alice","disabled":"","count":"7"}"#);
     }
 
     #[test]
@@ -7227,7 +7627,7 @@ mod tests {
     #[test]
     fn marshal_attrs_as_json_with_extra_whitespace() {
         let json = marshal_attrs_as_json("<my-tag   name=\"bob\"   count=\"3\"  >", "my-tag");
-        assert_eq!(json, r#"{"count":"3","name":"bob"}"#);
+        assert_eq!(json, r#"{"name":"bob","count":"3"}"#);
     }
 
     // Regression: SERVER-UI-RENDER-PAGE-INTERP-STRICT-WHITESPACE
