@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, info, warn};
-use wasmtime::{Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
 /// Shared database bridge type
 pub type SharedDbBridge = Arc<TokioRwLock<DbBridge>>;
@@ -360,11 +360,35 @@ fn build_store_limits(memory_limit: usize) -> StoreLimits {
         .build()
 }
 
+/// Format a wasmtime error including its underlying `Trap` kind.
+///
+/// `wasmtime::Error` is an `anyhow::Error`. Its `Display` impl prints only the
+/// top-level message ("error while executing at wasm backtrace: …") and the
+/// frame table — the actual trap code (`memory out of bounds`, `wasm stack
+/// overflow`, `unreachable`, `integer overflow`, …) lives on the `Trap`
+/// downcast and gets stripped by `format!("{}", err)`. Callers that log or
+/// return the error to a client MUST use this helper so operators can tell
+/// which trap fired without re-running under a debugger.
+fn format_wasm_error(err: &wasmtime::Error) -> String {
+    match err.downcast_ref::<Trap>() {
+        Some(trap) => format!("wasm trap: {} — {}", trap, err),
+        None => format!("{}", err),
+    }
+}
+
 /// Detect whether a wasmtime trap is the memory-size limit being hit.
 /// We can't pattern-match on a structured error code because wasmtime collapses
 /// the OOM into a generic trap; the trap message is the only signal.
-fn is_memory_limit_trap<E: std::fmt::Display>(err: &E) -> bool {
-    let msg = format!("{}", err).to_lowercase();
+fn is_memory_limit_trap(err: &wasmtime::Error) -> bool {
+    if let Some(trap) = err.downcast_ref::<Trap>()
+        && matches!(
+            trap,
+            Trap::MemoryOutOfBounds | Trap::HeapMisaligned | Trap::AllocationTooLarge
+        )
+    {
+        return true;
+    }
+    let msg = format_wasm_error(err).to_lowercase();
     msg.contains("memory")
         && (msg.contains("grow") || msg.contains("out of bounds") || msg.contains("limit"))
 }
@@ -373,6 +397,7 @@ fn is_memory_limit_trap<E: std::fmt::Display>(err: &E) -> bool {
 /// caused by the per-instance memory limit. Lets operators see "raise
 /// CLEAN_SERVER_MEMORY_LIMIT_MB" instead of the raw wasmtime backtrace.
 fn classify_handler_error(handler_name: &str, err: wasmtime::Error) -> RuntimeError {
+    let formatted = format_wasm_error(&err);
     if is_memory_limit_trap(&err) {
         let limit_mb = std::env::var("CLEAN_SERVER_MEMORY_LIMIT_MB")
             .ok()
@@ -385,10 +410,10 @@ fn classify_handler_error(handler_name: &str, err: wasmtime::Error) -> RuntimeEr
              iterate/string accumulation loop that doesn't release intermediate \
              buffers (see compiler bug SERVER-NO-WASM-HEAP-RESET-PER-REQUEST). \
              Original error: {}",
-            handler_name, limit_mb, err
+            handler_name, limit_mb, formatted
         ))
     } else {
-        RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, err))
+        RuntimeError::wasm(format!("Handler {} failed: {}", handler_name, formatted))
     }
 }
 
@@ -1380,5 +1405,47 @@ mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.params.get("id"), Some(&"123".to_string()));
         assert_eq!(request.query.get("page"), Some(&"1".to_string()));
+    }
+
+    // Regression: SERVER-TRAP-KIND-STRIPPED. wasmtime::Error's Display strips
+    // the Trap kind; format_wasm_error must surface it so operators can tell
+    // an OOB apart from a stack overflow without a debugger.
+    #[test]
+    fn format_wasm_error_surfaces_trap_kind() {
+        let err: wasmtime::Error = Trap::MemoryOutOfBounds.into();
+        let formatted = format_wasm_error(&err);
+        assert!(
+            formatted.contains("wasm trap:") && formatted.to_lowercase().contains("memory"),
+            "expected formatted error to name the trap kind, got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn is_memory_limit_trap_detects_memory_out_of_bounds() {
+        let err: wasmtime::Error = Trap::MemoryOutOfBounds.into();
+        assert!(
+            is_memory_limit_trap(&err),
+            "MemoryOutOfBounds must be classified as a memory-limit trap"
+        );
+    }
+
+    #[test]
+    fn is_memory_limit_trap_ignores_stack_overflow() {
+        let err: wasmtime::Error = Trap::StackOverflow.into();
+        assert!(
+            !is_memory_limit_trap(&err),
+            "StackOverflow must not be classified as a memory-limit trap"
+        );
+    }
+
+    #[test]
+    fn classify_handler_error_includes_trap_kind_for_generic_traps() {
+        let err: wasmtime::Error = Trap::UnreachableCodeReached.into();
+        let runtime = classify_handler_error("my_handler", err);
+        let msg = format!("{runtime}");
+        assert!(
+            msg.contains("my_handler") && msg.to_lowercase().contains("unreachable"),
+            "expected handler error to name both the handler and the trap kind, got: {msg}"
+        );
     }
 }
