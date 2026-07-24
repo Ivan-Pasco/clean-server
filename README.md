@@ -373,9 +373,11 @@ RUST_LOG=clean_server=debug,host_bridge=debug clean-server run app.wasm
 ### Building from Source
 
 ```bash
-# Clone repository
-git clone https://github.com/Ivan-Pasco/clean-server.git
+# Clone repository (JSONTestSuite corpus is a submodule)
+git clone --recurse-submodules https://github.com/Ivan-Pasco/clean-server.git
 cd clean-server
+# Or, for an existing clone:
+git submodule update --init --recursive
 
 # Build
 cargo build --release
@@ -459,6 +461,33 @@ Signatures for every function in both layers are declared in
 `foundation/spec/platform/function-registry.toml` and enforced by
 `test_spec_compliance` (Layer 2) and `test_layer3_spec_compliance`
 (Layer 3).
+
+### JSON conformance (JSONTestSuite)
+
+The full [JSONTestSuite](https://github.com/nst/JSONTestSuite) corpus is
+vendored as a git submodule at `tests/fixtures/JSONTestSuite/` and driven
+through `_json_decode_v2` by `tests/json_conformance.rs`. Every push runs
+the harness in CI (job `T2 · JSON conformance`) and gates against
+`tests/json_conformance_baseline.txt`.
+
+Current baseline (318 fixtures):
+
+| Category | Result | Meaning |
+|----------|--------|---------|
+| `y_*`    | 95/95 pass    | Every well-formed JSON parses successfully |
+| `n_*`    | 188/188 reject | Every malformed JSON returns the 0 sentinel |
+| `i_*`    | 5 pass / 30 reject / 0 skip | Implementation-defined; logged only |
+
+A commit that lowers the `y_*` pass count or the `n_*` reject count fails
+CI. `i_*` deltas print warnings but do not gate.
+
+To refresh the baseline after an intentional bridge change:
+
+```bash
+rm tests/json_conformance_baseline.txt
+cargo test --test json_conformance  # regenerates the file, then fails once
+git add tests/json_conformance_baseline.txt
+```
 
 ## Contributing
 

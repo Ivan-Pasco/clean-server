@@ -246,6 +246,46 @@ jobs:
         run: cargo test --test ${{ matrix.test }}
 
   # ---------------------------------------------------------------
+  # T2 · JSON conformance (JSONTestSuite corpus, 318 fixtures)
+  #
+  # Corpus is a git submodule at tests/fixtures/JSONTestSuite/. The harness
+  # decodes every y_*/n_*/i_* file via _json_decode_v2 and compares outcomes
+  # against tests/json_conformance_baseline.txt. A regression on any y_* or
+  # n_* fails the job; i_* deltas produce warnings only.
+  # ---------------------------------------------------------------
+  json-conformance:
+    name: T2 · JSON conformance (JSONTestSuite)
+    runs-on: ubuntu-latest
+    needs: policy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-jsonconf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-jsonconf-
+
+      - name: cargo test --test json_conformance
+        run: cargo test --test json_conformance -- --nocapture
+
+  # ---------------------------------------------------------------
   # T3 · Spec compliance (registry ↔ implementation, full run — was skipped)
   # ---------------------------------------------------------------
   # NOTE: `continue-on-error: true` — this job checks out the registry from
