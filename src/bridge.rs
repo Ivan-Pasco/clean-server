@@ -3311,8 +3311,7 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                         panic!("_json_encode_v2: malformed boxed-Any: {}", e);
                     }
                 };
-                let encoded = serde_json::to_string(&value)
-                    .unwrap_or_else(|_| "null".to_string());
+                let encoded = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
                 write_string_to_caller(&mut caller, &encoded)
             },
         )
@@ -3329,12 +3328,14 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                         panic!("_json_encode_pretty_v2: malformed boxed-Any: {}", e);
                     }
                 };
-                let encoded = serde_json::to_string_pretty(&value)
-                    .unwrap_or_else(|_| "null".to_string());
+                let encoded =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string());
                 write_string_to_caller(&mut caller, &encoded)
             },
         )
-        .map_err(|e| RuntimeError::wasm(format!("Failed to define _json_encode_pretty_v2: {}", e)))?;
+        .map_err(|e| {
+            RuntimeError::wasm(format!("Failed to define _json_encode_pretty_v2: {}", e))
+        })?;
 
     linker
         .func_wrap(
@@ -3411,8 +3412,7 @@ fn read_lp_string(caller: &mut Caller<'_, WasmState>, ptr: i32) -> Result<String
         return Err(format!("LP string content out of bounds at {}", ptr));
     }
     let bytes = &data[p + 4..p + 4 + len];
-    String::from_utf8(bytes.to_vec())
-        .map_err(|e| format!("LP string not valid UTF-8: {}", e))
+    String::from_utf8(bytes.to_vec()).map_err(|e| format!("LP string not valid UTF-8: {}", e))
 }
 
 /// Allocate an LP string in guest memory via WASM malloc and return its offset.

@@ -501,8 +501,9 @@ fn test_json_v2_jsontestsuite_spot_check() {
         let re = h.encode(ptr);
         // Compare against serde_json's own re-serialization (which under
         // preserve_order gives insertion order matching the source key order).
-        let via_serde = serde_json::to_string(&serde_json::from_str::<serde_json::Value>(src).unwrap())
-            .unwrap();
+        let via_serde =
+            serde_json::to_string(&serde_json::from_str::<serde_json::Value>(src).unwrap())
+                .unwrap();
         assert_eq!(re, via_serde, "roundtrip mismatch for {}", src);
     }
 
@@ -516,6 +517,10 @@ fn test_json_v2_jsontestsuite_spot_check() {
     ];
     for src in invalid {
         let ptr = h.decode(src);
-        assert_eq!(ptr, 0, "invalid input {:?} should return 0, got {}", src, ptr);
+        assert_eq!(
+            ptr, 0,
+            "invalid input {:?} should return 0, got {}",
+            src, ptr
+        );
     }
 }
