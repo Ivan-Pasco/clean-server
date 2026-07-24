@@ -6834,6 +6834,51 @@ mod tests {
         assert!(json_get_by_path(&parsed, "data.missing").is_none());
     }
 
+    // Regression: commit-scan-missing-repo-on-body-parse (fp 79ff683e).
+    // The hypothesis in the report was that serde_json (used by _json_get)
+    // mis-decodes UTF-8 multi-byte sequences (em-dash E2 80 94) when they
+    // sit next to backticks, causing the top-level `repo` key to become
+    // unreachable. This test uses the exact failing payload from the report
+    // and asserts that repo/commit_sha/fingerprints are all still reachable.
+    // If this test passes, the JSON bridge is NOT the cause and the bug
+    // lives elsewhere (dashboard endpoint, request-body reader, framework).
+    #[test]
+    fn json_decode_survives_backtick_em_dash_utf8() {
+        let payload = "{\n  \"repo\": \"clean-language/clean-errors\",\n  \"commit_sha\": \"abcdef1234567890abcdef1234567890abcdef12\",\n  \"commit_message\": \"fix(commit-scan): handle `backtick-quoted` fingerprints \u{2014} parse both forms\\n\\nPreviously the matcher only recognized `Bug: (fp)` \u{2014} this commit adds the\\n`Bug: fp` trailer form as well. See #1f887f527998 \u{2014} closes it.\",\n  \"author\": \"Ivan <ipasco@grafilab.com>\",\n  \"authored_at\": \"2026-07-16T12:00:00Z\",\n  \"fingerprints\": [\"1f887f527998\"]\n}";
+
+        // Sanity: the payload really does contain both backticks and em-dashes.
+        assert!(payload.contains('`'), "payload must contain backtick");
+        assert!(payload.contains('\u{2014}'), "payload must contain em-dash");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(payload).expect("serde_json must parse the reported payload");
+
+        assert_eq!(
+            parsed.get("repo").and_then(|v| v.as_str()),
+            Some("clean-language/clean-errors"),
+            "repo key must be reachable"
+        );
+        assert_eq!(
+            parsed.get("commit_sha").and_then(|v| v.as_str()),
+            Some("abcdef1234567890abcdef1234567890abcdef12")
+        );
+        assert_eq!(
+            parsed
+                .get("fingerprints")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("1f887f527998")
+        );
+
+        let commit_message = parsed
+            .get("commit_message")
+            .and_then(|v| v.as_str())
+            .expect("commit_message must decode as a string");
+        assert!(commit_message.contains('`'));
+        assert!(commit_message.contains('\u{2014}'));
+    }
+
     #[test]
     fn test_inject_loader_script_for_islands() {
         // SRV003: page with a data-island wrapper must get the loader script tag
