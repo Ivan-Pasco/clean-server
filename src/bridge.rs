@@ -3277,6 +3277,22 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                     other => other.to_string(),
                 };
 
+                // DIAG-JSON-GET: log the tuple (tag, path, source_bytes, result)
+                // at info level so we can reconcile _db_query envelope shape
+                // against _json_get traversal without RUST_LOG=debug. Companion
+                // to DIAG-DB-QUERY-SHAPE. See prompt 1c2d7544.
+                info!(
+                    "DIAG-JSON-GET tag={} path={:?} source_bytes={} source={} result={:?}",
+                    tag,
+                    path,
+                    json_str.len(),
+                    if json_str.len() > 200 {
+                        format!("{}...", &json_str[..200])
+                    } else {
+                        json_str.clone()
+                    },
+                    result
+                );
                 debug!("_json_get: path='{}' -> '{}'", path, result);
                 write_boxed_any_string(&mut caller, &result)
             },
