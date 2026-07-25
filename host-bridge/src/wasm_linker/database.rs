@@ -20,7 +20,7 @@ use super::state::WasmStateCore;
 use crate::error::BridgeResult;
 use serde_json::json;
 use std::cell::RefCell;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use wasmtime::{Caller, Linker};
 
 // Per-thread cache for `_db_*_async` fire-and-forget pattern.
@@ -233,6 +233,16 @@ pub fn register_functions<S: WasmStateCore>(linker: &mut Linker<S>) -> BridgeRes
                 }
             };
 
+            // DIAG-DB-QUERY-SHAPE: log full raw JSON bytes returned to WASM so
+            // downstream json.get behaviour can be reconciled against the
+            // envelope actually delivered. Info-level so it fires without
+            // RUST_LOG=debug; prefixed for greppability. See prompt 1c2d7544.
+            info!(
+                "DIAG-DB-QUERY-SHAPE sql={:?} bytes={} raw_json={}",
+                sql.chars().take(120).collect::<String>(),
+                result_str.len(),
+                result_str
+            );
             debug!("_db_query: Result string is {} bytes", result_str.len());
             write_string_to_caller(&mut caller, &result_str)
         },
