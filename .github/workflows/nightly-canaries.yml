@@ -52,11 +52,31 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/.cleen/bin"  >> "$GITHUB_PATH"
 
-      - name: Install latest released compiler (cleen precondition)
+      - name: Resolve compiler release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Must run before "Install released compiler" — the manager's default
+        # `cleen install latest` hits the pre-rename compiler repo and fails
+        # with HTTP 301 (see prompt 1c131e1f). We resolve the tag from the
+        # correct COMPILER_REPO first and install that specific version.
         run: |
-          cleen install latest
-          ver="$(ls -1 "$HOME/.cleen/versions" | sort -V | tail -n1)"
-          cleen use "$ver"
+          if [[ -n "${{ github.event.inputs.compiler_release }}" ]]; then
+            tag="${{ github.event.inputs.compiler_release }}"
+          else
+            tag="$(gh release view --repo "$COMPILER_REPO" --json tagName -q .tagName)"
+          fi
+          # Strip leading v so `cleen install <ver>` accepts it — cleen wants
+          # the bare semver, not the git tag form.
+          ver="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "Resolved compiler release: $tag (ver=$ver)"
+
+      - name: Install released compiler
+        run: |
+          cleen install "${{ steps.resolve.outputs.ver }}"
+          cleen use "${{ steps.resolve.outputs.ver }}"
 
       - name: Install latest Frame plugins
         run: cleen frame install latest
@@ -78,19 +98,6 @@ jobs:
       - name: Build canary_runner
         working-directory: clean-server
         run: cargo build --release --bin canary_runner
-
-      - name: Resolve compiler release tag
-        id: resolve
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [[ -n "${{ github.event.inputs.compiler_release }}" ]]; then
-            tag="${{ github.event.inputs.compiler_release }}"
-          else
-            tag="$(gh release view --repo "$COMPILER_REPO" --json tagName -q .tagName)"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Resolved compiler release: $tag"
 
       - name: Download canary WASM artifacts from compiler release
         id: download
