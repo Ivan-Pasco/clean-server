@@ -133,14 +133,16 @@ jobs:
         working-directory: clean-language-compiler
         run: |
           # Compile every canary .cln with --opt-level 2 --strict-hosts --plugins.
-          # The compiler ships a build target for this; if that changes, the
-          # invocation below needs to move in lock-step.
-          cargo build --release --bin clean-language-compiler
+          # The compiler's primary bin is `cln` (renamed from
+          # `clean-language-compiler` in the 0.33.x line — see the [[bin]]
+          # table in the compiler Cargo.toml). If that renames again, this
+          # invocation moves with it.
+          cargo build --release --bin cln
           mkdir -p tests/output/canaries
-          for cln in tests/cln/canaries/*.cln; do
-            name="$(basename "$cln" .cln)"
-            ./target/release/clean-language-compiler compile \
-              -i "$cln" \
+          for cln_src in tests/cln/canaries/*.cln; do
+            name="$(basename "$cln_src" .cln)"
+            ./target/release/cln compile \
+              -i "$cln_src" \
               -o "tests/output/canaries/$name.wasm" \
               --opt-level 2 --strict-hosts --plugins \
               || {
