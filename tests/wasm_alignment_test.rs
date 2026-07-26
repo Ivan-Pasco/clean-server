@@ -738,3 +738,157 @@ fn test_mem_alloc_honors_compiler_size_arg() {
         diff
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: _json_get tolerates a BARE length-prefixed string pointer as any_ptr.
+//
+// Regression for prompt f2c316ce (db.query response unreadable by json.get in
+// clean-server 1.9.99). Root cause: _db_query returns a bare lp-string ptr
+// ([4B len][bytes]) but _json_get expects a 12-byte boxed Any struct
+// ([tag][value1][value2]). If the compiler forwards the bare pointer without
+// boxing, _json_get was reading the first 4 bytes of the JSON as `tag` and
+// the next 4 as `value1` — both garbage, returning empty for every query.
+//
+// This test writes a JSON envelope directly into WASM memory as a bare
+// lp-string (mimicking what _db_query hands back), calls _json_get(str_ptr,
+// path_ptr), then asserts the extracted result is non-empty and matches the
+// expected value. Without the tolerant-fallback fix, this test fails because
+// _json_get returns "".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_json_get_tolerates_bare_lp_string_source() {
+    // WAT module:
+    //  - imports _json_get, malloc
+    //  - exports memory and __heap_ptr
+    //  - build_and_call(): writes a JSON lp-string + path lp-string, calls
+    //    _json_get with the JSON's bare lp-string ptr as any_ptr, then reads
+    //    back the boxed-Any result. Returns the length of the extracted
+    //    string. 0 means empty (bug still present), >0 means the fallback
+    //    worked.
+    //  - result_first_byte(): re-runs the same call and returns the first
+    //    byte of the extracted string so the test can verify contents.
+    let wat = r#"
+(module
+  (import "env" "_json_get" (func $json_get (param i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (global (export "__heap_ptr") (mut i32) (i32.const 4096))
+
+  ;; Minimal bump malloc. Aligns to 4 bytes. Returns 0 on OOM (never here).
+  (func (export "malloc") (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get 0))
+    (global.set 0
+      (i32.and
+        (i32.add
+          (i32.add (global.get 0) (local.get $size))
+          (i32.const 3))
+        (i32.const -4)))
+    (local.get $ptr)
+  )
+
+  ;; Write a length-prefixed string at the given ptr. Length is `len` bytes.
+  ;; Data is copied byte-by-byte from `src`.
+  (func $write_lp (param $ptr i32) (param $src i32) (param $len i32)
+    (local $i i32)
+    (i32.store (local.get $ptr) (local.get $len))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $copy
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (i32.store8
+          (i32.add (i32.add (local.get $ptr) (i32.const 4)) (local.get $i))
+          (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $copy)))
+  )
+
+  ;; JSON payload literal at address 1024:
+  ;;   {"ok":true,"data":{"rows":[{"greeting":"hello"}],"count":1}}
+  ;; (60 bytes)
+  (data (i32.const 1024)
+    "{\22ok\22:true,\22data\22:{\22rows\22:[{\22greeting\22:\22hello\22}],\22count\22:1}}")
+  ;; Path literal at address 2048: "data.rows.0.greeting" (20 bytes)
+  (data (i32.const 2048) "data.rows.0.greeting")
+
+  ;; Build the lp-string envelope for the JSON at 3072, then the path
+  ;; lp-string at 3200, call _json_get, and return the length of the
+  ;; extracted string from the returned boxed Any.
+  ;;
+  ;; Returns: extracted string length (0 = empty, bug still present)
+  (func (export "call_json_get_with_bare_lp") (result i32)
+    (local $json_lp i32)
+    (local $path_lp i32)
+    (local $box_ptr i32)
+    (local $val1 i32)
+    (call $write_lp (i32.const 3072) (i32.const 1024) (i32.const 60))
+    (local.set $json_lp (i32.const 3072))
+    (call $write_lp (i32.const 3200) (i32.const 2048) (i32.const 20))
+    (local.set $path_lp (i32.const 3200))
+    ;; Call _json_get with the bare lp-string ptr as any_ptr.
+    (local.set $box_ptr
+      (call $json_get (local.get $json_lp) (local.get $path_lp)))
+    ;; Read value1 from the returned box (offset +4).
+    (local.set $val1
+      (i32.load (i32.add (local.get $box_ptr) (i32.const 4))))
+    ;; Read the length prefix of value1's lp-string.
+    (i32.load (local.get $val1))
+  )
+
+  ;; Same call, but return the first byte of the extracted string. For
+  ;; "hello" this is 'h' = 104. Lets the test check content, not just length.
+  (func (export "call_json_get_first_byte") (result i32)
+    (local $json_lp i32)
+    (local $path_lp i32)
+    (local $box_ptr i32)
+    (local $val1 i32)
+    (call $write_lp (i32.const 3072) (i32.const 1024) (i32.const 60))
+    (local.set $json_lp (i32.const 3072))
+    (call $write_lp (i32.const 3200) (i32.const 2048) (i32.const 20))
+    (local.set $path_lp (i32.const 3200))
+    (local.set $box_ptr
+      (call $json_get (local.get $json_lp) (local.get $path_lp)))
+    (local.set $val1
+      (i32.load (i32.add (local.get $box_ptr) (i32.const 4))))
+    ;; First byte of the payload = byte at value1 + 4 (past length prefix).
+    (i32.load8_u (i32.add (local.get $val1) (i32.const 4)))
+  )
+)
+"#;
+
+    let engine = Engine::default();
+    let module = Module::new(&engine, wat).expect("compile WAT");
+    let linker = create_linker(&engine).expect("create linker");
+    let mut store = make_store(&engine);
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("instantiate module");
+
+    let call_len = instance
+        .get_typed_func::<(), i32>(&mut store, "call_json_get_with_bare_lp")
+        .expect("get call_json_get_with_bare_lp export");
+    let extracted_len = call_len.call(&mut store, ()).expect("call bare-lp path");
+
+    assert_eq!(
+        extracted_len, 5,
+        "_json_get did not extract 'hello' (5 bytes) when given a bare lp-string \
+         pointer as any_ptr. Got extracted length = {}. This is the wire-drift bug \
+         reported in prompt f2c316ce: _db_query returns a bare lp-string, and if \
+         the compiler forwards it to _json_get without boxing, _json_get must \
+         fall back to reading any_ptr as a bare lp-string. See src/bridge.rs \
+         _json_get comment.",
+        extracted_len
+    );
+
+    let call_byte = instance
+        .get_typed_func::<(), i32>(&mut store, "call_json_get_first_byte")
+        .expect("get call_json_get_first_byte export");
+    let first_byte = call_byte.call(&mut store, ()).expect("call first-byte");
+
+    assert_eq!(
+        first_byte, b'h' as i32,
+        "_json_get returned {} as first byte, expected 'h' (104). The fallback \
+         resolved to a value but not the expected 'hello'.",
+        first_byte
+    );
+}

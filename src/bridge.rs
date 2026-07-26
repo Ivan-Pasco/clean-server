@@ -3222,6 +3222,21 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
             "env",
             "_json_get",
             |mut caller: Caller<'_, WasmState>, any_ptr: i32, path_ptr: i32| -> i32 {
+                // Wire-format detection. Prompt f2c316ce reports every db.query
+                // result being unreadable via json.get in clean-server 1.9.99+.
+                // Root cause: _db_query returns a BARE length-prefixed string
+                // pointer, but _json_get expects a 12-byte boxed-Any struct
+                // ([tag@0][value1@4][value2@8]). If the compiler emits code
+                // that forwards the bare pointer without boxing, we read the
+                // first 4 bytes of the JSON as `tag` and the next 4 as
+                // `value1` — both garbage, and the fallback path never sees
+                // the actual JSON.
+                //
+                // Fix: try the spec-compliant boxed path first; if the payload
+                // it points at is not parseable JSON, fall back to treating
+                // any_ptr itself as a bare lp-string pointer. This rescues the
+                // drift case while keeping the boxed path unchanged for callers
+                // that box correctly.
                 let (tag, value1, _value2) = match read_boxed_any(&mut caller, any_ptr) {
                     Some(t) => t,
                     None => return write_boxed_any_string(&mut caller, ""),
@@ -3232,16 +3247,25 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
                     return write_boxed_any_string(&mut caller, "");
                 }
 
-                // For String/Object/List tags the JSON payload lives at value1
-                // as a length-prefixed string. For other tags value1 is not a
-                // string pointer, but we still attempt to read it defensively
-                // so the closure never traps — a parse failure returns "".
-                let json_str = match read_string_from_caller(&mut caller, value1) {
-                    Some(s) => s,
-                    None => {
+                let boxed_str = read_string_from_caller(&mut caller, value1);
+                let bare_str = read_string_from_caller(&mut caller, any_ptr);
+
+                let json_str = match (boxed_str, bare_str) {
+                    (Some(s), _) if serde_json::from_str::<serde_json::Value>(&s).is_ok() => s,
+                    (_, Some(s)) if serde_json::from_str::<serde_json::Value>(&s).is_ok() => {
                         debug!(
-                            "_json_get: could not read source string (tag={}, value1={})",
+                            "_json_get: any_ptr was a bare lp-string pointer, not a boxed Any \
+                             (tag={} did not resolve to JSON via value1={}). Falling back to \
+                             bare-pointer wire format. See prompt f2c316ce.",
                             tag, value1
+                        );
+                        s
+                    }
+                    _ => {
+                        debug!(
+                            "_json_get: could not read source string as either boxed-Any or \
+                             bare lp-string (tag={}, value1={}, any_ptr={})",
+                            tag, value1, any_ptr
                         );
                         return write_boxed_any_string(&mut caller, "");
                     }
