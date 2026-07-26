@@ -2593,6 +2593,61 @@ mod tests {
         assert_eq!(result["err"]["code"], "VALIDATION_ERROR");
     }
 
+    // Regression for prompts f2c316ce / 1c2d7544 (2026-07-25):
+    // Reproduces the "empty json.get result" symptom from clean-server 1.9.99
+    // at the Rust boundary. If DbBridge::query returns the expected
+    // {"ok":true,"data":{"rows":[{"greeting":"hello"}]}} envelope AND the
+    // dotted-path traversal used by _json_get resolves "data.rows.0.greeting"
+    // to "hello", then the bug does NOT live in the shape or the traversal —
+    // it lives at the WASM string round-trip. If either half fails, the diff
+    // points straight at the fix site.
+    #[tokio::test]
+    async fn test_db_query_shape_matches_json_get_dotted_path() {
+        let (mut bridge, _guard) = setup_test_db().await;
+
+        let params = json!({
+            "sql": "SELECT 'hello' as greeting",
+            "params": []
+        });
+        let result = bridge.call("query", params).await.unwrap();
+
+        // Half 1: envelope shape as delivered by the DB bridge.
+        let raw = result.to_string();
+        assert!(
+            raw.contains(r#""data""#) && raw.contains(r#""rows""#),
+            "envelope missing data/rows keys, got: {}",
+            raw
+        );
+
+        // Half 2: same dotted-path traversal that src/bridge.rs::_json_get uses
+        // (lines 3260-3277). Any divergence between this and _json_get would
+        // itself be a bug worth catching.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut current = &parsed;
+        for part in "data.rows.0.greeting".split('.') {
+            let next = if let Ok(idx) = part.parse::<usize>() {
+                current.get(idx)
+            } else {
+                current.get(part)
+            };
+            current = next.unwrap_or_else(|| {
+                panic!(
+                    "dotted-path traversal failed at segment {:?}; envelope was: {}",
+                    part, raw
+                )
+            });
+        }
+        let extracted = match current {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        assert_eq!(
+            extracted, "hello",
+            "dotted-path resolved but value was wrong; envelope: {}",
+            raw
+        );
+    }
+
     #[tokio::test]
     async fn test_db_query_in_tx() {
         let (mut bridge, _guard) = setup_test_db().await;
