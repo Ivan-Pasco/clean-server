@@ -141,12 +141,15 @@ jobs:
           mkdir -p tests/output/canaries
           for cln_src in tests/cln/canaries/*.cln; do
             name="$(basename "$cln_src" .cln)"
-            ./target/release/cln compile \
-              -i "$cln_src" \
-              -o "tests/output/canaries/$name.wasm" \
-              --opt-level 2 --strict-hosts --plugins \
-              || {
-                echo "::warning::Failed to compile canary $name — will be reported as missing_wasm."
+            # New cln CLI takes the input as a positional and uses --output
+            # for the wasm path. Capture stderr into the warning so the log
+            # says WHY a canary failed instead of just "missing_wasm".
+            err="$(./target/release/cln compile \
+              "$cln_src" \
+              --output "tests/output/canaries/$name.wasm" \
+              --opt-level 2 --strict-hosts --plugins 2>&1)" || {
+                first_line="$(printf '%s' "$err" | head -n1)"
+                echo "::warning::Failed to compile canary $name: $first_line"
               }
           done
 
