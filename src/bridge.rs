@@ -3222,6 +3222,20 @@ fn register_json_functions(linker: &mut Linker<WasmState>) -> RuntimeResult<()> 
             "env",
             "_json_get",
             |mut caller: Caller<'_, WasmState>, any_ptr: i32, path_ptr: i32| -> i32 {
+                // DIAG-JSON-GET-ENTRY: emitted UNCONDITIONALLY at closure entry
+                // so we can prove the host bridge is even being called. Prompt
+                // eafc9b47 reports zero DIAG-JSON-GET lines in real logs while
+                // db.query envelopes are demonstrably being parsed — pointing
+                // to either (a) the emit at the success path is unreachable
+                // because every real call takes an early-return branch, or
+                // (b) _json_get is never being called and json.get is going
+                // through a different path (compiler stdlib json.decode).
+                // This entry log fires no matter what happens inside.
+                info!(
+                    "DIAG-JSON-GET-ENTRY any_ptr={} path_ptr={}",
+                    any_ptr, path_ptr
+                );
+
                 // Wire-format detection. Prompt f2c316ce reports every db.query
                 // result being unreadable via json.get in clean-server 1.9.99+.
                 // Root cause: _db_query returns a BARE length-prefixed string
