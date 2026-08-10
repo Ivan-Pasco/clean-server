@@ -57,6 +57,8 @@ pub fn free_port() -> u16 {
 pub struct Server {
     child: Child,
     port: u16,
+    /// Admin API port, when one was configured.
+    admin_port: Option<u16>,
     /// Kept alive so the config file outlives the process.
     _dir: tempfile::TempDir,
     /// Set for TLS servers.
@@ -106,6 +108,14 @@ impl Server {
             server_block.to_string()
         };
 
+        // Sub-tables must follow every key of their parent table, so anything
+        // like [server.admin-auth] is appended after `listen`.
+        let trailer = if server_block.contains("admin-listen") {
+            format!("\n[server.admin-auth]\nbearer = \"{}\"", Self::ADMIN_TOKEN)
+        } else {
+            String::new()
+        };
+
         let config = format!(
             r#"
 [host]
@@ -125,6 +135,7 @@ world = "clean:host/server@0.1"
 {bridges}
 {server_block}
 listen = "127.0.0.1:{port}"
+{trailer}
 "#,
             guest.display()
         );
@@ -149,6 +160,155 @@ listen = "127.0.0.1:{port}"
                 bridge.display()
             ),
         )
+    }
+
+    /// The bearer token every admin-enabled test server uses.
+    pub const ADMIN_TOKEN: &'static str = "0123456789abcdef-test-token";
+
+    /// Start with the admin API bound and authenticated.
+    pub fn start_with_admin() -> Option<Self> {
+        let bridge = repo_root().join("testing/fake-bridge/bridge.wasm");
+        if !bridge.exists() {
+            eprintln!("skipping: run testing/fake-bridge/build.sh");
+            return None;
+        }
+        let admin_port = free_port();
+        // The block must end inside [server], because start_full appends
+        // `listen = ...` to it. [server.admin-auth] is added by the trailer,
+        // after that key, since a sub-table cannot precede its parent's keys.
+        let mut server = Self::start_full(
+            "instances-min = 1\ninstances-max = 4",
+            &format!(
+                "[bridges]\n\"clean:fake-bridge/store\" = \"{}\"\n\n[server]\nadmin-listen = \"127.0.0.1:{admin_port}\"",
+                bridge.display()
+            ),
+        )?;
+        server.admin_port = Some(admin_port);
+        server.wait_for_admin();
+        Some(server)
+    }
+
+    fn wait_for_admin(&self) {
+        let Some(port) = self.admin_port else { return };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("admin API did not start on port {port}");
+    }
+
+    /// POST a body to `/_admin/reload`, optionally with a bearer token.
+    pub fn admin_post(
+        &self,
+        body: &str,
+        token: Option<&str>,
+    ) -> (u16, Vec<(String, String)>, String) {
+        let port = self.admin_port.expect("admin API not configured");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+
+        let mut request = format!(
+            "POST /_admin/reload HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        if let Some(token) = token {
+            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        request.push_str("\r\n");
+        request.push_str(body);
+
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        read_response(stream)
+    }
+
+    /// GET against the admin listener.
+    pub fn admin_get(&self, path: &str) -> (u16, Vec<(String, String)>, String) {
+        let port = self.admin_port.expect("admin API not configured");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        stream.flush().unwrap();
+        read_response(stream)
+    }
+
+    /// Ask the server to shut down gracefully and wait for it to exit.
+    ///
+    /// `Drop` uses SIGKILL, which no cleanup can survive — anything asserting
+    /// on shutdown behaviour must come through here instead.
+    #[cfg(unix)]
+    pub fn shutdown_gracefully(mut self) {
+        self.signal(15);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Send a signal to the server process.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: i32) {
+        // Shelling out to `kill` rather than libc: the harness has no libc
+        // dependency and this is not on any hot path.
+        std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(self.child.id().to_string())
+            .status()
+            .ok();
+    }
+
+    /// The dev socket this server created, if it exists yet.
+    #[cfg(unix)]
+    pub fn dev_socket_path(&self) -> Option<PathBuf> {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = dir.join(format!("clean-server-{}.sock", self.child.id()));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if path.exists() {
+                return Some(path);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        eprintln!("skipping: dev socket never appeared at {}", path.display());
+        None
+    }
+
+    /// Send one newline-delimited request to the dev socket.
+    #[cfg(unix)]
+    pub fn dev_socket_request(&self, body: &str) -> Option<String> {
+        use std::os::unix::net::UnixStream;
+
+        let path = self.dev_socket_path()?;
+        let mut stream = UnixStream::connect(&path).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .ok()?;
+        stream.write_all(format!("{body}\n").as_bytes()).ok()?;
+        stream.flush().ok()?;
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        Some(line.trim().to_string())
     }
 
     /// Start with TLS enabled, using a freshly generated self-signed cert.
@@ -229,6 +389,7 @@ tls-key  = "{}"
         Self {
             child,
             port,
+            admin_port: None,
             _dir: dir,
             ca,
         }

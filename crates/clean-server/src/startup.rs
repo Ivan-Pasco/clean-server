@@ -26,6 +26,9 @@ pub struct Runtime {
     /// The pool ceiling, used with `[server] queue-depth` to decide when to
     /// shed load with a 503 (§1.4.2).
     pub instances_max: u32,
+    /// Drives the reload-channel policy decisions (SRVH-06) and whether the
+    /// unauthenticated dev socket may exist at all.
+    pub deployment_mode: clean_host_core::DeploymentMode,
 }
 
 /// Build the runtime from a `host.toml` path.
@@ -38,6 +41,7 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
 
     let server = ServerConfig::from_host_config(&host_config)?;
     let instances_max = host_config.runtime.instances_max;
+    let deployment_mode = host_config.host.deployment_mode;
     let sockets = Registry::new(server.socket_queue_max);
     let request_timeout = server.request_timeout;
     let mount = server.mount.clone();
@@ -77,6 +81,7 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
         router,
         sockets,
         instances_max,
+        deployment_mode,
     })
 }
 

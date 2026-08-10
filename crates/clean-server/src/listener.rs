@@ -54,6 +54,102 @@ struct Shared {
     in_flight: AtomicUsize,
 }
 
+/// Serve the admin API until `shutdown` resolves (§1.10).
+///
+/// A separate listener from the main one: it is bound to loopback by default
+/// and authenticated, and mixing it into the public surface is how those
+/// properties get accidentally lost.
+pub async fn serve_admin(
+    runtime: Arc<Runtime>,
+    addr: std::net::SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot bind `[server] admin-listen = \"{addr}\"`: {e}"))?;
+
+    tracing::info!(target: "clean_server::admin", listen = %addr, "admin API listening");
+
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let runtime = Arc::clone(&runtime);
+
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |req| {
+                        let runtime = Arc::clone(&runtime);
+                        async move { Ok::<_, Infallible>(handle_admin(runtime, req).await) }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await;
+                });
+            }
+        }
+    }
+}
+
+/// `POST /_admin/reload` (§1.10.2).
+async fn handle_admin(runtime: Arc<Runtime>, req: Request<Incoming>) -> Response<ResponseBody> {
+    let path = req.uri().path().to_string();
+    if path != "/_admin/reload" {
+        return text(StatusCode::NOT_FOUND, "404 not found\n");
+    }
+    if req.method() != hyper::Method::POST {
+        return text(StatusCode::METHOD_NOT_ALLOWED, "405 method not allowed\n");
+    }
+
+    // SRVH-08: authenticated. config.rs guarantees a token exists whenever the
+    // admin listener is bound.
+    let Some(expected) = runtime.server.admin_auth_bearer.as_deref() else {
+        return text(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "500 admin API misconfigured\n",
+        );
+    };
+
+    let presented = req
+        .headers()
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::admin::bearer_token);
+
+    match presented {
+        Some(token) if crate::admin::token_matches(expected, token) => {}
+        _ => {
+            tracing::warn!(target: "clean_server::admin", "rejected an unauthenticated reload");
+            return text(StatusCode::UNAUTHORIZED, "401 unauthorized\n");
+        }
+    }
+
+    let body = match req.into_body().collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return text(StatusCode::BAD_REQUEST, "400 bad request\n"),
+    };
+    let body = String::from_utf8_lossy(&body).into_owned();
+
+    let response = crate::admin::handle_body(&runtime, &body);
+    let status = if response.is_ok() {
+        StatusCode::OK
+    } else {
+        // A refusal or error is still a well-formed protocol answer, so the
+        // caller parses the body rather than guessing from the status.
+        StatusCode::OK
+    };
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .body(BoxBody::new(
+            Full::new(Bytes::from(response.to_json())).map_err(|e| match e {}),
+        ))
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "500\n"))
+}
+
 /// Serve until `shutdown` resolves.
 pub async fn serve(
     runtime: Arc<Runtime>,

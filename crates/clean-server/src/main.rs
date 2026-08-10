@@ -3,10 +3,12 @@
 //! Owns the HTTP surface and delegates everything else to `clean-host-core`
 //! (§1.11). See `PLAN.md` for the build order and `host.wit` for the contract.
 
+mod admin;
 mod config;
 mod envelope;
 mod guest;
 mod listener;
+mod reload;
 mod routing;
 mod sockets;
 mod startup;
@@ -101,6 +103,8 @@ fn main() -> ExitCode {
 fn run(config_path: PathBuf) -> anyhow::Result<()> {
     let runtime = startup::boot(&config_path)?;
     let drain = runtime.server.reload_drain_timeout;
+    let admin_listen = runtime.server.admin_listen;
+    let deployment_mode = runtime.deployment_mode;
     let runtime = Arc::new(runtime);
 
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -108,8 +112,88 @@ fn run(config_path: PathBuf) -> anyhow::Result<()> {
         .build()?;
 
     tokio_rt.block_on(async {
+        // One shutdown signal, observed by every listener.
+        let (stop_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+        // SIGHUP → reload (§1.10). Runs for the life of the process.
+        {
+            let runtime = Arc::clone(&runtime);
+            let mut stop = stop_tx.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = stop.recv() => break,
+                        got = hangup() => {
+                            if !got { break; }
+                            tracing::info!(target: "clean_server", "SIGHUP received; reloading");
+                            let response = admin::apply(
+                                &runtime,
+                                &reload::Request::ReloadGuest { guest: None },
+                            );
+                            if !response.is_ok() {
+                                // CLNH-53 keeps the old composition serving, so
+                                // this is a warning rather than a fatal error.
+                                tracing::warn!(
+                                    target: "clean_server",
+                                    response = %response.to_json(),
+                                    "reload did not complete"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // The local dev socket, when the deployment mode allows it.
+        #[cfg(unix)]
+        let dev_socket = if admin::dev_socket_enabled(deployment_mode) {
+            let runtime = Arc::clone(&runtime);
+            let mut stop = stop_tx.subscribe();
+            let path = admin::dev_socket_path();
+            let cleanup = path.clone();
+            tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.recv().await;
+                };
+                if let Err(e) = admin::serve_dev_socket(runtime, path, shutdown).await {
+                    tracing::warn!(target: "clean_server::admin", error = %e, "dev socket unavailable");
+                }
+            });
+            Some(cleanup)
+        } else {
+            None
+        };
+
+        // The admin API, when configured.
+        if let Some(addr) = admin_listen {
+            let runtime = Arc::clone(&runtime);
+            let mut stop = stop_tx.subscribe();
+            tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.recv().await;
+                };
+                if let Err(e) = listener::serve_admin(runtime, addr, shutdown).await {
+                    tracing::error!(target: "clean_server::admin", error = %e, "admin API stopped");
+                }
+            });
+        }
+
         let serving = Arc::clone(&runtime);
-        listener::serve(serving, shutdown_signal()).await
+        let result = listener::serve(serving, shutdown_signal()).await;
+        // Wind down the auxiliary listeners with the main one.
+        let _ = stop_tx.send(());
+
+        // Remove the socket file here rather than trusting the task to get
+        // there first: the process exits as soon as this function returns, so
+        // a task that has not yet observed the broadcast would leave the file
+        // behind for the next start to trip over.
+        #[cfg(unix)]
+        if let Some(path) = dev_socket {
+            let _ = std::fs::remove_file(&path);
+        }
+
+        result
     })?;
 
     // §1.10 / CLNH-56: stop accepting, drain in-flight work, then drop.
@@ -139,10 +223,33 @@ fn run(config_path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// SIGTERM (supervisors) or Ctrl-C (interactive) begins a graceful drain.
+/// Wait for one SIGHUP. Returns false when the handler cannot be installed,
+/// which ends the reload loop rather than spinning on an error.
 ///
-/// SIGHUP-triggered reload is Phase 4; until then it is deliberately not
-/// handled rather than silently ignored under a different meaning.
+/// SIGHUP is the supervisor's reload verb — `systemctl reload`, `launchctl
+/// kickstart` — and is deliberately distinct from SIGTERM's drain.
+async fn hangup() -> bool {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::hangup()) {
+            Ok(mut sig) => sig.recv().await.is_some(),
+            Err(e) => {
+                tracing::error!(target: "clean_server", error = %e, "cannot install SIGHUP handler");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // No SIGHUP on Windows; reload arrives via the admin API instead.
+        std::future::pending::<()>().await;
+        false
+    }
+}
+
+/// SIGTERM (supervisors) or Ctrl-C (interactive) begins a graceful drain.
 async fn shutdown_signal() {
     #[cfg(unix)]
     {

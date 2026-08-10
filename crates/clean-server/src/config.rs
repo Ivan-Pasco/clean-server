@@ -52,6 +52,9 @@ pub struct ServerConfig {
     pub cookie_secure: CookieSecure,
     pub socket_queue_max: u64,
     pub admin_listen: Option<SocketAddr>,
+    /// Bearer token for the admin API (SRVH-08). Required whenever
+    /// `admin-listen` is set.
+    pub admin_auth_bearer: Option<String>,
     pub health_path: String,
     pub metrics_path: Option<String>,
     pub reload_drain_timeout: Duration,
@@ -134,6 +137,29 @@ impl ServerConfig {
             })?),
         };
 
+        // SRVH-08: the admin API is network-reachable and authenticated. An
+        // unauthenticated reload endpoint is a remote restart button, so the
+        // server refuses to start rather than exposing one.
+        let admin_auth_bearer = raw.admin_auth.as_ref().and_then(|a| a.bearer.clone());
+        if admin_listen.is_some() && admin_auth_bearer.is_none() {
+            return Err(ServerConfigError(
+                "admin-listen is set but no admin token is configured.\n                   Add `[server.admin-auth] bearer = \"<token>\"`, or remove `admin-listen` \
+                 to disable the admin API (SRVH-08)."
+                    .into(),
+            ));
+        }
+        if let Some(token) = &admin_auth_bearer {
+            if token.len() < 16 {
+                return Err(ServerConfigError(
+                    concat!(
+                        "the admin bearer token is shorter than 16 characters; ",
+                        "it guards a remote reload endpoint"
+                    )
+                    .into(),
+                ));
+            }
+        }
+
         let config = Self {
             listen,
             tls,
@@ -157,6 +183,7 @@ impl ServerConfig {
                 1024 * 1024,
             )?,
             admin_listen,
+            admin_auth_bearer,
             health_path: raw.health_path.unwrap_or_else(|| "/_health".to_string()),
             // The schema uses an empty string to disable metrics; represent
             // that as None so no caller can accidentally route to "".
@@ -269,6 +296,12 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawAdminAuth {
+    bearer: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 struct RawServer {
@@ -286,6 +319,7 @@ struct RawServer {
     cookie_secure: Option<String>,
     socket_queue_max: Option<String>,
     admin_listen: Option<String>,
+    admin_auth: Option<RawAdminAuth>,
     health_path: Option<String>,
     metrics_path: Option<String>,
     reload_drain_timeout: Option<String>,
@@ -357,6 +391,9 @@ metrics-path = "/metrics"
 reload-drain-timeout = "10s"
 trust-proxy-headers = true
 allow-plaintext = true
+
+[server.admin-auth]
+bearer = "0123456789abcdef"
 "#,
         ))
         .unwrap();
@@ -387,6 +424,44 @@ allow-plaintext = true
         let cfg =
             ServerConfig::from_host_config(&host_config("[server]\nmetrics-path = \"\"")).unwrap();
         assert!(cfg.metrics_path.is_none());
+    }
+
+    #[test]
+    fn an_admin_listener_without_a_token_is_refused() {
+        // SRVH-08: an unauthenticated admin API is a remote restart button.
+        let err = ServerConfig::from_host_config(&host_config(
+            "[server]\nadmin-listen = \"127.0.0.1:9091\"",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("admin token"), "{err}");
+        assert!(err.contains("SRVH-08"), "{err}");
+    }
+
+    #[test]
+    fn an_admin_listener_with_a_token_is_accepted() {
+        let cfg = ServerConfig::from_host_config(&host_config(
+            "[server]\nadmin-listen = \"127.0.0.1:9091\"\n\n[server.admin-auth]\nbearer = \"0123456789abcdef\"",
+        ))
+        .unwrap();
+        assert_eq!(cfg.admin_auth_bearer.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn a_trivially_short_admin_token_is_refused() {
+        let err = ServerConfig::from_host_config(&host_config(
+            "[server]\nadmin-listen = \"127.0.0.1:9091\"\n\n[server.admin-auth]\nbearer = \"short\"",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("16 characters"), "{err}");
+    }
+
+    #[test]
+    fn no_admin_listener_needs_no_token() {
+        let cfg = ServerConfig::from_host_config(&host_config("")).unwrap();
+        assert!(cfg.admin_listen.is_none());
+        assert!(cfg.admin_auth_bearer.is_none());
     }
 
     #[test]

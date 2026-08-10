@@ -49,7 +49,7 @@ CI enforces both halves of HCV-06 on every commit: `host.wit` must parse, and
 it must match the interfaces the wasmtime `Linker` actually registers — no
 missing entries, no extra entries, and no no-op or throwing stubs.
 
-## Status — Phase 3 complete
+## Status — Phase 4 complete
 
 Working: HTTP/1.1 and HTTP/2 listeners, TLS termination with ALPN protocol
 negotiation, dynamic routing with path parameters and wildcards, WebSocket
@@ -75,9 +75,25 @@ to remember.
 `Linker`. `clean:host/admin` lands in Phase 4 and is added when it is
 implemented, never before.
 
+Reload has three triggers, all speaking one wire protocol so `cln dev`,
+`cln reload` and cluster orchestrators share a transport: **SIGHUP** for
+process supervisors, an authenticated **`POST /_admin/reload`** on its own
+loopback listener, and a **local dev socket** at
+`$XDG_RUNTIME_DIR/clean-server-<pid>.sock`. A failed reload keeps the previous
+guest serving (CLNH-53) rather than taking the process down.
+
+The two trust models are deliberately different. The admin API is
+network-reachable, so it requires a bearer token and refuses to start without
+one (SRVH-08). The dev socket must *not* require auth per the same rule — its
+access control is filesystem permissions, so it is created `0600`, removed on
+exit, and never started in production.
+
 Not yet implemented, by design: the five remaining standard bridges (data, kv,
-jobs, mail, realtime — no component exists for any of them yet), reload and
-hot-swap, the admin API, and metrics.
+jobs, mail, realtime — no component exists for any of them yet), `/_health`,
+metrics, and per-middleware hot-swap. `swap-middleware` is answered with a
+`refused` rather than a false success: there is no `[http-chain]` to mutate
+(the block is not in the canonical `host.toml` schema, and
+`wasi:http/middleware` is unavailable in the toolchain).
 
 ### Protocol selection
 
@@ -111,11 +127,14 @@ crates/clean-server/              the binary
   src/websocket.rs                upgrade handshake and socket task
   src/sockets.rs                  outbound queues, backpressure, SSE framing
   src/envelope.rs                 cookies, CSRF, envelope rendering
+  src/reload.rs                   reload-channel wire protocol
+  src/admin.rs                    reload triggers: admin API, dev socket
   src/main.rs                     CLI, signals, parity subcommand
   tests/support/mod.rs            shared end-to-end harness
   tests/acceptance.rs             M0 acceptance
   tests/phase2.rs                 routing, TLS, h2, SSE, WebSocket, limits
   tests/phase3.rs                 composition, SRVH-01/02, CSRF
+  tests/phase4.rs                 reload triggers, admin auth, dev socket
 testing/fake-guest/               the acceptance guest + build.sh
 testing/fake-bridge/              a component to compose, for tests
 testing/fixtures/hello-world/     the acceptance host.toml

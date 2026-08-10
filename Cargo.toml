@@ -5,7 +5,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 # Inherited from clean-host-core, which needs 1.94 for wasmtime 47.
 rust-version = "1.94"
