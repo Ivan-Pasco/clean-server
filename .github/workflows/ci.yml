@@ -92,3 +92,19 @@ jobs:
       - name: HCV-06 — registration parity
         working-directory: clean-server
         run: cargo run --quiet --bin clean-server -- parity --wit host.wit
+
+      # CMOD-03 — the host conformance gate (Platform 15 §10.1).
+      #
+      # Reported, not enforced, and deliberately so: two of its four checks
+      # need the canonical corpus at tests/cln/conformance/, which does not
+      # exist yet and cannot be populated until the compiler emits Component
+      # Model components. The suite therefore exits non-zero with INCOMPLETE.
+      #
+      # `continue-on-error` keeps that from blocking every build while still
+      # printing the result on every run, so the gap stays visible rather than
+      # being forgotten. When the corpus lands, delete this line — the suite
+      # will already be reporting CONFORMS or FAILED on its own.
+      - name: CMOD-03 — host conformance (reported, not yet enforced)
+        working-directory: clean-server
+        continue-on-error: true
+        run: cargo run --quiet --bin clean-server -- conformance --wit host.wit

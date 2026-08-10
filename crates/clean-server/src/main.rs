@@ -5,6 +5,7 @@
 
 mod admin;
 mod config;
+mod conformance;
 mod diagnostics;
 mod envelope;
 mod guest;
@@ -59,13 +60,28 @@ enum Command {
         #[arg(long, default_value = "host.wit")]
         wit: PathBuf,
     },
+
+    /// Run the CMOD-03 host conformance suite (Platform 15 §10.1).
+    ///
+    /// The shipping gate: a host that fails conformance must not ship. Exits
+    /// non-zero unless every check ran and passed — a skipped check is not a
+    /// pass.
+    Conformance {
+        #[arg(long, default_value = "host.wit")]
+        wit: PathBuf,
+        /// Where the canonical Clean-compiled components live.
+        #[arg(long, default_value = "tests/cln/conformance")]
+        corpus: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    if let Some(Command::Parity { wit }) = &cli.command {
-        return run_parity(wit);
+    match &cli.command {
+        Some(Command::Parity { wit }) => return run_parity(wit),
+        Some(Command::Conformance { wit, corpus }) => return run_conformance(wit, corpus),
+        None => {}
     }
 
     let Some(config_path) = cli.config.clone() else {
@@ -283,6 +299,20 @@ fn run_parity(wit: &std::path::Path) -> ExitCode {
     if report.passed() {
         ExitCode::SUCCESS
     } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// CMOD-03: the shipping gate.
+fn run_conformance(wit: &std::path::Path, corpus: &std::path::Path) -> ExitCode {
+    let report = conformance::run(wit, &guest::registered_interfaces(), corpus);
+    print!("{}", report.render());
+
+    if report.conforms() {
+        ExitCode::SUCCESS
+    } else {
+        // Non-zero for both FAILED and INCOMPLETE. A gate that exits zero on a
+        // partial run is not a gate.
         ExitCode::FAILURE
     }
 }

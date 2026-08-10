@@ -30,6 +30,7 @@ curl http://127.0.0.1:3000/     # -> hello world
 clean-server <CONFIG>                 # start with host.toml at <CONFIG>
 clean-server --check <CONFIG>         # validate config + guest, exit 0/1
 clean-server parity --wit host.wit    # HCV-06 CI check
+clean-server conformance              # CMOD-03 shipping gate
 clean-server --version
 ```
 
@@ -49,7 +50,7 @@ CI enforces both halves of HCV-06 on every commit: `host.wit` must parse, and
 it must match the interfaces the wasmtime `Linker` actually registers — no
 missing entries, no extra entries, and no no-op or throwing stubs.
 
-## Status — Phase 5 complete
+## Status — Phase 6 complete
 
 Working: HTTP/1.1 and HTTP/2 listeners, TLS termination with ALPN protocol
 negotiation, dynamic routing with path parameters and wildcards, WebSocket
@@ -97,6 +98,26 @@ emit structured records through `clean:host/log`, each tagged with the
 correlation id of the request that produced it, and a guest trap is captured
 with its request context rather than vanishing into a stack trace.
 
+CSRF is enforced in the listener on unsafe methods, and a route may opt out at
+registration (`csrf = false`) when it authenticates callers another way — a
+webhook checking an HMAC has no token to present and no browser form to
+protect. A malformed options record leaves CSRF *on*: a parse slip must not
+silently disable a security control.
+
+### Conformance is INCOMPLETE, and says so
+
+`clean-server conformance` runs the CMOD-03 gate (Platform 15 §10.1). Two of
+its four checks work today and pass: every interface the world advertises is
+really provided, and nothing outside the world is registered. The other two
+need the canonical corpus at `tests/cln/conformance/`, which does not exist and
+cannot be populated until the compiler emits Component Model components.
+
+The suite therefore reports `INCOMPLETE` and **exits non-zero**. It does not
+report green, because a host that has not run every check has not been shown to
+conform, and a passing gate that never ran half its checks is worse than no
+gate. CI runs it with `continue-on-error` so the gap stays visible on every
+build without blocking one; when the corpus lands, that line comes out.
+
 Not yet implemented, by design: the five remaining standard bridges (data, kv,
 jobs, mail, realtime — no component exists for any of them yet) and
 per-middleware hot-swap. `swap-middleware` is answered with a
@@ -136,6 +157,7 @@ crates/clean-server/              the binary
   src/websocket.rs                upgrade handshake and socket task
   src/sockets.rs                  outbound queues, backpressure, SSE framing
   src/envelope.rs                 cookies, CSRF, envelope rendering
+  src/conformance.rs              the CMOD-03 gate
   src/diagnostics.rs              health, metrics, trap snapshots
   src/reload.rs                   reload-channel wire protocol
   src/admin.rs                    reload triggers: admin API, dev socket
@@ -146,6 +168,7 @@ crates/clean-server/              the binary
   tests/phase3.rs                 composition, SRVH-01/02, CSRF
   tests/phase4.rs                 reload triggers, admin auth, dev socket
   tests/phase5.rs                 health, metrics, guest logging
+  tests/phase6.rs                 CSRF opt-out, escaping, conformance
 testing/fake-guest/               the acceptance guest + build.sh
 testing/fake-bridge/              a component to compose, for tests
 testing/fixtures/hello-world/     the acceptance host.toml

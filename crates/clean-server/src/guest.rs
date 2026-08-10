@@ -76,6 +76,9 @@ pub struct Route {
     pub method: String,
     pub path: String,
     pub handler_id: u32,
+    /// Whether CSRF validation applies (§1.7). Defaults to true; a route opts
+    /// out only when it authenticates callers another way.
+    pub csrf: bool,
 }
 
 impl Exchange {
@@ -278,10 +281,25 @@ fn register_routing(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
             }
         };
 
+        // A missing or malformed options record leaves CSRF ON. A parse slip
+        // must never silently disable a security control.
+        let csrf = match args.get(3) {
+            Some(Val::Record(fields)) => fields
+                .iter()
+                .find(|(name, _)| name == "csrf")
+                .and_then(|(_, v)| match v {
+                    Val::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(true),
+            _ => true,
+        };
+
         ex.lock().unwrap().routes.push(Route {
             method: method.to_uppercase(),
             path,
             handler_id,
+            csrf,
         });
         Ok(())
     })?;

@@ -38,8 +38,19 @@ interface routing {
         options,
     }
 
+    /// Per-route options.
+    record options {
+        /// Whether CSRF validation applies to this route (§1.7).
+        ///
+        /// True by default. A route sets it false only when it has another
+        /// way to authenticate the caller — a webhook verifying an HMAC
+        /// signature, say — because a browser-originated form has no such
+        /// alternative.
+        csrf: bool,
+    }
+
     /// Register one route. Called by the guest at startup.
-    register: func(m: method, path: string, handler-id: u32);
+    register: func(m: method, path: string, handler-id: u32, opts: options);
 }
 
 /// The incoming request, as seen by the guest.

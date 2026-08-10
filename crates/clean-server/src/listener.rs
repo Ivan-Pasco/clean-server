@@ -353,17 +353,22 @@ async fn route_and_dispatch(
         return metrics_response(runtime);
     }
 
-    let (handler_id, params) = match runtime.router.match_route(method.as_str(), &path) {
-        Match::Found { handler_id, params } => (handler_id, params),
-        Match::MethodNotAllowed { allowed } => {
-            let mut response = text(StatusCode::METHOD_NOT_ALLOWED, "405 method not allowed\n");
-            if let Ok(v) = allowed.join(", ").parse() {
-                response.headers_mut().insert(ALLOW, v);
+    let (handler_id, params, route_wants_csrf) =
+        match runtime.router.match_route(method.as_str(), &path) {
+            Match::Found {
+                handler_id,
+                params,
+                csrf,
+            } => (handler_id, params, csrf),
+            Match::MethodNotAllowed { allowed } => {
+                let mut response = text(StatusCode::METHOD_NOT_ALLOWED, "405 method not allowed\n");
+                if let Ok(v) = allowed.join(", ").parse() {
+                    response.headers_mut().insert(ALLOW, v);
+                }
+                return response;
             }
-            return response;
-        }
-        Match::NotFound => return text(StatusCode::NOT_FOUND, "404 not found\n"),
-    };
+            Match::NotFound => return text(StatusCode::NOT_FOUND, "404 not found\n"),
+        };
 
     // §1.4.2: beyond `instances-max`, requests queue up to `queue-depth`, then
     // 503. Checked before reading the body so an overloaded server sheds load
@@ -403,11 +408,20 @@ async fn route_and_dispatch(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    if let Some(reason) = crate::envelope::csrf_rejection(
-        method.as_str(),
-        cookie_header.as_deref(),
-        submitted_token.as_deref(),
-    ) {
+    // §1.7: a route may opt out (`csrf = false` at registration) when it
+    // authenticates callers another way — a webhook checking an HMAC has no
+    // token to present and no browser form to protect.
+    let rejection = if route_wants_csrf {
+        crate::envelope::csrf_rejection(
+            method.as_str(),
+            cookie_header.as_deref(),
+            submitted_token.as_deref(),
+        )
+    } else {
+        None
+    };
+
+    if let Some(reason) = rejection {
         tracing::warn!(
             target: "clean_server::request",
             method = %method,

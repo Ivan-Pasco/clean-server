@@ -18,6 +18,8 @@
 ;;   GET  /events      handler 2  -> SSE stream: two "tick" events, then close
 ;;   GET  /ws          handler 3  -> WebSocket upgrade, one greeting frame
 ;;   POST /echo        handler 4  -> 200, echoes the request body
+;;   POST /hook        handler 7  -> 200, registered with csrf = false, as a
+;;                                  webhook that authenticates another way
 ;;   GET  /counter     handler 5  -> 200, one ASCII digit from the composed
 ;;                                  bridge (proves composition actually wired)
 ;;   GET  /log         handler 6  -> 200, after emitting a structured record
@@ -28,7 +30,7 @@
   ;; core signatures — strings become (ptr, len) pairs, and any return value
   ;; larger than one scalar is written to a caller-supplied return area.
   (import "clean:http/routing@0.1.0" "register"
-    (func $register (param i32 i32 i32 i32)))
+    (func $register (param i32 i32 i32 i32 i32)))
   (import "clean:http/request@0.1.0" "get-body"
     (func $get-body (param i32)))
   (import "clean:http/request@0.1.0" "get-param"
@@ -77,6 +79,7 @@
   (data (i32.const 216) "hello from the guest")       ;; len 20
   (data (i32.const 240) "route")                      ;; len 5
   (data (i32.const 248) "log-demo")                   ;; len 8
+  (data (i32.const 264) "/hook")                      ;; len 5
 
   ;; Return areas for the canonical ABI, clear of the static data above.
   (global $RET  i32 (i32.const 1024))
@@ -89,13 +92,16 @@
 
   (func (export "init")
     ;; Method discriminants follow host.wit's enum order: 0 = get, 2 = post.
-    (call $register (i32.const 0) (i32.const 0)   (i32.const 1)  (i32.const 0))
-    (call $register (i32.const 0) (i32.const 80)  (i32.const 10) (i32.const 1))
-    (call $register (i32.const 0) (i32.const 104) (i32.const 7)  (i32.const 2))
-    (call $register (i32.const 0) (i32.const 116) (i32.const 3)  (i32.const 3))
-    (call $register (i32.const 2) (i32.const 160) (i32.const 5)  (i32.const 4))
-    (call $register (i32.const 0) (i32.const 192) (i32.const 8)  (i32.const 5))
-    (call $register (i32.const 0) (i32.const 208) (i32.const 4)  (i32.const 6)))
+    ;; Trailing arg is the options record: 1 = csrf on, 0 = opted out.
+    (call $register (i32.const 0) (i32.const 0)   (i32.const 1)  (i32.const 0) (i32.const 1))
+    (call $register (i32.const 0) (i32.const 80)  (i32.const 10) (i32.const 1) (i32.const 1))
+    (call $register (i32.const 0) (i32.const 104) (i32.const 7)  (i32.const 2) (i32.const 1))
+    (call $register (i32.const 0) (i32.const 116) (i32.const 3)  (i32.const 3) (i32.const 1))
+    (call $register (i32.const 2) (i32.const 160) (i32.const 5)  (i32.const 4) (i32.const 1))
+    (call $register (i32.const 0) (i32.const 192) (i32.const 8)  (i32.const 5) (i32.const 1))
+    (call $register (i32.const 0) (i32.const 208) (i32.const 4)  (i32.const 6) (i32.const 1))
+    ;; A webhook: verifies an HMAC itself, so it opts out of CSRF (§1.7).
+    (call $register (i32.const 2) (i32.const 264) (i32.const 5)  (i32.const 7) (i32.const 0)))
 
   (func $plain-headers
     (call $add-header
@@ -191,6 +197,17 @@
           (i32.const 216) (i32.const 20)
           (i32.const 640) (i32.const 1))
         (call $set-body (i32.const 8) (i32.const 11))
+        (return)))
+
+    ;; POST /hook — the CSRF-exempt webhook; echoes like /echo so a test can
+    ;; tell a real response from a 403.
+    (if (i32.eq (local.get $h) (i32.const 7))
+      (then
+        (call $plain-headers)
+        (call $get-body (global.get $RET))
+        (local.set $ptr (i32.load (global.get $RET)))
+        (local.set $len (i32.load offset=4 (global.get $RET)))
+        (call $set-body (local.get $ptr) (local.get $len))
         (return)))
 
     ;; POST /echo — echo the request body

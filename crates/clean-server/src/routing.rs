@@ -26,6 +26,8 @@ pub enum Match {
     Found {
         handler_id: u32,
         params: Vec<(String, String)>,
+        /// Whether this route wants CSRF validation (§1.7).
+        csrf: bool,
     },
     /// The path exists but not for this method. Carries the methods that are
     /// allowed, for the `Allow` header a 405 must include.
@@ -61,6 +63,7 @@ struct CompiledRoute {
     method: String,
     segments: Vec<Segment>,
     handler_id: u32,
+    csrf: bool,
     /// Kept for diagnostics and for the startup log.
     pattern: String,
 }
@@ -83,6 +86,7 @@ impl CompiledRoute {
             method: route.method.to_uppercase(),
             segments,
             handler_id: route.handler_id,
+            csrf: route.csrf,
             pattern: route.path.clone(),
         }
     }
@@ -200,6 +204,7 @@ impl Router {
                 return Match::Found {
                     handler_id: route.handler_id,
                     params,
+                    csrf: route.csrf,
                 };
             }
 
@@ -259,12 +264,29 @@ mod tests {
             method: method.to_string(),
             path: path.to_string(),
             handler_id: id,
+            csrf: true,
+        }
+    }
+
+    fn route_without_csrf(method: &str, path: &str, id: u32) -> Route {
+        Route {
+            csrf: false,
+            ..route(method, path, id)
         }
     }
 
     fn found(m: Match) -> (u32, Vec<(String, String)>) {
         match m {
-            Match::Found { handler_id, params } => (handler_id, params),
+            Match::Found {
+                handler_id, params, ..
+            } => (handler_id, params),
+            other => panic!("expected a match, got {other:?}"),
+        }
+    }
+
+    fn csrf_of(m: Match) -> bool {
+        match m {
+            Match::Found { csrf, .. } => csrf,
             other => panic!("expected a match, got {other:?}"),
         }
     }
@@ -331,6 +353,33 @@ mod tests {
     }
 
     // --- dynamic routing ---------------------------------------------------
+
+    #[test]
+    fn a_route_wants_csrf_by_default() {
+        let r = Router::new(vec![route("POST", "/pay", 1)], "/");
+        assert!(csrf_of(r.match_route("POST", "/pay")));
+    }
+
+    #[test]
+    fn a_route_can_opt_out_of_csrf() {
+        // A webhook verifying an HMAC signature has no browser-originated
+        // form to protect, and cannot present a token.
+        let r = Router::new(vec![route_without_csrf("POST", "/hook", 1)], "/");
+        assert!(!csrf_of(r.match_route("POST", "/hook")));
+    }
+
+    #[test]
+    fn opting_one_route_out_does_not_affect_its_neighbours() {
+        let r = Router::new(
+            vec![
+                route_without_csrf("POST", "/hook", 1),
+                route("POST", "/pay", 2),
+            ],
+            "/",
+        );
+        assert!(!csrf_of(r.match_route("POST", "/hook")));
+        assert!(csrf_of(r.match_route("POST", "/pay")));
+    }
 
     #[test]
     fn a_parameter_segment_captures_its_value() {
