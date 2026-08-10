@@ -1,0 +1,27 @@
+# The M0 acceptance fixture.
+#
+# `clean-server testing/fixtures/hello-world/host.toml` serves "hello world"
+# on http://127.0.0.1:3000/.
+#
+# [host], [guest], and [runtime] are owned by clean-host-core (CLNH-11);
+# [server] is owned by clean-server. There is no [bridges] block — M0 composes
+# zero bridges, and configuring one is a startup error until Phase 3.
+
+[host]
+name            = "clean-server"
+version         = "0.1.0"
+component-model = "0.3.0"
+deployment-mode = "development"
+
+[guest]
+name  = "hello-world"
+wasm  = "../../fake-guest/guest.wasm"
+world = "clean:host/server@0.1"
+
+[runtime]
+# Small pool: the fixture exists to prove the path works, not to be fast.
+instances-min = 1
+instances-max = 4
+
+[server]
+listen = "127.0.0.1:3000"

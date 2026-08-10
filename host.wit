@@ -1,0 +1,108 @@
+// clean-server — the host contract.
+//
+// HCV-02 (Platform 16 §16.5): this file at the repository root is the
+// authoritative declaration of what this host provides. There is no parallel
+// manifest. The framework fetches it for its Moment 1 check, `cln check` uses
+// it at Moment 2, and clean-server itself compares a guest's embedded WIT
+// against it at Moment 3 before instantiating.
+//
+// HCV-06 (§16.14): CI verifies that every interface declared here is really
+// registered by the server's wasmtime Linker, and that nothing is registered
+// that is not declared here. A no-op or throwing stub under a declared name is
+// a hard failure — the correct response to an unimplemented interface is to
+// omit it from this file.
+//
+// M0 SCOPE: routing, request, and response only. The rest of the
+// `clean:host/server@0.1` world (websocket, sse, the session and realtime
+// envelopes, admin) lands in Phase 2–4 and will be added here as each is
+// implemented, never before.
+
+package clean:http@0.1.0;
+
+/// Route registration. The guest declares which method/path pairs it handles;
+/// clean-server matches incoming requests against them.
+interface routing {
+    /// An HTTP method a route can be registered for.
+    enum method {
+        get,
+        head,
+        post,
+        put,
+        patch,
+        delete,
+        options,
+    }
+
+    /// Register one route. Called by the guest at startup.
+    register: func(m: method, path: string, handler-id: u32);
+}
+
+/// The incoming request, as seen by the guest.
+interface request {
+    /// A single header. Names are lowercased by the server.
+    record header {
+        name: string,
+        value: string,
+    }
+
+    /// The request line and metadata.
+    record parts {
+        method: string,
+        path: string,
+        query: string,
+        /// Peer address as seen by the server, or as reported by a trusted
+        /// proxy when `[server] trust-proxy-headers` is set.
+        peer: string,
+        /// Correlation id, generated per request when the client did not
+        /// supply one.
+        correlation-id: string,
+    }
+
+    /// Everything about the request line and metadata.
+    get-parts: func() -> parts;
+
+    /// All request headers.
+    get-headers: func() -> list<header>;
+
+    /// One header by (lowercase) name.
+    get-header: func(name: string) -> option<string>;
+
+    /// The request body. Bounded by `[server] body-max-bytes`.
+    get-body: func() -> list<u8>;
+}
+
+/// The response the guest produces.
+interface response {
+    record header {
+        name: string,
+        value: string,
+    }
+
+    /// Set the status code. Defaults to 200 when never called.
+    set-status: func(status: u16);
+
+    /// Append a response header. Repeated names are preserved in order, which
+    /// `set-cookie` depends on.
+    add-header: func(name: string, value: string);
+
+    /// Set the response body, replacing anything set previously.
+    set-body: func(body: list<u8>);
+}
+
+/// The world clean-server fulfills.
+///
+/// The server exports the HTTP surface it owns (§1.3.1) and imports the
+/// guest's entry point. `clean:host/*` and the WASI 0.3 stack are provided by
+/// clean-host-core to every composed component (CH-03) and are not restated
+/// here.
+world server {
+    export routing;
+    export request;
+    export response;
+
+    /// Invoked once at startup so the guest can register its routes.
+    import init: func();
+
+    /// Invoked per request, with the handler id the guest registered.
+    import handle: func(handler-id: u32);
+}

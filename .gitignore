@@ -1,0 +1,7 @@
+target/
+Cargo.lock
+testing/fake-guest/guest.wasm
+testing/fake-guest/*-core.wasm
+testing/fake-guest/*-embedded.wasm
+host-capabilities.cln
+testing/**/host-capabilities.cln

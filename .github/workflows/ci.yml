@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux + macOS in M0; Windows lands in M1 alongside the reload-socket
+        # work (PLAN.md §8 question #8).
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: clean-server
+
+      # clean-server depends on clean-host-core by path while both repos are
+      # pre-1.0 (see the workspace Cargo.toml). CI must lay the sibling out the
+      # same way a developer's machine does. This step goes away when those
+      # become git or registry pins at M1.
+      #
+      # Uses an SSH deploy key rather than a PAT: a deploy key is bound to
+      # exactly one repository and registered read-only, so a leak exposes read
+      # access to clean-host-core and nothing else.
+      - name: check out clean-host-core
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan-Pasco/clean-host-core
+          path: clean-host-core
+          ssh-key: ${{ secrets.CLEAN_HOST_CORE_DEPLOY_KEY }}
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clean-server
+
+      - name: install wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
+      - name: fmt
+        working-directory: clean-server
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        working-directory: clean-server
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # HCV-06 check 1 of 2 — presence and parse (Platform 16 §16.14).
+      # Blocking: a host whose host.wit is missing or unparseable is not
+      # conformant, regardless of what its code does.
+      - name: HCV-06 — host.wit presence and parse
+        working-directory: clean-server
+        run: |
+          test -f host.wit || { echo "host.wit missing from repo root (HCV-02)"; exit 1; }
+          wasm-tools component wit host.wit > /dev/null
+
+      # The acceptance guest. Built from a world that imports the same
+      # interfaces host.wit declares, so a drift between the two fails here.
+      - name: build acceptance guest
+        working-directory: clean-server
+        run: ./testing/fake-guest/build.sh
+
+      - name: test
+        working-directory: clean-server
+        run: cargo test --workspace
+
+      # HCV-06 check 2 of 2 — registration parity. Every interface declared in
+      # host.wit must be registered in the wasmtime Linker, and every
+      # registered interface must be declared. No stubs.
+      - name: HCV-06 — registration parity
+        working-directory: clean-server
+        run: cargo run --quiet --bin clean-server -- parity --wit host.wit
