@@ -14,7 +14,12 @@ use clean_host_core::HealthReport;
 ///
 /// Shape is an operator-facing contract: dashboards and load balancers script
 /// against it, so fields are added rather than renamed.
-pub fn health_json(report: &HealthReport, version: &str, traps: &[TrapSnapshot]) -> String {
+pub fn health_json(
+    report: &HealthReport,
+    version: &str,
+    trap_count: usize,
+    last_trap: Option<&TrapSnapshot>,
+) -> String {
     let mut out = String::from("{");
 
     // `composed` is the liveness signal: a host that never composed is not
@@ -56,8 +61,8 @@ pub fn health_json(report: &HealthReport, version: &str, traps: &[TrapSnapshot])
     // request is not healthy in any sense an operator cares about. The count
     // says something broke; `last-trap` says what, which is the difference
     // between an alert and a diagnosis.
-    out.push_str(&format!(r#""recent-traps":{},"#, traps.len()));
-    match traps.last() {
+    out.push_str(&format!(r#""recent-traps":{trap_count},"#));
+    match last_trap {
         Some(trap) => out.push_str(&format!(
             r#""last-trap":{{"correlation-id":"{}","path":"{}","detail":"{}"}},"#,
             escape(&trap.correlation_id),
@@ -264,17 +269,13 @@ impl TrapLog {
         recent.push(snapshot);
     }
 
-    pub fn recent(&self) -> Vec<TrapSnapshot> {
-        self.recent.lock().unwrap().clone()
-    }
-
-    /// The most recent trap, which is what an operator wants first.
-    pub fn last(&self) -> Option<TrapSnapshot> {
-        self.recent.lock().unwrap().last().cloned()
-    }
-
     pub fn len(&self) -> usize {
         self.recent.lock().unwrap().len()
+    }
+
+    /// The most recent trap, which is what an operator looks at first.
+    pub fn last(&self) -> Option<TrapSnapshot> {
+        self.recent.lock().unwrap().last().cloned()
     }
 }
 
@@ -328,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_healthy_report_renders_valid_json() {
-        let json = health_json(&report(true), "0.3.0", &[]);
+        let json = health_json(&report(true), "0.3.0", 0, None);
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
 
         assert_eq!(parsed["status"], "ok");
@@ -348,7 +349,7 @@ mod tests {
         assert!(!health_is_ok(&r));
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&health_json(&r, "0.3.0", &[])).unwrap();
+            serde_json::from_str(&health_json(&r, "0.3.0", 0, None)).unwrap();
         assert_eq!(parsed["status"], "unavailable");
         assert!(parsed["pool"].is_null());
     }
@@ -360,7 +361,7 @@ mod tests {
         r.last_reload_success = Some(false);
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&health_json(&r, "0.3.0", &[])).unwrap();
+            serde_json::from_str(&health_json(&r, "0.3.0", 0, None)).unwrap();
         assert_eq!(parsed["last-reload-success"], false);
     }
 
@@ -368,7 +369,7 @@ mod tests {
     fn a_quote_in_a_bridge_path_cannot_break_the_json() {
         let mut r = report(true);
         r.bridges[0].component = r#"./we"ird.wasm"#.into();
-        let json = health_json(&r, "0.3.0", &[]);
+        let json = health_json(&r, "0.3.0", 0, None);
         serde_json::from_str::<serde_json::Value>(&json).expect("still valid JSON");
     }
 
@@ -490,13 +491,13 @@ mod tests {
     fn recent_traps_appear_in_health() {
         // A host that is up and composed but trapping on every request is not
         // healthy in any sense an operator cares about.
-        let traps = vec![TrapSnapshot {
+        let trap = TrapSnapshot {
             correlation_id: "req-9".into(),
             method: "POST".into(),
             path: "/checkout".into(),
             detail: "wasm trap: unreachable\n  at foo".into(),
-        }];
-        let json = health_json(&report(true), "0.3.0", &traps);
+        };
+        let json = health_json(&report(true), "0.3.0", 1, Some(&trap));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["recent-traps"], 1);
@@ -523,8 +524,8 @@ mod tests {
             });
         }
         assert_eq!(log.len(), 3);
-        // The newest are kept.
-        assert_eq!(log.recent()[2].correlation_id, "req-9");
+        // The newest are kept, not the oldest.
+        assert_eq!(log.last().unwrap().correlation_id, "req-9");
     }
 
     #[test]

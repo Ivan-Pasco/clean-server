@@ -545,7 +545,8 @@ fn health_response(runtime: &Arc<Runtime>) -> Response<ResponseBody> {
     let body = crate::diagnostics::health_json(
         &report,
         env!("CARGO_PKG_VERSION"),
-        &runtime.traps.recent(),
+        runtime.traps.len(),
+        runtime.traps.last().as_ref(),
     );
 
     // The status code is what a load balancer reads; an uncomposed host must
