@@ -244,6 +244,23 @@ interface realtime-sockets {
     queued-bytes: func(socket: u64) -> u64;
 }
 
+/// Structured logging for guests and bridges (clean-host-core §7.2).
+///
+/// Distinct from `wasi:logging`, which stays available for printf-style
+/// output: records here carry fields and are attributed to the component that
+/// emitted them, which is what makes them useful after the fact.
+interface log {
+    enum level { trace, debug, info, warn, error }
+
+    record field {
+        key:   string,
+        value: string,
+    }
+
+    /// Emit a structured record. Routed to the host's log sink.
+    emit: func(l: level, message: string, fields: list<field>);
+}
+
 /// The world clean-server fulfills.
 ///
 /// The server exports the HTTP surface it owns (§1.3.1) and imports the
@@ -258,6 +275,7 @@ world server {
     export sse;
     export session-envelope;
     export realtime-sockets;
+    export log;
 
     /// Invoked once at startup so the guest can register its routes.
     import init: func();

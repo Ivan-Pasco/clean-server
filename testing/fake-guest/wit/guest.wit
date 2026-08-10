@@ -6,6 +6,7 @@ world app {
     import clean:http/response@0.1.0;
     import clean:http/websocket@0.1.0;
     import clean:http/sse@0.1.0;
+    import clean:http/log@0.1.0;
     /// Composed from testing/fake-bridge when configured.
     import clean:fake-bridge/store@0.1.0;
 

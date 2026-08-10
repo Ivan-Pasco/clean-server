@@ -148,6 +148,7 @@ const INTERFACES: &[(&str, &[&str])] = &[
         "clean:http/realtime-sockets@0.1.0",
         &["deliver", "close", "queued-bytes"],
     ),
+    ("clean:http/log@0.1.0", &["emit"]),
 ];
 
 /// Register every `clean:http/*` interface into the linker.
@@ -162,6 +163,67 @@ pub fn register(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
     register_sse(linker)?;
     register_session_envelope(linker)?;
     register_realtime_sockets(linker)?;
+    register_log(linker)?;
+    Ok(())
+}
+
+/// `clean:host/log` — structured records from guests and bridges.
+///
+/// Routed into `tracing` so guest output interleaves with the server's own
+/// request logs rather than racing them on the same file descriptor.
+fn register_log(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
+    let mut iface = linker.instance("clean:http/log@0.1.0")?;
+
+    iface.func_new("emit", |mut store, _ty, args, _results| {
+        let level = match &args[0] {
+            Val::Enum(name) => name.clone(),
+            other => return Err(type_error("log.emit: expected enum level", other)),
+        };
+        let message = match &args[1] {
+            Val::String(m) => m.clone(),
+            other => return Err(type_error("log.emit: expected string message", other)),
+        };
+
+        let mut fields = Vec::new();
+        if let Val::List(items) = &args[2] {
+            for item in items {
+                if let Val::Record(pairs) = item {
+                    let mut key = String::new();
+                    let mut value = String::new();
+                    for (name, v) in pairs {
+                        match (name.as_str(), v) {
+                            ("key", Val::String(s)) => key = s.clone(),
+                            ("value", Val::String(s)) => value = s.clone(),
+                            _ => {}
+                        }
+                    }
+                    fields.push((key, value));
+                }
+            }
+        }
+
+        // The correlation id ties a guest record to the request that produced
+        // it, which is the whole point of having one.
+        let correlation_id = exchange(store.data_mut())
+            .ok()
+            .map(|ex| ex.lock().unwrap().correlation_id.clone())
+            .unwrap_or_default();
+
+        let rendered: Vec<String> = fields
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+
+        match level.as_str() {
+            "trace" => tracing::trace!(target: "clean_server::guest", correlation_id, fields = %rendered.join(" "), "{message}"),
+            "debug" => tracing::debug!(target: "clean_server::guest", correlation_id, fields = %rendered.join(" "), "{message}"),
+            "warn" => tracing::warn!(target: "clean_server::guest", correlation_id, fields = %rendered.join(" "), "{message}"),
+            "error" => tracing::error!(target: "clean_server::guest", correlation_id, fields = %rendered.join(" "), "{message}"),
+            _ => tracing::info!(target: "clean_server::guest", correlation_id, fields = %rendered.join(" "), "{message}"),
+        }
+        Ok(())
+    })?;
+
     Ok(())
 }
 

@@ -63,6 +63,9 @@ pub struct Server {
     _dir: tempfile::TempDir,
     /// Set for TLS servers.
     ca: Option<Vec<u8>>,
+    /// Where the child's stderr is being written, so tests can read the log
+    /// while the server is still running.
+    stderr_path: PathBuf,
 }
 
 impl Drop for Server {
@@ -379,10 +382,15 @@ tls-key  = "{}"
         let config_path = dir.path().join("host.toml");
         std::fs::write(&config_path, config).unwrap();
 
+        // stderr goes to a file rather than a pipe: a pipe can be drained only
+        // once, and a full pipe buffer would block the child mid-test.
+        let stderr_path = dir.path().join("stderr.log");
+        let stderr = std::fs::File::create(&stderr_path).unwrap();
+
         let child = Command::new(binary())
             .arg(&config_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("clean-server binary should be built");
 
@@ -392,7 +400,43 @@ tls-key  = "{}"
             admin_port: None,
             _dir: dir,
             ca,
+            stderr_path,
         }
+    }
+
+    /// Everything the server has logged so far, with ANSI styling removed.
+    ///
+    /// `tracing` colourises even when writing to a file, so a raw substring
+    /// match would fail on escape codes sitting between the field name and its
+    /// value.
+    pub fn stderr_so_far(&self) -> String {
+        // Logging is not synchronous with the response, so give the write a
+        // moment to land before reading.
+        std::thread::sleep(Duration::from_millis(250));
+        let raw = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
+        strip_ansi(&raw)
+    }
+
+    /// Start with the Prometheus endpoint on its default path.
+    pub fn start_metrics() -> Option<Self> {
+        Self::start_with_metrics_path("/_metrics")
+    }
+
+    /// Start with the Prometheus endpoint on a given path.
+    pub fn start_with_metrics_path(path: &str) -> Option<Self> {
+        let bridge = repo_root().join("testing/fake-bridge/bridge.wasm");
+        if !bridge.exists() {
+            eprintln!("skipping: run testing/fake-bridge/build.sh");
+            return None;
+        }
+        Self::start_full(
+            "instances-min = 1\ninstances-max = 4",
+            &format!(
+                "[bridges]\n\"clean:fake-bridge/store\" = \"{}\"\n\n\
+                 [server]\nmetrics-path = \"{path}\"",
+                bridge.display()
+            ),
+        )
     }
 
     fn wait_until_listening(&mut self) {
@@ -402,10 +446,7 @@ tls-key  = "{}"
                 return;
             }
             if let Ok(Some(status)) = self.child.try_wait() {
-                let mut stderr = String::new();
-                if let Some(mut e) = self.child.stderr.take() {
-                    let _ = e.read_to_string(&mut stderr);
-                }
+                let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
                 panic!("server exited early ({status}):\n{stderr}");
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -639,6 +680,32 @@ fn dechunk(raw: &str) -> String {
         }
         out.push_str(&tail[..size]);
         rest = tail[size..].strip_prefix("\r\n").unwrap_or(&tail[size..]);
+    }
+    out
+}
+
+/// Remove ANSI escape sequences.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // A CSI sequence is ESC '[' , parameter bytes, then a final byte in
+        // @..~. The '[' introducer is itself inside that range, so it must be
+        // consumed before scanning or the loop stops immediately and leaves
+        // the parameters ("0m", "2m") sitting in the text.
+        let mut peek = chars.clone();
+        if peek.next() == Some('[') {
+            chars.next();
+        }
+        for next in chars.by_ref() {
+            if ('@'..='~').contains(&next) {
+                break;
+            }
+        }
     }
     out
 }

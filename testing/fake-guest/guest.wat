@@ -20,6 +20,8 @@
 ;;   POST /echo        handler 4  -> 200, echoes the request body
 ;;   GET  /counter     handler 5  -> 200, one ASCII digit from the composed
 ;;                                  bridge (proves composition actually wired)
+;;   GET  /log         handler 6  -> 200, after emitting a structured record
+;;                                  through clean:http/log
 
 (module
   ;; Canonical ABI: imports are "<interface-name>" / "<func-name>", lowered to
@@ -47,6 +49,8 @@
     (func $sse-send (param i64 i32 i32 i32 i32 i32 i32 i32)))
   (import "clean:http/sse@0.1.0" "close"
     (func $sse-close (param i64 i32)))
+  (import "clean:http/log@0.1.0" "emit"
+    (func $log-emit (param i32 i32 i32 i32 i32)))
   ;; Composed bridge (Phase 3). Present only when host.toml configures it.
   (import "clean:fake-bridge/store@0.1.0" "bump"
     (func $bump (result i32)))
@@ -69,6 +73,10 @@
   (data (i32.const 160) "/echo")                      ;; len 5
   (data (i32.const 176) "no id")                      ;; len 5
   (data (i32.const 192) "/counter")                   ;; len 8
+  (data (i32.const 208) "/log")                       ;; len 4
+  (data (i32.const 216) "hello from the guest")       ;; len 20
+  (data (i32.const 240) "route")                      ;; len 5
+  (data (i32.const 248) "log-demo")                   ;; len 8
 
   ;; Return areas for the canonical ABI, clear of the static data above.
   (global $RET  i32 (i32.const 1024))
@@ -86,7 +94,8 @@
     (call $register (i32.const 0) (i32.const 104) (i32.const 7)  (i32.const 2))
     (call $register (i32.const 0) (i32.const 116) (i32.const 3)  (i32.const 3))
     (call $register (i32.const 2) (i32.const 160) (i32.const 5)  (i32.const 4))
-    (call $register (i32.const 0) (i32.const 192) (i32.const 8)  (i32.const 5)))
+    (call $register (i32.const 0) (i32.const 192) (i32.const 8)  (i32.const 5))
+    (call $register (i32.const 0) (i32.const 208) (i32.const 4)  (i32.const 6)))
 
   (func $plain-headers
     (call $add-header
@@ -165,6 +174,23 @@
         ;; 48 = ASCII '0'; write the digit into scratch and return it.
         (i32.store8 (i32.const 512) (i32.add (call $bump) (i32.const 48)))
         (call $set-body (i32.const 512) (i32.const 1))
+        (return)))
+
+    ;; GET /log — emit one structured record, then respond
+    (if (i32.eq (local.get $h) (i32.const 6))
+      (then
+        (call $plain-headers)
+        ;; One field: (key "route", value "log-demo"). A list<record> lowers to
+        ;; (ptr, len) over contiguous (ptr,len,ptr,len) tuples.
+        (i32.store (i32.const 640) (i32.const 240))  ;; key ptr
+        (i32.store (i32.const 644) (i32.const 5))    ;; key len
+        (i32.store (i32.const 648) (i32.const 248))  ;; value ptr
+        (i32.store (i32.const 652) (i32.const 8))    ;; value len
+        (call $log-emit
+          (i32.const 2)                 ;; level: info
+          (i32.const 216) (i32.const 20)
+          (i32.const 640) (i32.const 1))
+        (call $set-body (i32.const 8) (i32.const 11))
         (return)))
 
     ;; POST /echo — echo the request body

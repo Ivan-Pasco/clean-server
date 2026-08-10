@@ -309,13 +309,17 @@ async fn handle(
 
     let response = route_and_dispatch(&shared, req, &peer, &correlation_id).await;
 
+    let latency = started.elapsed();
+    let status = response.status().as_u16();
+    shared.runtime.metrics.record(status, latency);
+
     // §1.9: one structured log line per request.
     tracing::info!(
         target: "clean_server::request",
         method = %method,
         path = %path,
-        status = response.status().as_u16(),
-        latency_ms = started.elapsed().as_millis() as u64,
+        status,
+        latency_ms = latency.as_millis() as u64,
         correlation_id = %correlation_id,
         "request"
     );
@@ -334,6 +338,20 @@ async fn route_and_dispatch(
     let uri = req.uri().clone();
     let path = uri.path().to_string();
     let query = uri.query().unwrap_or_default().to_string();
+
+    // §1.9 endpoints belong to the server, not the guest. Checked before
+    // routing so a guest cannot shadow its own health check.
+    if path == runtime.server.health_path {
+        return health_response(runtime);
+    }
+    if runtime
+        .server
+        .metrics_path
+        .as_deref()
+        .is_some_and(|p| p == path)
+    {
+        return metrics_response(runtime);
+    }
 
     let (handler_id, params) = match runtime.router.match_route(method.as_str(), &path) {
         Match::Found { handler_id, params } => (handler_id, params),
@@ -357,6 +375,7 @@ async fn route_and_dispatch(
     };
 
     if in_flight > ceiling {
+        runtime.metrics.record_shed();
         tracing::warn!(
             target: "clean_server::request",
             in_flight,
@@ -458,7 +477,24 @@ async fn route_and_dispatch(
 
     let mut exchange = match result {
         Ok(Ok(ex)) => ex,
-        Ok(Err(e)) => return dispatch_error(&e.to_string()),
+        Ok(Err(e)) => {
+            let message = e.to_string();
+            // §1.9: a trap gets a snapshot carrying the request context, which
+            // is what makes it debuggable after the fact. Load conditions are
+            // not traps and would be noise here.
+            if crate::diagnostics::is_trap(&message) {
+                runtime.metrics.record_trap();
+                let snapshot = crate::diagnostics::TrapSnapshot {
+                    correlation_id: correlation_id.to_string(),
+                    method: method.as_str().to_string(),
+                    path: path.clone(),
+                    detail: message.clone(),
+                };
+                tracing::error!(target: "clean_server::trap", "{}", snapshot.render());
+                runtime.traps.record(snapshot);
+            }
+            return dispatch_error(&message);
+        }
         Err(e) => {
             tracing::error!(target: "clean_server::request", error = %e, "dispatch task panicked");
             return text(
@@ -498,6 +534,52 @@ async fn route_and_dispatch(
     }
 
     build_response(exchange, method == hyper::Method::HEAD)
+}
+
+/// `GET /_health` (§1.9).
+///
+/// Unauthenticated by design: a load balancer needs it without credentials,
+/// and it reports only liveness, never configuration.
+fn health_response(runtime: &Arc<Runtime>) -> Response<ResponseBody> {
+    let report = runtime.host.health();
+    let body = crate::diagnostics::health_json(
+        &report,
+        env!("CARGO_PKG_VERSION"),
+        &runtime.traps.recent(),
+    );
+
+    // The status code is what a load balancer reads; an uncomposed host must
+    // not be handed traffic whatever the body says.
+    let status = if crate::diagnostics::health_is_ok(&report) {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .header(CACHE_CONTROL, "no-store")
+        .body(BoxBody::new(
+            Full::new(Bytes::from(body)).map_err(|e| match e {}),
+        ))
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "500\n"))
+}
+
+/// The Prometheus endpoint, when `[server] metrics-path` is set.
+fn metrics_response(runtime: &Arc<Runtime>) -> Response<ResponseBody> {
+    let pool = runtime.host.health().pool;
+    let body = runtime.metrics.render(pool);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        // The version suffix is what Prometheus expects for the text format.
+        .header(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(BoxBody::new(
+            Full::new(Bytes::from(body)).map_err(|e| match e {}),
+        ))
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "500\n"))
 }
 
 /// Decrements the in-flight counter however the request ends.

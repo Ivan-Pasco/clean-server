@@ -5,6 +5,7 @@
 
 mod admin;
 mod config;
+mod diagnostics;
 mod envelope;
 mod guest;
 mod listener;
@@ -292,7 +293,15 @@ fn init_logging() {
     let filter = EnvFilter::try_from_env("CLEAN_SERVER_LOG")
         .unwrap_or_else(|_| EnvFilter::new("clean_server=info,warn"));
 
-    let _ = fmt().with_env_filter(filter).with_target(true).try_init();
+    // Diagnostics go to stderr, not stdout. `tracing_subscriber::fmt` defaults
+    // to stdout, which would interleave log lines with `--check`'s
+    // machine-readable output and defeat the `2>` redirection every supervisor
+    // config uses to separate the two.
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 /// Print an error with its full cause chain.

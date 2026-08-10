@@ -49,7 +49,7 @@ CI enforces both halves of HCV-06 on every commit: `host.wit` must parse, and
 it must match the interfaces the wasmtime `Linker` actually registers — no
 missing entries, no extra entries, and no no-op or throwing stubs.
 
-## Status — Phase 4 complete
+## Status — Phase 5 complete
 
 Working: HTTP/1.1 and HTTP/2 listeners, TLS termination with ALPN protocol
 negotiation, dynamic routing with path parameters and wildcards, WebSocket
@@ -88,9 +88,18 @@ one (SRVH-08). The dev socket must *not* require auth per the same rule — its
 access control is filesystem permissions, so it is created `0600`, removed on
 exit, and never started in production.
 
+Diagnostics are live (§1.9). `GET /_health` reports liveness, pool state,
+composed bridges, the last reload's outcome and any recent trap — answering 503
+rather than 200 when the host has not composed, because a load balancer reads
+the status code. `[server] metrics-path` optionally exposes Prometheus text;
+it is off by default so the base binary pays nothing for it. Guests and bridges
+emit structured records through `clean:host/log`, each tagged with the
+correlation id of the request that produced it, and a guest trap is captured
+with its request context rather than vanishing into a stack trace.
+
 Not yet implemented, by design: the five remaining standard bridges (data, kv,
-jobs, mail, realtime — no component exists for any of them yet), `/_health`,
-metrics, and per-middleware hot-swap. `swap-middleware` is answered with a
+jobs, mail, realtime — no component exists for any of them yet) and
+per-middleware hot-swap. `swap-middleware` is answered with a
 `refused` rather than a false success: there is no `[http-chain]` to mutate
 (the block is not in the canonical `host.toml` schema, and
 `wasi:http/middleware` is unavailable in the toolchain).
@@ -127,6 +136,7 @@ crates/clean-server/              the binary
   src/websocket.rs                upgrade handshake and socket task
   src/sockets.rs                  outbound queues, backpressure, SSE framing
   src/envelope.rs                 cookies, CSRF, envelope rendering
+  src/diagnostics.rs              health, metrics, trap snapshots
   src/reload.rs                   reload-channel wire protocol
   src/admin.rs                    reload triggers: admin API, dev socket
   src/main.rs                     CLI, signals, parity subcommand
@@ -135,6 +145,7 @@ crates/clean-server/              the binary
   tests/phase2.rs                 routing, TLS, h2, SSE, WebSocket, limits
   tests/phase3.rs                 composition, SRVH-01/02, CSRF
   tests/phase4.rs                 reload triggers, admin auth, dev socket
+  tests/phase5.rs                 health, metrics, guest logging
 testing/fake-guest/               the acceptance guest + build.sh
 testing/fake-bridge/              a component to compose, for tests
 testing/fixtures/hello-world/     the acceptance host.toml

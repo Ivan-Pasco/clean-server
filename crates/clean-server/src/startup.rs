@@ -29,6 +29,10 @@ pub struct Runtime {
     /// Drives the reload-channel policy decisions (SRVH-06) and whether the
     /// unauthenticated dev socket may exist at all.
     pub deployment_mode: clean_host_core::DeploymentMode,
+    /// Request counters for the optional Prometheus endpoint (§1.9).
+    pub metrics: crate::diagnostics::Metrics,
+    /// Recent guest traps (§1.9).
+    pub traps: crate::diagnostics::TrapLog,
 }
 
 /// Build the runtime from a `host.toml` path.
@@ -82,6 +86,8 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
         sockets,
         instances_max,
         deployment_mode,
+        metrics: crate::diagnostics::Metrics::default(),
+        traps: crate::diagnostics::TrapLog::default(),
     })
 }
 
