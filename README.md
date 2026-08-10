@@ -127,3 +127,10 @@ cargo run --bin clean-server -- parity --wit host.wit
 `clean-host-core` is consumed as a path dependency from a sibling checkout
 while both repos are pre-1.0; clone it next to this one. These become git or
 registry pins at M1.
+
+CI lays the sibling out the same way, which needs credentials: `clean-host-core`
+is private, and the default `GITHUB_TOKEN` is scoped to this repository only.
+The workflow authenticates with `secrets.CLEAN_HOST_CORE_DEPLOY_KEY` — an SSH
+deploy key registered read-only on `clean-host-core`. A deploy key is bound to
+exactly one repository, so a leak exposes read access to that repo and nothing
+else; a PAT would carry the whole account's scopes into this repo's secrets.
