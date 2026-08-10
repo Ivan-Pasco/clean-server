@@ -3,19 +3,7 @@
 //! Owns the HTTP surface and delegates everything else to `clean-host-core`
 //! (§1.11). See `PLAN.md` for the build order and `host.wit` for the contract.
 
-mod admin;
-mod config;
-mod conformance;
-mod diagnostics;
-mod envelope;
-mod guest;
-mod listener;
-mod reload;
-mod routing;
-mod sockets;
-mod startup;
-mod tls;
-mod websocket;
+use clean_server::{admin, conformance, guest, listener, reload, startup};
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -178,6 +178,23 @@ Crates the plan defers to later phases (`server-envelope`, `server-admin`,
 `server-dev-socket`, `server-diagnostics`) are not scaffolded yet — empty
 crates would be noise.
 
+## Performance
+
+Measured on an Apple M2: **33 000 req/s** on the hello-world route with 100%
+success, **53–63 ms** cold start, **126 ns** instance checkout. All three sit
+inside the §1.8 envelope.
+
+Those numbers describe host overhead on this machine, not a §1.8
+certification — the acceptance guest does no I/O, so a real handler making
+database calls will be dominated by those instead. [docs/performance.md](docs/performance.md)
+gives the full results, the method, and what they do not establish.
+
+```bash
+./testing/bench/run.sh          # end-to-end throughput (needs oha)
+./testing/bench/coldstart.sh    # cold start
+cargo bench --bench hot_path    # per-request host work
+```
+
 ## Development
 
 ```bash

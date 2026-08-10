@@ -7,9 +7,18 @@ license.workspace = true
 repository.workspace = true
 description = "The reference Clean host for HTTP applications."
 
+[lib]
+name = "clean_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "clean-server"
 path = "src/main.rs"
+
+[[bench]]
+name = "hot_path"
+path = "benches/hot_path.rs"
+harness = false
 
 [dependencies]
 clean-host-core = { workspace = true }

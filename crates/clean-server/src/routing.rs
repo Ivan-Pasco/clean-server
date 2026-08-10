@@ -17,7 +17,9 @@
 
 use std::cmp::Ordering;
 
-use crate::guest::Route;
+// Re-exported: a route is the routing table's input, so callers building one
+// should not have to reach into the guest module for it.
+pub use crate::guest::Route;
 
 /// The result of matching a request against the routing table.
 #[derive(Debug, PartialEq, Eq)]

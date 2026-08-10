@@ -93,6 +93,14 @@ jobs:
         working-directory: clean-server
         run: cargo run --quiet --bin clean-server -- parity --wit host.wit
 
+      # Layer D (PLAN.md §5): benchmarks run so a regression is visible in the
+      # log, but do not gate. Shared runners have variable neighbours, and a
+      # throughput threshold here would either catch nothing or fail at random.
+      - name: microbenchmarks (reported, not gating)
+        working-directory: clean-server
+        continue-on-error: true
+        run: cargo bench --bench hot_path
+
       # CMOD-03 — the host conformance gate (Platform 15 §10.1).
       #
       # Reported, not enforced, and deliberately so: two of its four checks

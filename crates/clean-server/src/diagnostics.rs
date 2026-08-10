@@ -273,6 +273,12 @@ impl TrapLog {
         self.recent.lock().unwrap().len()
     }
 
+    /// Whether anything has trapped. Reads better than `len() == 0` at the
+    /// call site, which is the whole reason clippy asks for it.
+    pub fn is_empty(&self) -> bool {
+        self.recent.lock().unwrap().is_empty()
+    }
+
     /// The most recent trap, which is what an operator looks at first.
     pub fn last(&self) -> Option<TrapSnapshot> {
         self.recent.lock().unwrap().last().cloned()
@@ -509,6 +515,20 @@ mod tests {
             .as_str()
             .unwrap()
             .contains('|'));
+    }
+
+    #[test]
+    fn a_fresh_trap_log_is_empty() {
+        let log = TrapLog::new(4);
+        assert!(log.is_empty());
+
+        log.record(TrapSnapshot {
+            correlation_id: "req-1".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            detail: "trap".into(),
+        });
+        assert!(!log.is_empty());
     }
 
     #[test]
