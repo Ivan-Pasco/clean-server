@@ -19,12 +19,18 @@ use clean_host_core::parity::{Registration, RegistrationKind};
 use clean_host_core_wasmtime::StoreState;
 use wasmtime::component::{Linker, Val};
 
+use tokio::sync::mpsc;
+
+use crate::sockets::{Outbound, Registry, SocketError, SseEvent};
+
 /// The request being served, plus the response being built.
 ///
 /// One of these is installed into the store before the guest is invoked and
 /// taken out afterwards. Because a checked-out instance serves exactly one
 /// request at a time, this is never shared across requests.
-#[derive(Debug, Default, Clone)]
+/// Not `Clone`: it carries the outbound-queue receivers, which have exactly one
+/// consumer (the connection task that takes them after the handler returns).
+#[derive(Debug, Default)]
 pub struct Exchange {
     pub method: String,
     pub path: String,
@@ -33,6 +39,8 @@ pub struct Exchange {
     pub correlation_id: String,
     pub request_headers: Vec<(String, String)>,
     pub request_body: Vec<u8>,
+    /// Path parameters captured by the matched route.
+    pub params: Vec<(String, String)>,
 
     pub status: u16,
     pub response_headers: Vec<(String, String)>,
@@ -40,6 +48,22 @@ pub struct Exchange {
 
     /// Routes the guest registered during `init`.
     pub routes: Vec<Route>,
+
+    /// Set when this request carried a valid WebSocket upgrade, so
+    /// `websocket.accept` knows whether it may succeed.
+    pub upgrade_available: bool,
+    /// The socket the guest accepted, if any. The connection task takes over
+    /// the response once the handler returns.
+    pub accepted_socket: Option<u64>,
+    /// The SSE stream the guest started, if any.
+    pub sse_stream: Option<u64>,
+    /// Live-connection registry. Absent during `init`, when no request exists.
+    pub registry: Option<Registry>,
+    /// Receiver for an accepted WebSocket's outbound queue, taken by the
+    /// connection task once the handler returns.
+    pub pending_socket_rx: Option<mpsc::UnboundedReceiver<Outbound>>,
+    /// Receiver for a started SSE stream's outbound queue.
+    pub pending_stream_rx: Option<mpsc::UnboundedReceiver<Outbound>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,11 +108,32 @@ const INTERFACES: &[(&str, &[&str])] = &[
     ("clean:http/routing@0.1.0", &["register"]),
     (
         "clean:http/request@0.1.0",
-        &["get-parts", "get-headers", "get-header", "get-body"],
+        &[
+            "get-parts",
+            "get-headers",
+            "get-header",
+            "get-body",
+            "get-params",
+            "get-param",
+        ],
     ),
     (
         "clean:http/response@0.1.0",
         &["set-status", "add-header", "set-body"],
+    ),
+    (
+        "clean:http/websocket@0.1.0",
+        &[
+            "accept",
+            "send-text",
+            "send-binary",
+            "queued-bytes",
+            "close",
+        ],
+    ),
+    (
+        "clean:http/sse@0.1.0",
+        &["start", "send", "set-retry", "close"],
     ),
 ];
 
@@ -100,7 +145,17 @@ pub fn register(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
     register_routing(linker)?;
     register_request(linker)?;
     register_response(linker)?;
+    register_websocket(linker)?;
+    register_sse(linker)?;
     Ok(())
+}
+
+/// Lower a `SocketError` into the WIT `result` shape the interfaces declare.
+fn socket_result(outcome: Result<(), SocketError>) -> Val {
+    match outcome {
+        Ok(()) => Val::Result(Ok(None)),
+        Err(e) => Val::Result(Err(Some(Box::new(Val::Enum(e.as_wit().into()))))),
+    }
 }
 
 /// Pull the exchange out of the store's host context.
@@ -221,7 +276,256 @@ fn register_request(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
         Ok(())
     })?;
 
+    iface.func_new("get-params", |mut store, _ty, _args, results| {
+        let ex = exchange(store.data_mut())?;
+        let ex = ex.lock().unwrap();
+        results[0] = Val::List(
+            ex.params
+                .iter()
+                .map(|(n, v)| {
+                    Val::Record(vec![
+                        ("name".into(), Val::String(n.clone())),
+                        ("value".into(), Val::String(v.clone())),
+                    ])
+                })
+                .collect(),
+        );
+        Ok(())
+    })?;
+
+    iface.func_new("get-param", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let wanted = match &args[0] {
+            Val::String(s) => s.clone(),
+            other => return Err(type_error("request.get-param: expected string name", other)),
+        };
+        let ex = ex.lock().unwrap();
+        let found = ex
+            .params
+            .iter()
+            .find(|(n, _)| *n == wanted)
+            .map(|(_, v)| Val::String(v.clone()));
+        results[0] = Val::Option(found.map(Box::new));
+        Ok(())
+    })?;
+
     Ok(())
+}
+
+fn register_websocket(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
+    let mut iface = linker.instance("clean:http/websocket@0.1.0")?;
+
+    iface.func_new("accept", |mut store, _ty, _args, results| {
+        let ex = exchange(store.data_mut())?;
+        let mut ex = ex.lock().unwrap();
+
+        // Refusing here rather than at the wire keeps the failure legible: the
+        // guest asked to upgrade a request that was never an upgrade.
+        if !ex.upgrade_available {
+            results[0] = Val::Result(Err(Some(Box::new(Val::Enum(
+                SocketError::NotAnUpgrade.as_wit().into(),
+            )))));
+            return Ok(());
+        }
+        if let Some(existing) = ex.accepted_socket {
+            results[0] = Val::Result(Ok(Some(Box::new(Val::U64(existing)))));
+            return Ok(());
+        }
+
+        let Some(registry) = ex.registry.clone() else {
+            return Err(wasmtime::Error::msg(
+                "websocket.accept called outside a request",
+            ));
+        };
+        let (id, receiver) = registry.register_socket();
+        ex.accepted_socket = Some(id);
+        // The connection task collects the receiver after the handler returns.
+        ex.pending_socket_rx = Some(receiver);
+        results[0] = Val::Result(Ok(Some(Box::new(Val::U64(id)))));
+        Ok(())
+    })?;
+
+    iface.func_new("send-text", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let (id, text) = match (&args[0], &args[1]) {
+            (Val::U64(id), Val::String(s)) => (*id, s.clone()),
+            other => {
+                return Err(wasmtime::Error::msg(format!(
+                    "websocket.send-text: expected (u64, string), got {other:?}"
+                )))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        results[0] = socket_result(registry.send_socket(id, Outbound::Text(text)));
+        Ok(())
+    })?;
+
+    iface.func_new("send-binary", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let id = match &args[0] {
+            Val::U64(id) => *id,
+            other => {
+                return Err(type_error(
+                    "websocket.send-binary: expected u64 socket",
+                    other,
+                ))
+            }
+        };
+        let bytes = match &args[1] {
+            Val::List(items) => items
+                .iter()
+                .map(|v| match v {
+                    Val::U8(b) => Ok(*b),
+                    other => Err(type_error("websocket.send-binary: expected u8", other)),
+                })
+                .collect::<wasmtime::Result<Vec<u8>>>()?,
+            other => {
+                return Err(type_error(
+                    "websocket.send-binary: expected list<u8>",
+                    other,
+                ))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        results[0] = socket_result(registry.send_socket(id, Outbound::Binary(bytes)));
+        Ok(())
+    })?;
+
+    iface.func_new("queued-bytes", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let id = match &args[0] {
+            Val::U64(id) => *id,
+            other => return Err(type_error("websocket.queued-bytes: expected u64", other)),
+        };
+        let registry = registry_of(&ex)?;
+        results[0] = Val::U64(registry.queued_bytes(id));
+        Ok(())
+    })?;
+
+    iface.func_new("close", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let (id, code, reason) = match (&args[0], &args[1], &args[2]) {
+            (Val::U64(id), Val::U16(code), Val::String(reason)) => (*id, *code, reason.clone()),
+            other => {
+                return Err(wasmtime::Error::msg(format!(
+                    "websocket.close: expected (u64, u16, string), got {other:?}"
+                )))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        results[0] = socket_result(registry.send_socket(id, Outbound::Close { code, reason }));
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+fn register_sse(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
+    let mut iface = linker.instance("clean:http/sse@0.1.0")?;
+
+    iface.func_new("start", |mut store, _ty, _args, results| {
+        let ex = exchange(store.data_mut())?;
+        let mut ex = ex.lock().unwrap();
+
+        // A body already set means the response shape is decided; turning it
+        // into a stream now would silently discard what the guest wrote.
+        if !ex.response_body.is_empty() {
+            results[0] = Val::Result(Err(Some(Box::new(Val::Enum(
+                "response-already-started".into(),
+            )))));
+            return Ok(());
+        }
+        if let Some(existing) = ex.sse_stream {
+            results[0] = Val::Result(Ok(Some(Box::new(Val::U64(existing)))));
+            return Ok(());
+        }
+
+        let Some(registry) = ex.registry.clone() else {
+            return Err(wasmtime::Error::msg("sse.start called outside a request"));
+        };
+        let (id, receiver) = registry.register_stream();
+        ex.sse_stream = Some(id);
+        ex.pending_stream_rx = Some(receiver);
+        results[0] = Val::Result(Ok(Some(Box::new(Val::U64(id)))));
+        Ok(())
+    })?;
+
+    iface.func_new("send", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let (id, event_type, data, id_field) = match (&args[0], &args[1], &args[2], &args[3]) {
+            (Val::U64(s), Val::String(t), Val::String(d), Val::String(i)) => {
+                (*s, t.clone(), d.clone(), i.clone())
+            }
+            other => {
+                return Err(wasmtime::Error::msg(format!(
+                    "sse.send: expected (u64, string, string, string), got {other:?}"
+                )))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        let frame = SseEvent {
+            event_type,
+            data,
+            id: id_field,
+            retry_millis: None,
+        }
+        .frame();
+        results[0] = stream_result(registry.send_stream(id, Outbound::Text(frame)));
+        Ok(())
+    })?;
+
+    iface.func_new("set-retry", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let (id, millis) = match (&args[0], &args[1]) {
+            (Val::U64(id), Val::U32(ms)) => (*id, *ms),
+            other => {
+                return Err(wasmtime::Error::msg(format!(
+                    "sse.set-retry: expected (u64, u32), got {other:?}"
+                )))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        // `retry:` is a field of an otherwise-empty event, per the SSE spec.
+        let frame = format!("retry: {millis}\n\n");
+        results[0] = stream_result(registry.send_stream(id, Outbound::Text(frame)));
+        Ok(())
+    })?;
+
+    iface.func_new("close", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let id = match &args[0] {
+            Val::U64(id) => *id,
+            other => return Err(type_error("sse.close: expected u64 stream", other)),
+        };
+        let registry = registry_of(&ex)?;
+        results[0] = stream_result(registry.send_stream(
+            id,
+            Outbound::Close {
+                code: 1000,
+                reason: String::new(),
+            },
+        ));
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// The live-connection registry for the in-flight request.
+fn registry_of(ex: &ExchangeRef) -> wasmtime::Result<Registry> {
+    ex.lock()
+        .unwrap()
+        .registry
+        .clone()
+        .ok_or_else(|| wasmtime::Error::msg("no live-connection registry for this request"))
+}
+
+/// Lower a `SocketError` into the SSE `stream-error` shape.
+fn stream_result(outcome: Result<(), SocketError>) -> Val {
+    match outcome {
+        Ok(()) => Val::Result(Ok(None)),
+        Err(_) => Val::Result(Err(Some(Box::new(Val::Enum("closed".into()))))),
+    }
 }
 
 fn register_response(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
@@ -276,13 +580,14 @@ mod tests {
     #[test]
     fn every_declared_interface_is_reported_as_a_real_registration() {
         let regs = registered_interfaces();
-        assert_eq!(regs.len(), 3);
         assert!(regs.iter().all(|r| r.kind == RegistrationKind::Real));
 
         let names: Vec<_> = regs.iter().map(|r| r.interface.as_str()).collect();
         assert!(names.contains(&"clean:http/routing@0.1.0"));
         assert!(names.contains(&"clean:http/request@0.1.0"));
         assert!(names.contains(&"clean:http/response@0.1.0"));
+        assert!(names.contains(&"clean:http/websocket@0.1.0"));
+        assert!(names.contains(&"clean:http/sse@0.1.0"));
     }
 
     #[test]

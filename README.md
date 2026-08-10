@@ -48,24 +48,43 @@ CI enforces both halves of HCV-06 on every commit: `host.wit` must parse, and
 it must match the interfaces the wasmtime `Linker` actually registers — no
 missing entries, no extra entries, and no no-op or throwing stubs.
 
-## Status — M0
+## Status — Phase 2 complete
 
-Working: HTTP/1.1 listener, route registration from the guest, request and
-response marshaling, `--check`, SIGTERM graceful drain, structured per-request
-logs, capability manifest emission, and the HCV-06 parity check.
+Working: HTTP/1.1 and HTTP/2 listeners, TLS termination with ALPN protocol
+negotiation, dynamic routing with path parameters and wildcards, WebSocket
+upgrade with a bounded per-socket outbound queue, Server-Sent Events, body-size
+limits, per-request timeouts via epoch interruption, queue-depth load shedding,
+`--check`, SIGTERM graceful drain, structured per-request logs, capability
+manifest emission, and the HCV-06 parity check.
 
-`host.wit` currently declares only `clean:http/routing`, `request`, and
-`response`. The rest of the `clean:host/server@0.1` world is added as each part
-is implemented, never before — declaring an interface the Linker does not
-register is exactly what HCV-06 exists to catch.
+`host.wit` declares five interfaces — `routing`, `request`, `response`,
+`websocket`, `sse` — and each is really registered in the wasmtime `Linker`.
+The rest of the `clean:host/server@0.1` world is added as each part is
+implemented, never before; declaring an interface the Linker does not register
+is exactly what HCV-06 exists to catch.
 
-Not in M0, by design: TLS, HTTP/2, WebSocket, SSE, bridges, reload, the admin
-API, and metrics. A `[bridges]` entry is a startup error rather than being
-silently ignored.
+In particular `clean:realtime/sockets` is **not** declared yet. It exists so
+the realtime bridge can call back into the host, and bridge composition is
+Phase 3 — an interface with no reachable caller would be a promise the server
+cannot yet keep. The socket machinery it will sit on (queue, backpressure,
+force-close) is built and tested now.
 
-### The M0 guest is hand-written WAT
+Not yet implemented, by design: bridges, the session envelope and CSRF, reload
+and hot-swap, the admin API, and metrics. A `[bridges]` entry is a startup
+error rather than being silently ignored.
+
+### Protocol selection
+
+Under TLS, ALPN decides: the handshake reports `h2` or `http/1.1`. Without TLS,
+HTTP/2 has no negotiation, so h2c is detected from the connection preface
+rather than assumed — otherwise enabling `h2` would break every plaintext
+HTTP/1.1 client.
+
+### The acceptance guest is hand-written WAT
 
 `testing/fake-guest/` is a Component Model component written directly in WAT.
+It serves five routes covering every interface: `GET /`, `GET /users/:id`,
+`GET /events` (SSE), `GET /ws` (WebSocket), and `POST /echo`.
 The installed compiler (cln 0.33.154) emits core wasm modules rather than
 components and generates no `clean:http/*` imports, so it cannot yet build a
 guest for the server world. The fixture imports the same interfaces `host.wit`
@@ -79,11 +98,16 @@ host.wit                          the published contract (HCV-02)
 crates/clean-server/              the binary
   src/config.rs                   the [server] block
   src/guest.rs                    clean:http/* Linker registration
-  src/routing.rs                  route matching
+  src/routing.rs                  route matching, params, wildcards
   src/startup.rs                  Host construction, compose, dispatch
-  src/listener.rs                 hyper listener and request flow
+  src/listener.rs                 hyper listener, TLS, protocol select
+  src/tls.rs                      rustls acceptor and ALPN
+  src/websocket.rs                upgrade handshake and socket task
+  src/sockets.rs                  outbound queues, backpressure, SSE framing
   src/main.rs                     CLI, signals, parity subcommand
-  tests/acceptance.rs             end-to-end M0 acceptance
+  tests/support/mod.rs            shared end-to-end harness
+  tests/acceptance.rs             M0 acceptance
+  tests/phase2.rs                 routing, TLS, h2, SSE, WebSocket, limits
 testing/fake-guest/               the acceptance guest + build.sh
 testing/fixtures/hello-world/     the acceptance host.toml
 ```

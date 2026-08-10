@@ -26,6 +26,14 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-tungstenite = { workspace = true }
+sha1 = { workspace = true }
+base64 = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -34,3 +42,4 @@ wasmtime = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+rcgen = { workspace = true }

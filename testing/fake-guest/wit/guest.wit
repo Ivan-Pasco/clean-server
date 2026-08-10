@@ -4,6 +4,8 @@ world app {
     import clean:http/routing@0.1.0;
     import clean:http/request@0.1.0;
     import clean:http/response@0.1.0;
+    import clean:http/websocket@0.1.0;
+    import clean:http/sse@0.1.0;
     export init: func();
     export handle: func(handler-id: u32);
 }

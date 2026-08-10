@@ -14,12 +14,18 @@ use wasmtime::component::Val;
 use crate::config::ServerConfig;
 use crate::guest::{self, Exchange, ExchangeRef};
 use crate::routing::Router;
+use crate::sockets::Registry;
 
 /// Everything the request loop needs, assembled once at startup.
 pub struct Runtime {
     pub host: Host,
     pub server: ServerConfig,
     pub router: Router,
+    /// Live WebSocket and SSE connections.
+    pub sockets: Registry,
+    /// The pool ceiling, used with `[server] queue-depth` to decide when to
+    /// shed load with a 503 (§1.4.2).
+    pub instances_max: u32,
 }
 
 /// Build the runtime from a `host.toml` path.
@@ -31,6 +37,8 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
     }
 
     let server = ServerConfig::from_host_config(&host_config)?;
+    let instances_max = host_config.runtime.instances_max;
+    let sockets = Registry::new(server.socket_queue_max);
     let host = build_host(host_config, server.request_timeout)?;
 
     // Composition must happen before the guest can be asked for its routes.
@@ -39,6 +47,15 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
 
     let routes = collect_routes(&host)?;
     let router = Router::new(routes, &server.mount);
+    for (method, pattern, handler) in router.patterns() {
+        tracing::info!(
+            target: "clean_server::startup",
+            method,
+            pattern,
+            handler,
+            "route registered"
+        );
+    }
 
     if router.is_empty() {
         // Not fatal — a guest may legitimately register nothing — but it is
@@ -53,6 +70,8 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
         host,
         server,
         router,
+        sockets,
+        instances_max,
     })
 }
 
@@ -114,15 +133,6 @@ fn collect_routes(host: &Host) -> anyhow::Result<Vec<guest::Route>> {
     drop(guard);
 
     let routes = exchange.lock().unwrap().routes.clone();
-    for route in &routes {
-        tracing::info!(
-            target: "clean_server::startup",
-            method = %route.method,
-            path = %route.path,
-            handler = route.handler_id,
-            "route registered"
-        );
-    }
     Ok(routes)
 }
 
@@ -161,6 +171,12 @@ pub fn dispatch(host: &Host, handler_id: u32, exchange: Exchange) -> anyhow::Res
 
     result?;
 
-    let exchange = shared.lock().unwrap().clone();
+    // Exchange owns the outbound-queue receivers, so it cannot be cloned out;
+    // take ownership instead. Every other reference was dropped when the guest
+    // call returned.
+    let exchange = Arc::try_unwrap(shared)
+        .map_err(|_| anyhow::anyhow!("guest retained a reference to the request"))?
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("request state was poisoned by a panic"))?;
     Ok(exchange)
 }

@@ -12,10 +12,15 @@
 // a hard failure — the correct response to an unimplemented interface is to
 // omit it from this file.
 //
-// M0 SCOPE: routing, request, and response only. The rest of the
-// `clean:host/server@0.1` world (websocket, sse, the session and realtime
-// envelopes, admin) lands in Phase 2–4 and will be added here as each is
-// implemented, never before.
+// SCOPE: routing, request, response, websocket, and sse — the interfaces
+// clean-server actually implements today. The remainder of the
+// `clean:host/server@0.1` world (the session and realtime envelopes, admin)
+// lands in Phase 3–4 and is added here as each is implemented, never before.
+//
+// In particular `clean:realtime/sockets` is NOT declared yet: it exists so the
+// realtime bridge can call back into the host, and bridge composition is
+// Phase 3. Declaring an interface with no reachable caller is what HCV-06
+// exists to prevent.
 
 package clean:http@0.1.0;
 
@@ -69,6 +74,15 @@ interface request {
 
     /// The request body. Bounded by `[server] body-max-bytes`.
     get-body: func() -> list<u8>;
+
+    /// Path parameters captured by the matched route: `/users/:id` matched
+    /// against `/users/42` yields `[("id", "42")]`. Values are exactly as they
+    /// appeared in the path — percent-decoding is the guest's choice, since
+    /// decoding early would make `%2F` indistinguishable from a separator.
+    get-params: func() -> list<header>;
+
+    /// One path parameter by name.
+    get-param: func(name: string) -> option<string>;
 }
 
 /// The response the guest produces.
@@ -89,6 +103,77 @@ interface response {
     set-body: func(body: list<u8>);
 }
 
+/// WebSocket upgrade and lifecycle (§1.3.1).
+///
+/// The guest decides during a normal request whether to accept an upgrade. The
+/// server owns the wire: the handshake, the per-socket outbound queue bounded
+/// by `[server] socket-queue-max`, and the close. Fan-out across nodes is the
+/// realtime bridge's job, not this interface's.
+interface websocket {
+    /// Why a socket closed, or why an upgrade was refused.
+    enum socket-error {
+        /// The request was not a WebSocket upgrade.
+        not-an-upgrade,
+        /// The per-socket outbound queue is full; the message was not queued.
+        socket-slow,
+        /// The socket is no longer open.
+        closed,
+    }
+
+    /// Accept the pending upgrade for this request.
+    ///
+    /// Returns a socket id the guest uses for subsequent sends. Fails with
+    /// `not-an-upgrade` when the request carried no valid upgrade headers.
+    accept: func() -> result<u64, socket-error>;
+
+    /// Queue a text message for delivery on a socket.
+    ///
+    /// Non-blocking: returns `socket-slow` rather than waiting when the
+    /// outbound queue is full, so one slow client cannot stall the guest.
+    send-text: func(socket: u64, message: string) -> result<_, socket-error>;
+
+    /// Queue a binary message for delivery on a socket.
+    send-binary: func(socket: u64, message: list<u8>) -> result<_, socket-error>;
+
+    /// Approximate bytes queued but not yet written, for backpressure
+    /// decisions the guest wants to make itself.
+    queued-bytes: func(socket: u64) -> u64;
+
+    /// Close a socket with a WebSocket close code.
+    close: func(socket: u64, code: u16, reason: string) -> result<_, socket-error>;
+}
+
+/// Server-Sent Events (§1.3.1).
+///
+/// SSE is a response mode rather than a separate connection: the guest starts
+/// a stream on the current request and the server holds the response open,
+/// framing events and emitting keep-alive comments.
+interface sse {
+    enum stream-error {
+        /// A response body was already set, so it cannot become a stream.
+        response-already-started,
+        /// The client disconnected.
+        closed,
+    }
+
+    /// Turn the current response into an SSE stream.
+    ///
+    /// Returns a stream id. The server sets `content-type: text/event-stream`
+    /// and disables buffering.
+    start: func() -> result<u64, stream-error>;
+
+    /// Send one event. An empty `event-type` emits a default `message` event;
+    /// an empty `id` omits the id field.
+    send: func(handle: u64, event-type: string, data: string, id: string)
+        -> result<_, stream-error>;
+
+    /// Ask the client to wait this long before reconnecting.
+    set-retry: func(handle: u64, millis: u32) -> result<_, stream-error>;
+
+    /// Close the stream and end the response.
+    close: func(handle: u64) -> result<_, stream-error>;
+}
+
 /// The world clean-server fulfills.
 ///
 /// The server exports the HTTP surface it owns (§1.3.1) and imports the
@@ -99,6 +184,8 @@ world server {
     export routing;
     export request;
     export response;
+    export websocket;
+    export sse;
 
     /// Invoked once at startup so the guest can register its routes.
     import init: func();

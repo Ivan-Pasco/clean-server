@@ -7,7 +7,10 @@ mod config;
 mod guest;
 mod listener;
 mod routing;
+mod sockets;
 mod startup;
+mod tls;
+mod websocket;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -73,7 +76,7 @@ fn main() -> ExitCode {
             Ok(runtime) => {
                 println!(
                     "ok: {} route(s) registered; would listen on {}",
-                    runtime.router.routes().len(),
+                    runtime.router.len(),
                     runtime.server.listen
                 );
                 ExitCode::SUCCESS

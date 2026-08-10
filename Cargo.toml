@@ -28,16 +28,32 @@ clap = { version = "4", features = ["derive"] }
 
 # HTTP stack (PLAN.md §1): hyper directly rather than axum — the server owns
 # its own routing and does not need the framework layer.
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server"] }
 http-body-util = "0.1"
 bytes = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+
+# TLS. rustls only: the deployment shape (§1.2) promises no shared-object
+# dependencies beyond libc, which native-tls/OpenSSL would break.
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+
+# WebSocket.
+tokio-tungstenite = "0.30"
+sha1 = "0.10"
+base64 = "0.22"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 wasmtime = "47"
+
+# Test-only: generate TLS certificates on the fly rather than checking PEMs in.
+rcgen = "0.14"
 
 [profile.release]
 lto = "thin"
