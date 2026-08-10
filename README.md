@@ -13,8 +13,9 @@ Build plan: [PLAN.md](PLAN.md).
 ## Quick start
 
 ```bash
-# Build the acceptance guest (needs wasm-tools).
+# Build the acceptance guest and the bridge it imports (needs wasm-tools).
 ./testing/fake-guest/build.sh
+./testing/fake-bridge/build.sh
 
 # Serve it.
 cargo run --bin clean-server -- testing/fixtures/hello-world/host.toml
@@ -48,7 +49,7 @@ CI enforces both halves of HCV-06 on every commit: `host.wit` must parse, and
 it must match the interfaces the wasmtime `Linker` actually registers — no
 missing entries, no extra entries, and no no-op or throwing stubs.
 
-## Status — Phase 2 complete
+## Status — Phase 3 complete
 
 Working: HTTP/1.1 and HTTP/2 listeners, TLS termination with ALPN protocol
 negotiation, dynamic routing with path parameters and wildcards, WebSocket
@@ -57,21 +58,26 @@ limits, per-request timeouts via epoch interruption, queue-depth load shedding,
 `--check`, SIGTERM graceful drain, structured per-request logs, capability
 manifest emission, and the HCV-06 parity check.
 
-`host.wit` declares five interfaces — `routing`, `request`, `response`,
-`websocket`, `sse` — and each is really registered in the wasmtime `Linker`.
-The rest of the `clean:host/server@0.1` world is added as each part is
-implemented, never before; declaring an interface the Linker does not register
-is exactly what HCV-06 exists to catch.
+Bridge composition works: `clean-host-core` discovers each `[bridges]` entry,
+validates it really exports what it promised, and composes it into the guest
+with WAC. A guest that imports a capability with no matching `[bridges]` entry
+is refused at startup with a diagnostic naming the exact key to add (SRVH-01 /
+SRVH-02) — never started with the capability silently off.
 
-In particular `clean:realtime/sockets` is **not** declared yet. It exists so
-the realtime bridge can call back into the host, and bridge composition is
-Phase 3 — an interface with no reachable caller would be a promise the server
-cannot yet keep. The socket machinery it will sit on (queue, backpressure,
-force-close) is built and tested now.
+Both host-side envelopes are implemented: `session-envelope` (cookies with
+HttpOnly and Secure floors, CSRF issuance and constant-time validation) and
+`realtime-sockets` (delivery, force-close and queue depth on the socket
+registry). CSRF is enforced in the listener, so an unsafe method with a bad
+token is rejected before the guest runs rather than depending on every handler
+to remember.
 
-Not yet implemented, by design: bridges, the session envelope and CSRF, reload
-and hot-swap, the admin API, and metrics. A `[bridges]` entry is a startup
-error rather than being silently ignored.
+`host.wit` declares seven interfaces, each really registered in the wasmtime
+`Linker`. `clean:host/admin` lands in Phase 4 and is added when it is
+implemented, never before.
+
+Not yet implemented, by design: the five remaining standard bridges (data, kv,
+jobs, mail, realtime — no component exists for any of them yet), reload and
+hot-swap, the admin API, and metrics.
 
 ### Protocol selection
 
@@ -104,11 +110,14 @@ crates/clean-server/              the binary
   src/tls.rs                      rustls acceptor and ALPN
   src/websocket.rs                upgrade handshake and socket task
   src/sockets.rs                  outbound queues, backpressure, SSE framing
+  src/envelope.rs                 cookies, CSRF, envelope rendering
   src/main.rs                     CLI, signals, parity subcommand
   tests/support/mod.rs            shared end-to-end harness
   tests/acceptance.rs             M0 acceptance
   tests/phase2.rs                 routing, TLS, h2, SSE, WebSocket, limits
+  tests/phase3.rs                 composition, SRVH-01/02, CSRF
 testing/fake-guest/               the acceptance guest + build.sh
+testing/fake-bridge/              a component to compose, for tests
 testing/fixtures/hello-world/     the acceptance host.toml
 ```
 

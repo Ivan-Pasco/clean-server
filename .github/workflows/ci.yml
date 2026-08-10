@@ -76,6 +76,12 @@ jobs:
         working-directory: clean-server
         run: ./testing/fake-guest/build.sh
 
+      # The guest imports this bridge, so without it SRVH-01 refuses startup
+      # and every end-to-end suite would skip.
+      - name: build composition-test bridge
+        working-directory: clean-server
+        run: ./testing/fake-bridge/build.sh
+
       - name: test
         working-directory: clean-server
         run: cargo test --workspace

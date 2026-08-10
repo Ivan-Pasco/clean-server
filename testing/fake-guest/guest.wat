@@ -18,6 +18,8 @@
 ;;   GET  /events      handler 2  -> SSE stream: two "tick" events, then close
 ;;   GET  /ws          handler 3  -> WebSocket upgrade, one greeting frame
 ;;   POST /echo        handler 4  -> 200, echoes the request body
+;;   GET  /counter     handler 5  -> 200, one ASCII digit from the composed
+;;                                  bridge (proves composition actually wired)
 
 (module
   ;; Canonical ABI: imports are "<interface-name>" / "<func-name>", lowered to
@@ -45,6 +47,9 @@
     (func $sse-send (param i64 i32 i32 i32 i32 i32 i32 i32)))
   (import "clean:http/sse@0.1.0" "close"
     (func $sse-close (param i64 i32)))
+  ;; Composed bridge (Phase 3). Present only when host.toml configures it.
+  (import "clean:fake-bridge/store@0.1.0" "bump"
+    (func $bump (result i32)))
 
   (memory (export "memory") 1)
 
@@ -63,6 +68,7 @@
   (data (i32.const 144) "hello socket")               ;; len 12
   (data (i32.const 160) "/echo")                      ;; len 5
   (data (i32.const 176) "no id")                      ;; len 5
+  (data (i32.const 192) "/counter")                   ;; len 8
 
   ;; Return areas for the canonical ABI, clear of the static data above.
   (global $RET  i32 (i32.const 1024))
@@ -79,7 +85,8 @@
     (call $register (i32.const 0) (i32.const 80)  (i32.const 10) (i32.const 1))
     (call $register (i32.const 0) (i32.const 104) (i32.const 7)  (i32.const 2))
     (call $register (i32.const 0) (i32.const 116) (i32.const 3)  (i32.const 3))
-    (call $register (i32.const 2) (i32.const 160) (i32.const 5)  (i32.const 4)))
+    (call $register (i32.const 2) (i32.const 160) (i32.const 5)  (i32.const 4))
+    (call $register (i32.const 0) (i32.const 192) (i32.const 8)  (i32.const 5)))
 
   (func $plain-headers
     (call $add-header
@@ -147,6 +154,17 @@
             (call $ws-send-text (local.get $socket)
               (i32.const 144) (i32.const 12)
               (global.get $RET2))))
+        (return)))
+
+    ;; GET /counter — call the composed bridge and return its value.
+    ;; A single digit keeps the WAT trivial; the point is that the call
+    ;; reaches the bridge at all.
+    (if (i32.eq (local.get $h) (i32.const 5))
+      (then
+        (call $plain-headers)
+        ;; 48 = ASCII '0'; write the digit into scratch and return it.
+        (i32.store8 (i32.const 512) (i32.add (call $bump) (i32.const 48)))
+        (call $set-body (i32.const 512) (i32.const 1))
         (return)))
 
     ;; POST /echo — echo the request body

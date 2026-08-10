@@ -275,6 +275,34 @@ async fn route_and_dispatch(
 
     let is_upgrade = websocket::is_upgrade_request(&req);
 
+    // §1.7: unsafe methods without a valid CSRF token are rejected before
+    // reaching the guest, so a handler cannot forget to check.
+    let cookie_header = req
+        .headers()
+        .get(hyper::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let submitted_token = req
+        .headers()
+        .get(crate::envelope::CSRF_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    if let Some(reason) = crate::envelope::csrf_rejection(
+        method.as_str(),
+        cookie_header.as_deref(),
+        submitted_token.as_deref(),
+    ) {
+        tracing::warn!(
+            target: "clean_server::request",
+            method = %method,
+            path = %path,
+            reason,
+            "CSRF check failed"
+        );
+        return text(StatusCode::FORBIDDEN, "403 forbidden\n");
+    }
+
     // Collect the body under the configured cap before touching the guest, so
     // an oversized upload never reaches guest memory (§1.7).
     let limit = runtime.server.body_max_bytes;
@@ -312,6 +340,7 @@ async fn route_and_dispatch(
     exchange.params = params;
     exchange.upgrade_available = is_upgrade;
     exchange.registry = Some(runtime.sockets.clone());
+    exchange.server_config = Some(Arc::clone(&runtime.server));
     exchange.request_headers = parts
         .headers
         .iter()

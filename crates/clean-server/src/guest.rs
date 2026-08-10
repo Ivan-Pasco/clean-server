@@ -21,6 +21,7 @@ use wasmtime::component::{Linker, Val};
 
 use tokio::sync::mpsc;
 
+use crate::envelope::{self, CookieOptions, EnvelopeError, SameSite};
 use crate::sockets::{Outbound, Registry, SocketError, SseEvent};
 
 /// The request being served, plus the response being built.
@@ -59,6 +60,10 @@ pub struct Exchange {
     pub sse_stream: Option<u64>,
     /// Live-connection registry. Absent during `init`, when no request exists.
     pub registry: Option<Registry>,
+    /// The `[server]` block, for cookie defaults.
+    pub server_config: Option<std::sync::Arc<crate::config::ServerConfig>>,
+    /// A CSRF token bound during this request.
+    pub csrf_token: Option<String>,
     /// Receiver for an accepted WebSocket's outbound queue, taken by the
     /// connection task once the handler returns.
     pub pending_socket_rx: Option<mpsc::UnboundedReceiver<Outbound>>,
@@ -135,6 +140,14 @@ const INTERFACES: &[(&str, &[&str])] = &[
         "clean:http/sse@0.1.0",
         &["start", "send", "set-retry", "close"],
     ),
+    (
+        "clean:http/session-envelope@0.1.0",
+        &["set-cookie", "set-csrf", "get-csrf", "read-cookie"],
+    ),
+    (
+        "clean:http/realtime-sockets@0.1.0",
+        &["deliver", "close", "queued-bytes"],
+    ),
 ];
 
 /// Register every `clean:http/*` interface into the linker.
@@ -147,6 +160,8 @@ pub fn register(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
     register_response(linker)?;
     register_websocket(linker)?;
     register_sse(linker)?;
+    register_session_envelope(linker)?;
+    register_realtime_sockets(linker)?;
     Ok(())
 }
 
@@ -509,6 +524,256 @@ fn register_sse(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
     })?;
 
     Ok(())
+}
+
+fn register_session_envelope(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
+    let mut iface = linker.instance("clean:http/session-envelope@0.1.0")?;
+
+    iface.func_new("set-cookie", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let (name, value) = match (&args[0], &args[1]) {
+            (Val::String(n), Val::String(v)) => (n.clone(), v.clone()),
+            other => {
+                return Err(wasmtime::Error::msg(format!(
+                    "session-envelope.set-cookie: expected two strings, got {other:?}"
+                )))
+            }
+        };
+        let options = cookie_options_from(&args[2])?;
+
+        let mut ex = ex.lock().unwrap();
+        // Callable during `init`, when no request exists — the WIT declares
+        // `no-active-request` for exactly this case.
+        let Some(config) = ex.server_config.clone() else {
+            results[0] = Val::Result(Err(Some(Box::new(Val::Variant(
+                EnvelopeError::NoActiveRequest.as_wit().into(),
+                None,
+            )))));
+            return Ok(());
+        };
+
+        let options = envelope::apply_defaults(options, &config);
+        match envelope::set_cookie_header(&name, &value, &options) {
+            Ok(header) => {
+                // Once a stream or socket is open the response head is already
+                // on the wire; a late Set-Cookie would silently never arrive.
+                if ex.sse_stream.is_some() || ex.accepted_socket.is_some() {
+                    results[0] = Val::Result(Err(Some(Box::new(Val::Variant(
+                        EnvelopeError::HeaderLocked.as_wit().into(),
+                        None,
+                    )))));
+                } else {
+                    ex.response_headers.push(("set-cookie".into(), header));
+                    results[0] = Val::Result(Ok(None));
+                }
+            }
+            Err(e) => {
+                results[0] =
+                    Val::Result(Err(Some(Box::new(Val::Variant(e.as_wit().into(), None)))));
+            }
+        }
+        Ok(())
+    })?;
+
+    iface.func_new("set-csrf", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let token = match &args[0] {
+            Val::String(t) => t.clone(),
+            other => {
+                return Err(type_error(
+                    "session-envelope.set-csrf: expected string",
+                    other,
+                ))
+            }
+        };
+
+        let mut ex = ex.lock().unwrap();
+        let Some(config) = ex.server_config.clone() else {
+            results[0] = Val::Result(Err(Some(Box::new(Val::Variant(
+                EnvelopeError::NoActiveRequest.as_wit().into(),
+                None,
+            )))));
+            return Ok(());
+        };
+
+        // With no session bridge composed, the token rides in a cookie. When
+        // one is composed this moves to clean:session/store so it survives
+        // across requests (session spec §5).
+        let options = envelope::apply_defaults(CookieOptions::default(), &config);
+        match envelope::set_cookie_header(envelope::CSRF_COOKIE, &token, &options) {
+            Ok(header) => {
+                ex.csrf_token = Some(token);
+                ex.response_headers.push(("set-cookie".into(), header));
+                results[0] = Val::Result(Ok(None));
+            }
+            Err(_) => {
+                results[0] = Val::Result(Err(Some(Box::new(Val::Variant(
+                    EnvelopeError::InvalidCookieValue.as_wit().into(),
+                    None,
+                )))));
+            }
+        }
+        Ok(())
+    })?;
+
+    iface.func_new("get-csrf", |mut store, _ty, _args, results| {
+        let ex = exchange(store.data_mut())?;
+        let ex = ex.lock().unwrap();
+
+        // Prefer a token set during this request; otherwise read the cookie the
+        // client sent back.
+        let token = ex.csrf_token.clone().or_else(|| {
+            ex.request_headers
+                .iter()
+                .find(|(n, _)| n == "cookie")
+                .and_then(|(_, v)| envelope::read_cookie(v, envelope::CSRF_COOKIE))
+        });
+        results[0] = Val::Option(token.map(|t| Box::new(Val::String(t))));
+        Ok(())
+    })?;
+
+    iface.func_new("read-cookie", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let name = match &args[0] {
+            Val::String(n) => n.clone(),
+            other => {
+                return Err(type_error(
+                    "session-envelope.read-cookie: expected string",
+                    other,
+                ))
+            }
+        };
+        let ex = ex.lock().unwrap();
+        let found = ex
+            .request_headers
+            .iter()
+            .find(|(n, _)| n == "cookie")
+            .and_then(|(_, v)| envelope::read_cookie(v, &name));
+        results[0] = Val::Option(found.map(|v| Box::new(Val::String(v))));
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// Decode the `cookie-options` record.
+fn cookie_options_from(value: &Val) -> wasmtime::Result<CookieOptions> {
+    let Val::Record(fields) = value else {
+        return Err(type_error("expected a cookie-options record", value));
+    };
+
+    let mut options = CookieOptions::default();
+    for (name, field) in fields {
+        match (name.as_str(), field) {
+            ("path", Val::Option(v)) => {
+                options.path = string_option(v);
+            }
+            ("domain", Val::Option(v)) => {
+                options.domain = string_option(v);
+            }
+            ("max-age-secs", Val::Option(v)) => {
+                options.max_age_secs = match v.as_deref() {
+                    Some(Val::U32(n)) => Some(*n),
+                    _ => None,
+                };
+            }
+            ("http-only", Val::Bool(b)) => options.http_only = *b,
+            ("secure", Val::Bool(b)) => options.secure = *b,
+            ("same-site", Val::Option(v)) => {
+                options.same_site = match v.as_deref() {
+                    Some(Val::Variant(name, _)) => SameSite::parse(name),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn string_option(value: &Option<Box<Val>>) -> Option<String> {
+    match value.as_deref() {
+        Some(Val::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn register_realtime_sockets(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
+    let mut iface = linker.instance("clean:http/realtime-sockets@0.1.0")?;
+
+    iface.func_new("deliver", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let id = match &args[0] {
+            Val::U64(id) => *id,
+            other => return Err(type_error("realtime-sockets.deliver: expected u64", other)),
+        };
+        let payload = match &args[1] {
+            Val::List(items) => items
+                .iter()
+                .map(|v| match v {
+                    Val::U8(b) => Ok(*b),
+                    other => Err(type_error("realtime-sockets.deliver: expected u8", other)),
+                })
+                .collect::<wasmtime::Result<Vec<u8>>>()?,
+            other => {
+                return Err(type_error(
+                    "realtime-sockets.deliver: expected list<u8>",
+                    other,
+                ))
+            }
+        };
+
+        let registry = registry_of(&ex)?;
+        results[0] = envelope_socket_result(registry.send_socket(id, Outbound::Binary(payload)));
+        Ok(())
+    })?;
+
+    iface.func_new("close", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let (id, code, reason) = match (&args[0], &args[1], &args[2]) {
+            (Val::U64(id), Val::U16(code), Val::String(r)) => (*id, *code, r.clone()),
+            other => {
+                return Err(wasmtime::Error::msg(format!(
+                    "realtime-sockets.close: expected (u64, u16, string), got {other:?}"
+                )))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        results[0] =
+            envelope_socket_result(registry.send_socket(id, Outbound::Close { code, reason }));
+        Ok(())
+    })?;
+
+    iface.func_new("queued-bytes", |mut store, _ty, args, results| {
+        let ex = exchange(store.data_mut())?;
+        let id = match &args[0] {
+            Val::U64(id) => *id,
+            other => {
+                return Err(type_error(
+                    "realtime-sockets.queued-bytes: expected u64",
+                    other,
+                ))
+            }
+        };
+        let registry = registry_of(&ex)?;
+        results[0] = Val::U64(registry.queued_bytes(id));
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// The realtime envelope's error variant omits `not-an-upgrade`, which is
+/// meaningless to a caller that never saw the request.
+fn envelope_socket_result(outcome: Result<(), SocketError>) -> Val {
+    match outcome {
+        Ok(()) => Val::Result(Ok(None)),
+        Err(SocketError::SocketSlow) => Val::Result(Err(Some(Box::new(Val::Variant(
+            "socket-slow".into(),
+            None,
+        ))))),
+        Err(_) => Val::Result(Err(Some(Box::new(Val::Variant("closed".into(), None))))),
+    }
 }
 
 /// The live-connection registry for the in-flight request.

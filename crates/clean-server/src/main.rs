@@ -4,6 +4,7 @@
 //! (§1.11). See `PLAN.md` for the build order and `host.wit` for the contract.
 
 mod config;
+mod envelope;
 mod guest;
 mod listener;
 mod routing;

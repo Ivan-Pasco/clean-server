@@ -1,0 +1,18 @@
+package clean:fake-bridge@0.1.0;
+
+/// A deliberately minimal counter store.
+///
+/// The real session bridge models sessions as a WIT `resource` with async
+/// methods (session-bridge schema §3). This fixture does NOT reproduce that:
+/// its purpose is to prove clean-host-core's discovery, validation and WAC
+/// composition path against a real component, not to stand in for a session
+/// backend. A hand-written approximation of the real interface would encode
+/// guesses the actual bridge repo will contradict.
+interface store {
+    /// Increment and return the counter.
+    bump: func() -> u32;
+}
+
+world fake-bridge {
+    export store;
+}

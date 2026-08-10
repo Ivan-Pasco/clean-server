@@ -19,7 +19,7 @@ use crate::sockets::Registry;
 /// Everything the request loop needs, assembled once at startup.
 pub struct Runtime {
     pub host: Host,
-    pub server: ServerConfig,
+    pub server: std::sync::Arc<ServerConfig>,
     pub router: Router,
     /// Live WebSocket and SSE connections.
     pub sockets: Registry,
@@ -39,14 +39,19 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
     let server = ServerConfig::from_host_config(&host_config)?;
     let instances_max = host_config.runtime.instances_max;
     let sockets = Registry::new(server.socket_queue_max);
-    let host = build_host(host_config, server.request_timeout)?;
+    let request_timeout = server.request_timeout;
+    let mount = server.mount.clone();
+    let host = build_host(host_config, request_timeout)?;
 
     // Composition must happen before the guest can be asked for its routes.
     host.compose()?;
+    for warning in host.warnings() {
+        tracing::warn!(target: "clean_server::compose", "{warning}");
+    }
     host.emit_manifest()?;
 
     let routes = collect_routes(&host)?;
-    let router = Router::new(routes, &server.mount);
+    let router = Router::new(routes, &mount);
     for (method, pattern, handler) in router.patterns() {
         tracing::info!(
             target: "clean_server::startup",
@@ -68,7 +73,7 @@ pub fn boot(config_path: &std::path::Path) -> anyhow::Result<Runtime> {
 
     Ok(Runtime {
         host,
-        server,
+        server: std::sync::Arc::new(server),
         router,
         sockets,
         instances_max,

@@ -12,15 +12,15 @@
 // a hard failure — the correct response to an unimplemented interface is to
 // omit it from this file.
 //
-// SCOPE: routing, request, response, websocket, and sse — the interfaces
-// clean-server actually implements today. The remainder of the
-// `clean:host/server@0.1` world (the session and realtime envelopes, admin)
-// lands in Phase 3–4 and is added here as each is implemented, never before.
+// SCOPE: the interfaces clean-server actually implements today — the HTTP
+// surface (routing, request, response, websocket, sse) plus the two host-side
+// envelopes (session/http-envelope, realtime/sockets). `clean:host/admin` lands
+// in Phase 4 and is added here when it is implemented, never before.
 //
-// In particular `clean:realtime/sockets` is NOT declared yet: it exists so the
-// realtime bridge can call back into the host, and bridge composition is
-// Phase 3. Declaring an interface with no reachable caller is what HCV-06
-// exists to prevent.
+// The envelopes are declared in this package rather than in clean:session /
+// clean:realtime because host.wit describes what THIS host provides. The
+// canonical vocabulary lives in the bridge specs; these declarations must stay
+// signature-identical to them (HCV-03).
 
 package clean:http@0.1.0;
 
@@ -174,6 +174,76 @@ interface sse {
     close: func(handle: u64) -> result<_, stream-error>;
 }
 
+/// Host-side session envelope (§1.5.1).
+///
+/// Cookies and CSRF can only be handled by whatever holds the unflushed
+/// response, so the host implements this while the session *store* comes from
+/// a composed bridge. Mirrors `clean:session/http-envelope` in the
+/// session-bridge schema.
+interface session-envelope {
+    variant envelope-error {
+        /// Called outside an HTTP request context.
+        no-active-request,
+        /// Response headers were already flushed.
+        header-locked,
+        invalid-cookie-name,
+        invalid-cookie-value,
+    }
+
+    variant same-site { strict, lax, none }
+
+    record cookie-options {
+        path:         option<string>,
+        domain:       option<string>,
+        max-age-secs: option<u32>,
+        http-only:    bool,
+        secure:       bool,
+        same-site:    option<same-site>,
+    }
+
+    /// Emit a Set-Cookie header on the current response.
+    ///
+    /// The server applies its own floors regardless of what is passed:
+    /// HttpOnly is always set, and Secure follows `[server] cookie-secure`.
+    set-cookie: func(name: string, value: string, options: cookie-options)
+        -> result<_, envelope-error>;
+
+    /// Bind a CSRF token to the active session.
+    set-csrf: func(token: string) -> result<_, envelope-error>;
+
+    /// Read the CSRF token for the active session, if any.
+    get-csrf: func() -> option<string>;
+
+    /// Read a cookie off the current request.
+    read-cookie: func(name: string) -> option<string>;
+}
+
+/// Host-side realtime envelope (§1.5.2).
+///
+/// How a caller hands bytes to a live connection the host owns. Mirrors
+/// `clean:realtime/sockets` in the realtime-bridge schema; the realtime bridge
+/// imports this so it can fan out to sockets it does not itself hold.
+interface realtime-sockets {
+    variant socket-error {
+        /// The per-socket outbound queue is full.
+        socket-slow,
+        /// The socket is no longer open.
+        closed,
+    }
+
+    /// Write to a live socket, identified by subscriber id.
+    ///
+    /// Non-blocking: returns `socket-slow` rather than waiting, so a slow
+    /// subscriber cannot stall the caller.
+    deliver: func(socket: u64, payload: list<u8>) -> result<_, socket-error>;
+
+    /// Force-close a live socket.
+    close: func(socket: u64, code: u16, reason: string) -> result<_, socket-error>;
+
+    /// Approximate outgoing queue depth, for backpressure decisions.
+    queued-bytes: func(socket: u64) -> u64;
+}
+
 /// The world clean-server fulfills.
 ///
 /// The server exports the HTTP surface it owns (§1.3.1) and imports the
@@ -186,6 +256,8 @@ world server {
     export response;
     export websocket;
     export sse;
+    export session-envelope;
+    export realtime-sockets;
 
     /// Invoked once at startup so the guest can register its routes.
     import init: func();

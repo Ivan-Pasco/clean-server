@@ -81,9 +81,22 @@ impl Server {
     }
 
     /// Start with explicit `[runtime]` and `[server]` blocks.
+    ///
+    /// The acceptance guest imports the composition-test bridge, so unless the
+    /// caller supplies its own `[bridges]` block one is added — otherwise
+    /// SRVH-01 would refuse startup for every suite.
     pub fn start_full(runtime_block: &str, server_block: &str) -> Option<Self> {
         let guest = guest_wasm()?;
         let port = free_port();
+        let bridge = repo_root().join("testing/fake-bridge/bridge.wasm");
+        let bridges = if server_block.contains("[bridges]") || !bridge.exists() {
+            String::new()
+        } else {
+            format!(
+                "[bridges]\n\"clean:fake-bridge/store\" = \"{}\"\n",
+                bridge.display()
+            )
+        };
 
         // `listen` must come from us, so strip any the caller supplied and
         // append ours after their keys.
@@ -109,6 +122,7 @@ world = "clean:host/server@0.1"
 [runtime]
 {runtime_block}
 
+{bridges}
 {server_block}
 listen = "127.0.0.1:{port}"
 "#,
@@ -118,10 +132,39 @@ listen = "127.0.0.1:{port}"
         Some(Self::spawn(config, port, None))
     }
 
+    /// Start with the composition-test bridge composed.
+    ///
+    /// The acceptance guest imports `clean:fake-bridge/store`, so every server
+    /// that runs it needs this bridge configured or SRVH-01 refuses startup.
+    pub fn start_composed() -> Option<Self> {
+        let bridge = repo_root().join("testing/fake-bridge/bridge.wasm");
+        if !bridge.exists() {
+            eprintln!("skipping: run testing/fake-bridge/build.sh");
+            return None;
+        }
+        Self::start_full(
+            "instances-min = 1\ninstances-max = 4",
+            &format!(
+                "[bridges]\n\"clean:fake-bridge/store\" = \"{}\"\n\n[server]",
+                bridge.display()
+            ),
+        )
+    }
+
     /// Start with TLS enabled, using a freshly generated self-signed cert.
     pub fn start_tls() -> Option<Self> {
         let guest = guest_wasm()?;
         let port = free_port();
+
+        let bridge_path = repo_root().join("testing/fake-bridge/bridge.wasm");
+        let bridges = if bridge_path.exists() {
+            format!(
+                "[bridges]\n\"clean:fake-bridge/store\" = \"{}\"\n",
+                bridge_path.display()
+            )
+        } else {
+            String::new()
+        };
 
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -148,6 +191,7 @@ world = "clean:host/server@0.1"
 instances-min = 1
 instances-max = 4
 
+{bridges}
 [server]
 listen   = "127.0.0.1:{port}"
 tls      = "tls"
@@ -227,6 +271,17 @@ tls-key  = "{}"
         path: &str,
         body: &[u8],
     ) -> (u16, Vec<(String, String)>, String) {
+        self.request_with_headers(method, path, body, &[])
+    }
+
+    /// Issue a request with extra headers.
+    pub fn request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> (u16, Vec<(String, String)>, String) {
         let mut stream = TcpStream::connect(self.addr()).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(15)))
@@ -235,6 +290,9 @@ tls-key  = "{}"
         let mut request =
             format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n")
                 .into_bytes();
+        for (name, value) in headers {
+            request.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
         if !body.is_empty() {
             request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
         }

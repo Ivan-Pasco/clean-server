@@ -4,8 +4,7 @@
 # on http://127.0.0.1:3000/.
 #
 # [host], [guest], and [runtime] are owned by clean-host-core (CLNH-11);
-# [server] is owned by clean-server. There is no [bridges] block — M0 composes
-# zero bridges, and configuring one is a startup error until Phase 3.
+# [bridges] too. [server] is owned by clean-server.
 
 [host]
 name            = "clean-server"
@@ -22,6 +21,11 @@ world = "clean:host/server@0.1"
 # Small pool: the fixture exists to prove the path works, not to be fast.
 instances-min = 1
 instances-max = 4
+
+[bridges]
+# Composed into the guest at startup. The guest imports this interface, so
+# per SRVH-01/02 the server refuses to start when this entry is absent.
+"clean:fake-bridge/store" = "../../fake-bridge/bridge.wasm"
 
 [server]
 listen = "127.0.0.1:3000"

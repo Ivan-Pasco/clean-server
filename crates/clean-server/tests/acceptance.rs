@@ -110,10 +110,11 @@ world = "clean:host/server@0.1"
 }
 
 #[test]
-fn a_configured_bridge_is_refused_rather_than_ignored() {
-    // Bridge composition is Phase 3. Until then a [bridges] entry must fail
-    // loudly — silently ignoring it would mean a guest importing that
-    // capability fails much later, in a much more confusing place (CH-05).
+fn a_bridge_pointing_at_a_missing_file_names_the_config_key() {
+    // Phase 3 composes bridges, so a `[bridges]` entry is no longer refused
+    // outright — but a path that does not resolve is still a startup error,
+    // and the diagnostic must name the key so the operator can fix the line
+    // rather than guess which of several bridges is wrong (CLNH-18).
     let Some(guest) = guest_wasm() else {
         return;
     };
@@ -131,12 +132,12 @@ component-model = "0.3.0"
 deployment-mode = "development"
 
 [guest]
-name  = "hello-world"
+name  = "acceptance"
 wasm  = "{}"
 world = "clean:host/server@0.1"
 
 [bridges]
-"clean:session/store" = "./session.wasm"
+"clean:session/store" = "./nowhere.wasm"
 "#,
             guest.display()
         ),
@@ -151,7 +152,8 @@ world = "clean:host/server@0.1"
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Phase 3"), "{stderr}");
+    assert!(stderr.contains("[bridges]"), "{stderr}");
+    assert!(stderr.contains("clean:session/store"), "{stderr}");
 }
 
 #[test]
