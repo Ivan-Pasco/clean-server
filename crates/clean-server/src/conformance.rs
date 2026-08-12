@@ -282,7 +282,7 @@ mod tests {
     }
 
     const WIT: &str = r#"
-package clean:http@0.1.0;
+package clean:host@0.1.0;
 
 interface routing {
     register: func(path: string);
@@ -319,8 +319,8 @@ world server {
         let report = run(
             &wit,
             &[
-                real("clean:http/routing@0.1.0"),
-                real("clean:http/request@0.1.0"),
+                real("clean:host/routing@0.1.0"),
+                real("clean:host/request@0.1.0"),
             ],
             &corpus,
         );
@@ -339,7 +339,7 @@ world server {
         // time, which is precisely what CMOD-03 check 3 asks about.
         let (_d, wit) = wit_file(WIT);
         let (_c, corpus) = empty_corpus();
-        let report = run(&wit, &[real("clean:http/routing@0.1.0")], &corpus);
+        let report = run(&wit, &[real("clean:host/routing@0.1.0")], &corpus);
 
         let check = &report.checks[2];
         assert!(matches!(check.outcome, CheckOutcome::Fail(_)));
@@ -355,8 +355,8 @@ world server {
         let report = run(
             &wit,
             &[
-                real("clean:http/routing@0.1.0"),
-                real("clean:http/request@0.1.0"),
+                real("clean:host/routing@0.1.0"),
+                real("clean:host/request@0.1.0"),
                 real("clean:secret/backdoor@0.1.0"),
             ],
             &corpus,
@@ -375,8 +375,8 @@ world server {
         let report = run(
             &wit,
             &[
-                real("clean:http/routing@0.1.0"),
-                real("clean:http/request@0.1.0"),
+                real("clean:host/routing@0.1.0"),
+                real("clean:host/request@0.1.0"),
             ],
             &corpus,
         );
@@ -398,8 +398,8 @@ world server {
         let report = run(
             &wit,
             &[
-                real("clean:http/routing@0.1.0"),
-                real("clean:http/request@0.1.0"),
+                real("clean:host/routing@0.1.0"),
+                real("clean:host/request@0.1.0"),
             ],
             &corpus,
         );
@@ -444,8 +444,8 @@ world server {
         let report = run(
             &wit,
             &[
-                real("clean:http/routing@0.1.0"),
-                real("clean:http/request@0.1.0"),
+                real("clean:host/routing@0.1.0"),
+                real("clean:host/request@0.1.0"),
             ],
             &corpus,
         );

@@ -175,7 +175,7 @@ fn a_custom_metrics_path_is_honoured() {
 
 #[test]
 fn a_guest_log_record_reaches_the_host_log() {
-    // `/log` emits one structured record through clean:http/log.
+    // `/log` emits one structured record through clean:host/log.
     let Some(server) = Server::start_composed() else {
         return;
     };

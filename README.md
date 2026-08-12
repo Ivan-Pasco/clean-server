@@ -138,7 +138,7 @@ HTTP/1.1 client.
 It serves five routes covering every interface: `GET /`, `GET /users/:id`,
 `GET /events` (SSE), `GET /ws` (WebSocket), and `POST /echo`.
 The installed compiler (cln 0.33.154) emits core wasm modules rather than
-components and generates no `clean:http/*` imports, so it cannot yet build a
+components and generates no `clean:host/*` imports, so it cannot yet build a
 guest for the server world. The fixture imports the same interfaces `host.wit`
 declares, so it functions as a contract test and will be replaced by a real
 `cln build` output once the compiler emits components.
@@ -149,7 +149,7 @@ declares, so it functions as a contract test and will be replaced by a real
 host.wit                          the published contract (HCV-02)
 crates/clean-server/              the binary
   src/config.rs                   the [server] block
-  src/guest.rs                    clean:http/* Linker registration
+  src/guest.rs                    clean:host/* Linker registration
   src/routing.rs                  route matching, params, wildcards
   src/startup.rs                  Host construction, compose, dispatch
   src/listener.rs                 hyper listener, TLS, protocol select

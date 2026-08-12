@@ -4,8 +4,8 @@
 ;;
 ;; Acceptance calls for a guest built from Clean source. The installed compiler
 ;; (cln 0.33.154) emits core wasm MODULES, not Component Model components, and
-;; generates no clean:http/* imports, so it cannot yet produce a guest for the
-;; `clean:host/server@0.1` world. This module stands in until it can.
+;; generates no clean:host/* imports, so it cannot yet produce a guest for the
+;; `server` world of `clean:host@0.1.0`. This module stands in until it can.
 ;;
 ;; It is deliberately written against the published contract: `wit/guest.wit`
 ;; imports the same interfaces `../../host.wit` declares (symlinked into
@@ -23,35 +23,35 @@
 ;;   GET  /counter     handler 5  -> 200, one ASCII digit from the composed
 ;;                                  bridge (proves composition actually wired)
 ;;   GET  /log         handler 6  -> 200, after emitting a structured record
-;;                                  through clean:http/log
+;;                                  through clean:host/log
 
 (module
   ;; Canonical ABI: imports are "<interface-name>" / "<func-name>", lowered to
   ;; core signatures — strings become (ptr, len) pairs, and any return value
   ;; larger than one scalar is written to a caller-supplied return area.
-  (import "clean:http/routing@0.1.0" "register"
+  (import "clean:host/routing@0.1.0" "register"
     (func $register (param i32 i32 i32 i32 i32)))
-  (import "clean:http/request@0.1.0" "get-body"
+  (import "clean:host/request@0.1.0" "get-body"
     (func $get-body (param i32)))
-  (import "clean:http/request@0.1.0" "get-param"
+  (import "clean:host/request@0.1.0" "get-param"
     (func $get-param (param i32 i32 i32)))
-  (import "clean:http/response@0.1.0" "set-status"
+  (import "clean:host/response@0.1.0" "set-status"
     (func $set-status (param i32)))
-  (import "clean:http/response@0.1.0" "add-header"
+  (import "clean:host/response@0.1.0" "add-header"
     (func $add-header (param i32 i32 i32 i32)))
-  (import "clean:http/response@0.1.0" "set-body"
+  (import "clean:host/response@0.1.0" "set-body"
     (func $set-body (param i32 i32)))
-  (import "clean:http/websocket@0.1.0" "accept"
+  (import "clean:host/websocket@0.1.0" "accept"
     (func $ws-accept (param i32)))
-  (import "clean:http/websocket@0.1.0" "send-text"
+  (import "clean:host/websocket@0.1.0" "send-text"
     (func $ws-send-text (param i64 i32 i32 i32)))
-  (import "clean:http/sse@0.1.0" "start"
+  (import "clean:host/sse@0.1.0" "start"
     (func $sse-start (param i32)))
-  (import "clean:http/sse@0.1.0" "send"
+  (import "clean:host/sse@0.1.0" "send"
     (func $sse-send (param i64 i32 i32 i32 i32 i32 i32 i32)))
-  (import "clean:http/sse@0.1.0" "close"
+  (import "clean:host/sse@0.1.0" "close"
     (func $sse-close (param i64 i32)))
-  (import "clean:http/log@0.1.0" "emit"
+  (import "clean:host/log@0.1.0" "emit"
     (func $log-emit (param i32 i32 i32 i32 i32)))
   ;; Composed bridge (Phase 3). Present only when host.toml configures it.
   (import "clean:fake-bridge/store@0.1.0" "bump"

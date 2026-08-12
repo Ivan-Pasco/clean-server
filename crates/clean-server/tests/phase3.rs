@@ -38,7 +38,7 @@ deployment-mode = "development"
 [guest]
 name  = "acceptance"
 wasm  = "{}"
-world = "clean:host/server@0.1"
+world = "server"
 
 [runtime]
 instances-min = 1

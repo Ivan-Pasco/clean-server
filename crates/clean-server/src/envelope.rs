@@ -9,7 +9,7 @@
 //! `clean:session/http-envelope` — cookies and CSRF.
 //! `clean:realtime/sockets`      — delivery to a live connection.
 //!
-//! Both are registered into the wasmtime `Linker` alongside the `clean:http/*`
+//! Both are registered into the wasmtime `Linker` alongside the `clean:host/*`
 //! surface, and both appear in `host.wit` because the server really implements
 //! them.
 
@@ -279,7 +279,7 @@ deployment-mode = "development"
 [guest]
 name = "app"
 wasm = "./app.wasm"
-world = "clean:host/server@0.1"
+world = "server"
 
 {block}
 "#

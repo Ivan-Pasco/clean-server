@@ -46,7 +46,7 @@ deployment-mode = "production"
 [guest]
 name = "acceptance"
 wasm = "$GUEST"
-world = "clean:host/server@0.1"
+world = "server"
 
 [runtime]
 # A pool deep enough that checkout is never the bottleneck; the point is to

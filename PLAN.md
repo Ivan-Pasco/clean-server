@@ -6,7 +6,7 @@ Server's job, one sentence: **own the HTTP surface — listener, request parsing
 
 Because the specs put so much weight on the "concrete host is thin, shared library is fat" split (host model §3, clean-host-core §1), **the biggest architectural decision on day one is where `clean-host-core` lives** — same repo, sibling repo, or vendored. That decision shapes the plan and is called out in §9 open questions with a proposal.
 
-M0 target: **`clean-server` binary implementing the `clean:host/server@0.1` world, serving one HTTP endpoint from a compiled Clean guest.** Bridges compose from `host.toml`; sessions/data/kv/jobs/mail/realtime are stub or in-process backends in M0. Production backends (Redis session, Postgres data, etc.) land in M1+.
+M0 target: **`clean-server` binary implementing the `server` world of `clean:host@0.1.0`, serving one HTTP endpoint from a compiled Clean guest.** Bridges compose from `host.toml`; sessions/data/kv/jobs/mail/realtime are stub or in-process backends in M0. Production backends (Redis session, Postgres data, etc.) land in M1+.
 
 ---
 
@@ -59,8 +59,8 @@ clean-server/
 │   │       ├── listener.rs             # TCP accept loop, TLS termination, HTTP/1 + HTTP/2 protocol select
 │   │       ├── request_loop.rs         # per-connection request handling (server §1.4.2 steps 1–7)
 │   │       ├── routing.rs              # path + method matching against guest-registered routes
-│   │       ├── request_marshal.rs      # HTTP request → clean:http/request WIT record
-│   │       ├── response_marshal.rs     # clean:http/response WIT record → HTTP response bytes
+│   │       ├── request_marshal.rs      # HTTP request → clean:host/request WIT record
+│   │       ├── response_marshal.rs     # clean:host/response WIT record → HTTP response bytes
 │   │       ├── websocket.rs            # WebSocket upgrade + per-socket outbound queue (server §1.4)
 │   │       ├── sse.rs                  # SSE response initiation + keep-alive framing
 │   │       ├── errors.rs               # trap → structured log + optional forward to errors.cleanlanguage.dev
@@ -118,7 +118,7 @@ clean-server/
 
 | Spec section | Module |
 |---|---|
-| §1.3 world implementation (clean:http/routing, request, response, websocket, sse) | `clean-server::routing`, `request_marshal`, `response_marshal`, `websocket`, `sse` |
+| §1.3 world implementation (clean:host/routing, request, response, websocket, sse) | `clean-server::routing`, `request_marshal`, `response_marshal`, `websocket`, `sse` |
 | §1.4 HTTP listener + request flow | `clean-server::listener`, `request_loop` |
 | §1.5 envelope impls | `server-envelope` |
 | §1.6 [server] config block | `clean-server::config` |
@@ -163,7 +163,7 @@ Every other surface (internal crate APIs, module boundaries) is unstable and can
 
 - Cargo workspace per §2. `clean-server` binary compiles, prints `--version`, exits.
 - `Cargo.toml` depends on `clean-host-core` and `clean-host-core-wasmtime` at pinned versions (or path deps to a sibling repo, depending on §9 outcome).
-- `host.wit` at repo root — minimal skeleton declaring `clean:host/server@0.1` with just `clean:http/routing`, `request`, `response` (no bridges, no websocket, no sse yet).
+- `host.wit` at repo root — minimal skeleton declaring the `server` world of `clean:host@0.1.0` with just `clean:host/routing`, `request`, `response` (no bridges, no websocket, no sse yet).
 - CI job that runs `clean-host-core`'s parity-check tool against `host.wit`. Fails until we implement the WIT-declared interfaces.
 
 **Phase 1 — Hello-world HTTP.** *M0 milestone target.*
@@ -172,14 +172,14 @@ Every other surface (internal crate APIs, module boundaries) is unstable and can
 - `clean-server::startup` constructs `clean-host-core::Host`, calls `compose()` — no bridges yet, just a bare guest with WASI + `clean:host/*`.
 - `clean-server::listener` binds on `[server] listen` (default `127.0.0.1:3000`), accepts HTTP/1.1 (no TLS yet).
 - `clean-server::request_loop` per §1.4.2 steps 1–7: parse, route (via a stub routing table — one hardcoded `GET /` for M0), checkout instance, invoke guest handler, marshal response.
-- `clean-server::request_marshal` + `response_marshal` — minimal `clean:http/request` and `clean:http/response` mapping (method, path, headers, body).
+- `clean-server::request_marshal` + `response_marshal` — minimal `clean:host/request` and `clean:host/response` mapping (method, path, headers, body).
 - SIGTERM → `Host::shutdown(30s)`.
 
 **M0 acceptance:** compile a Clean guest that exports a `GET /` handler returning "hello world", write a `host.toml`, run `clean-server host.toml`, curl `http://127.0.0.1:3000/`, see "hello world". Bridges: none composed. Reload: unimplemented.
 
 **Phase 2 — Real routing + TLS + full HTTP surface.**
 
-- Dynamic routing table populated from guest's `clean:http/routing` registrations at startup (guests declare routes; server matches them).
+- Dynamic routing table populated from guest's `clean:host/routing` registrations at startup (guests declare routes; server matches them).
 - TLS termination via `[server] tls` config (`rustls`).
 - HTTP/2 via `hyper` protocol negotiation.
 - WebSocket upgrade + `server-envelope::realtime_sockets` (implements the envelope but no realtime bridge composed yet — envelope calls just enqueue to per-connection buffers that the connection handler drains).
@@ -260,7 +260,7 @@ Explicit non-goals: TLS, WebSocket, SSE, any bridge, reload, admin API, metrics.
 Deliverables:
 - Phase 2 complete: TLS, HTTP/2, WebSocket, SSE, dynamic routing.
 - Phase 3 complete: envelope impls + all six standard bridges compose (with stub backends).
-- `host.wit` extended to full `clean:host/server@0.1` world. CI parity check passes.
+- `host.wit` extended to full `server` world of `clean:host@0.1.0`. CI parity check passes.
 - Layer B test suite covering every WIT interface.
 
 **M2 — Reload + observability + conformance.** *~4 weeks after M1.*
@@ -308,7 +308,7 @@ Answers proposed; confirm before Phase 0 (item #1) and Phase 3 (rest).
 
 3. **Guest wasm location under `cln run`.** `.clapp` and `.serve` bundles carry `app.wasm` / `wasm/server.wasm`. Manager extracts them to `~/.cln/cache/run/<sha>/`. Proposal: manager rewrites `[guest] wasm = "..."` in the extracted `host.toml` to point at the absolute path in the cache directory before launching server. Confirms server doesn't need archive-awareness.
 
-4. **Version of the `clean:host/server` world server ships.** Spec says `@0.1` (server §1.3). Proposal: pin exactly that in `host.wit` at repo root; bump per Platform 08. M0 declares only a subset (routing, request, response); Phase 3 fills in the rest.
+4. **Version of the `server` world clean-server ships.** Spec says `@0.1` (server §1.3). Proposal: pin exactly that in `host.wit` at repo root; bump per Platform 08. M0 declares only a subset (routing, request, response); Phase 3 fills in the rest.
 
 5. **Which bridges are shipped as stub in-process implementations for tests?** Real bridge impls live in separate repos and land at M3+. For M1/M2 testing, proposal: `testing/fake-bridge/` ships one canned implementation of each of the six standard interfaces (session, data, kv, jobs, mail, realtime), all in-memory, all zero-config. Not production; test-only. Confirm scope is one-per-interface, not multiple backends per.
 

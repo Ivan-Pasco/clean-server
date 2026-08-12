@@ -1,6 +1,6 @@
 //! Route matching (§1.4.2 step 2).
 //!
-//! Routes come from the guest: it calls `clean:http/routing.register` during
+//! Routes come from the guest: it calls `clean:host/routing.register` during
 //! `init`, and the server matches incoming requests against what it registered.
 //!
 //! Patterns support three segment kinds:

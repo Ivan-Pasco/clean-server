@@ -136,7 +136,7 @@ deployment-mode = "development"
 [guest]
 name = "app"
 wasm = "./app.wasm"
-world = "clean:host/server@0.1"
+world = "server"
 
 {block}
 "#

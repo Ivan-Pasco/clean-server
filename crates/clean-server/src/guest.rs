@@ -1,4 +1,4 @@
-//! Wiring the `clean:http/*` interfaces into the wasmtime `Linker`, and
+//! Wiring the `clean:host/*` interfaces into the wasmtime `Linker`, and
 //! invoking the guest.
 //!
 //! This is the server's half of the host contract: `host.wit` declares these
@@ -113,9 +113,9 @@ pub fn registered_interfaces() -> Vec<Registration> {
 
 /// Interface name → the functions it declares in `host.wit`.
 const INTERFACES: &[(&str, &[&str])] = &[
-    ("clean:http/routing@0.1.0", &["register"]),
+    ("clean:host/routing@0.1.0", &["register"]),
     (
-        "clean:http/request@0.1.0",
+        "clean:host/request@0.1.0",
         &[
             "get-parts",
             "get-headers",
@@ -126,11 +126,11 @@ const INTERFACES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "clean:http/response@0.1.0",
+        "clean:host/response@0.1.0",
         &["set-status", "add-header", "set-body"],
     ),
     (
-        "clean:http/websocket@0.1.0",
+        "clean:host/websocket@0.1.0",
         &[
             "accept",
             "send-text",
@@ -140,21 +140,21 @@ const INTERFACES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "clean:http/sse@0.1.0",
+        "clean:host/sse@0.1.0",
         &["start", "send", "set-retry", "close"],
     ),
     (
-        "clean:http/session-envelope@0.1.0",
+        "clean:host/session-envelope@0.1.0",
         &["set-cookie", "set-csrf", "get-csrf", "read-cookie"],
     ),
     (
-        "clean:http/realtime-sockets@0.1.0",
+        "clean:host/realtime-sockets@0.1.0",
         &["deliver", "close", "queued-bytes"],
     ),
-    ("clean:http/log@0.1.0", &["emit"]),
+    ("clean:host/log@0.1.0", &["emit"]),
 ];
 
-/// Register every `clean:http/*` interface into the linker.
+/// Register every `clean:host/*` interface into the linker.
 ///
 /// The exchange is read and written through `StoreState::host_context`, which
 /// the request loop populates per request.
@@ -175,7 +175,7 @@ pub fn register(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
 /// Routed into `tracing` so guest output interleaves with the server's own
 /// request logs rather than racing them on the same file descriptor.
 fn register_log(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/log@0.1.0")?;
+    let mut iface = linker.instance("clean:host/log@0.1.0")?;
 
     iface.func_new("emit", |mut store, _ty, args, _results| {
         let level = match &args[0] {
@@ -257,7 +257,7 @@ fn type_error(what: &str, got: &Val) -> wasmtime::Error {
 }
 
 fn register_routing(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/routing@0.1.0")?;
+    let mut iface = linker.instance("clean:host/routing@0.1.0")?;
 
     iface.func_new("register", |mut store, _ty, args, _results| {
         let ex = exchange(store.data_mut())?;
@@ -308,7 +308,7 @@ fn register_routing(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
 }
 
 fn register_request(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/request@0.1.0")?;
+    let mut iface = linker.instance("clean:host/request@0.1.0")?;
 
     iface.func_new("get-parts", |mut store, _ty, _args, results| {
         let ex = exchange(store.data_mut())?;
@@ -408,7 +408,7 @@ fn register_request(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
 }
 
 fn register_websocket(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/websocket@0.1.0")?;
+    let mut iface = linker.instance("clean:host/websocket@0.1.0")?;
 
     iface.func_new("accept", |mut store, _ty, _args, results| {
         let ex = exchange(store.data_mut())?;
@@ -516,7 +516,7 @@ fn register_websocket(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
 }
 
 fn register_sse(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/sse@0.1.0")?;
+    let mut iface = linker.instance("clean:host/sse@0.1.0")?;
 
     iface.func_new("start", |mut store, _ty, _args, results| {
         let ex = exchange(store.data_mut())?;
@@ -607,7 +607,7 @@ fn register_sse(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
 }
 
 fn register_session_envelope(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/session-envelope@0.1.0")?;
+    let mut iface = linker.instance("clean:host/session-envelope@0.1.0")?;
 
     iface.func_new("set-cookie", |mut store, _ty, args, results| {
         let ex = exchange(store.data_mut())?;
@@ -779,7 +779,7 @@ fn string_option(value: &Option<Box<Val>>) -> Option<String> {
 }
 
 fn register_realtime_sockets(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/realtime-sockets@0.1.0")?;
+    let mut iface = linker.instance("clean:host/realtime-sockets@0.1.0")?;
 
     iface.func_new("deliver", |mut store, _ty, args, results| {
         let ex = exchange(store.data_mut())?;
@@ -874,7 +874,7 @@ fn stream_result(outcome: Result<(), SocketError>) -> Val {
 }
 
 fn register_response(linker: &mut Linker<StoreState>) -> anyhow::Result<()> {
-    let mut iface = linker.instance("clean:http/response@0.1.0")?;
+    let mut iface = linker.instance("clean:host/response@0.1.0")?;
 
     iface.func_new("set-status", |mut store, _ty, args, _results| {
         let ex = exchange(store.data_mut())?;
@@ -928,11 +928,11 @@ mod tests {
         assert!(regs.iter().all(|r| r.kind == RegistrationKind::Real));
 
         let names: Vec<_> = regs.iter().map(|r| r.interface.as_str()).collect();
-        assert!(names.contains(&"clean:http/routing@0.1.0"));
-        assert!(names.contains(&"clean:http/request@0.1.0"));
-        assert!(names.contains(&"clean:http/response@0.1.0"));
-        assert!(names.contains(&"clean:http/websocket@0.1.0"));
-        assert!(names.contains(&"clean:http/sse@0.1.0"));
+        assert!(names.contains(&"clean:host/routing@0.1.0"));
+        assert!(names.contains(&"clean:host/request@0.1.0"));
+        assert!(names.contains(&"clean:host/response@0.1.0"));
+        assert!(names.contains(&"clean:host/websocket@0.1.0"));
+        assert!(names.contains(&"clean:host/sse@0.1.0"));
     }
 
     #[test]

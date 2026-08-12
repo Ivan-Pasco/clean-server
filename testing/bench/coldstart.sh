@@ -38,7 +38,7 @@ deployment-mode = "production"
 [guest]
 name = "acceptance"
 wasm = "$GUEST"
-world = "clean:host/server@0.1"
+world = "server"
 
 [runtime]
 # The documented default shape, not a tuned one: cold start is dominated by

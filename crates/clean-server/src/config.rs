@@ -343,7 +343,7 @@ deployment-mode = "development"
 [guest]
 name = "app"
 wasm = "./app.wasm"
-world = "clean:host/server@0.1"
+world = "server"
 
 {server_block}
 "#
@@ -485,7 +485,7 @@ deployment-mode = "production"
 [guest]
 name = "app"
 wasm = "./app.wasm"
-world = "clean:host/server@0.1"
+world = "server"
 "#;
         let host = HostConfig::parse(text, "/srv/host.toml").unwrap();
         let err = ServerConfig::from_host_config(&host)

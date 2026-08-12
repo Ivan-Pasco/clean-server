@@ -22,7 +22,7 @@
 // canonical vocabulary lives in the bridge specs; these declarations must stay
 // signature-identical to them (HCV-03).
 
-package clean:http@0.1.0;
+package clean:host@0.1.0;
 
 /// Route registration. The guest declares which method/path pairs it handles;
 /// clean-server matches incoming requests against them.

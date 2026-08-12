@@ -92,7 +92,7 @@ deployment-mode = "development"
 [guest]
 name  = "missing"
 wasm  = "./does-not-exist.wasm"
-world = "clean:host/server@0.1"
+world = "server"
 "#,
     )
     .unwrap();
@@ -134,7 +134,7 @@ deployment-mode = "development"
 [guest]
 name  = "acceptance"
 wasm  = "{}"
-world = "clean:host/server@0.1"
+world = "server"
 
 [bridges]
 "clean:session/store" = "./nowhere.wasm"
