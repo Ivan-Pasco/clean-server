@@ -1,0 +1,14 @@
+package clean:demo@0.1.0;
+
+// A guest that serves real HTML pages over the same published contract the
+// acceptance fixture uses. It imports no bridge, so it runs against a plain
+// host.toml with no [bridges] section.
+world site {
+    import clean:host/routing@0.1.0;
+    import clean:host/request@0.1.0;
+    import clean:host/response@0.1.0;
+    import clean:host/log@0.1.0;
+
+    export init: func();
+    export handle: func(handler-id: u32);
+}
