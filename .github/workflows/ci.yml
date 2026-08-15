@@ -53,9 +53,13 @@ jobs:
         with:
           tool: wasm-tools
 
+      # Scoped to this package on purpose. `cargo fmt --all` follows the
+      # clean-host-core path dependency into that repo, so a formatting drift
+      # there would fail this repo's CI — a failure this repo cannot fix. Each
+      # repo formats itself.
       - name: fmt
         working-directory: clean-server
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p clean-server -- --check
 
       - name: clippy
         working-directory: clean-server

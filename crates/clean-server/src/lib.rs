@@ -9,6 +9,7 @@ pub mod admin;
 pub mod config;
 pub mod conformance;
 pub mod diagnostics;
+pub mod entrypoint;
 pub mod envelope;
 pub mod guest;
 pub mod listener;

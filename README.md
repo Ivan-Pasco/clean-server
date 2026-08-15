@@ -7,6 +7,11 @@ writing, and later WebSocket and SSE — and delegates everything else
 (composition, bridges, WASI, pooling, config parsing, capability manifest) to
 [`clean-host-core`](../clean-host-core/).
 
+End users do not invoke this binary directly. `cln run` dispatches to
+[`clean-runtime`](../clean-runtime/), the fat binary Clean Manager installs
+(Manager §00.13), which starts this host for `--world=server`. Both entry
+points call `clean_server::entrypoint::run`, so they cannot drift.
+
 Specification: `foundation/02 components/hosts/clean-server/01-server.md`.
 Build plan: [PLAN.md](PLAN.md).
 
