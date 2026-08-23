@@ -40,8 +40,13 @@ passes its path.
 
 ## `host.wit` is the contract
 
-[`host.wit`](host.wit) at the repo root is the authoritative declaration of what
-this host provides (HCV-02). The framework fetches it to validate projects at
+[`host.wit`](host.wit) at the repo root is this host's declaration artifact —
+*which* interfaces it provides (HCV-02). Its contract-interface text is a
+byte-verified copy from the contract owner,
+`clean-language-compiler/contracts/host.wit` (HCV-02 ownership, decided
+2026-08-23; drift test: `tests/contract_drift.rs`) — a contract change starts
+there and is propagated here deliberately, never edited here first. The
+framework fetches this file to validate projects at
 build time; `clean-server` compares a guest's embedded WIT against it before
 instantiating, refusing non-compliant guests with `COM017` rather than letting
 them trap.

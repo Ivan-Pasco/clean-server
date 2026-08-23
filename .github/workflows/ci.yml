@@ -18,10 +18,26 @@ jobs:
         # Linux + macOS in M0; Windows lands in M1 alongside the reload-socket
         # work (PLAN.md §8 question #8).
         os: [macos-14, ubuntu-latest]
+    env:
+      # The contract-drift leg (tests/contract_drift.rs) compares host.wit
+      # against its owner, cloned below. This flag turns the leg's local
+      # self-skip into a failure: a conformance test never self-skips in CI.
+      CLEAN_SPEC_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           path: clean-server
+
+      # The contract owner (HCV-02 ownership, foundation 16 §16.5, decided
+      # 2026-08-23): this repo's host.wit must be a byte-verified copy of
+      # clean-language-compiler/contracts/host.wit. Same read-only deploy-key
+      # discipline as clean-host-core below.
+      - name: check out clean-language-compiler (contract owner)
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan-Pasco/clean-language-compiler
+          path: clean-language-compiler
+          ssh-key: ${{ secrets.CLEAN_COMPILER_DEPLOY_KEY }}
 
       # clean-server depends on clean-host-core by path while both repos are
       # pre-1.0 (see the workspace Cargo.toml). CI must lay the sibling out the
