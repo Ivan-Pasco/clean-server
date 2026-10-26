@@ -5,3 +5,5 @@ testing/fake-guest/*-core.wasm
 testing/fake-guest/*-embedded.wasm
 host-capabilities.cln
 testing/**/host-capabilities.cln
+testing/demo-site/*-core.wasm
+testing/demo-site/*-embedded.wasm

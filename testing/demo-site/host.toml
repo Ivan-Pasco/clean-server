@@ -1,0 +1,24 @@
+# The demo site fixture.
+#
+# `clean-server testing/demo-site/host.toml` serves real HTML pages on
+# http://127.0.0.1:3100/. Unlike the acceptance fixture this guest imports no
+# bridge, so there is no [bridges] section.
+
+[host]
+name            = "clean-server"
+version         = "0.1.0"
+component-model = "0.3.0"
+deployment-mode = "development"
+
+[guest]
+name  = "demo-site"
+wasm  = "site.wasm"
+world = "server"
+
+[runtime]
+instances-min = 1
+instances-max = 4
+
+[server]
+listen       = "127.0.0.1:3100"
+metrics-path = "/_metrics"
